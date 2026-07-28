@@ -34,6 +34,7 @@ const PORT = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || 'omnicrawl-secret-key-12345';
 const WORKSPACE_ROOT = path.resolve(__dirname, '..', '..', '..');
 const STORAGE_ROOT = path.join(WORKSPACE_ROOT, 'storage');
+const BROWSER_ACTOR_NAMES = ['shopee-scraper', 'tiktok-scraper'];
 
 function appendRunLog(runId: string, message: string) {
   const logsDir = path.join(STORAGE_ROOT, 'logs');
@@ -545,10 +546,10 @@ app.post('/api/actors/:id/run', requireAuth, async (req: any, res: any) => {
     }
     const input = normalizeActorInput(actor.inputSchema, rawInput);
     if (
-      actor.name === 'shopee-scraper' &&
+      BROWSER_ACTOR_NAMES.includes(actor.name) &&
       (typeof input.keyword !== 'string' || !input.keyword.trim())
     ) {
-      return res.status(400).json({ error: 'Shopee keyword is required' });
+      return res.status(400).json({ error: 'Search keyword is required' });
     }
     const run = await prisma.$transaction(async (tx) => {
       const debit = await tx.user.updateMany({
@@ -587,7 +588,7 @@ app.post('/api/actors/:id/run', requireAuth, async (req: any, res: any) => {
     const queuedRun = await prisma.run.update({
       where: { id: run.id },
       data: {
-        status: actor.name === 'shopee-scraper' ? 'BROWSER_PENDING' : 'PENDING'
+        status: BROWSER_ACTOR_NAMES.includes(actor.name) ? 'BROWSER_PENDING' : 'PENDING'
       }
     });
 
@@ -611,7 +612,7 @@ app.get('/api/browser-agent/jobs/next', requireAuth, async (req: any, res: any) 
       where: {
         userId: req.user.id,
         status: 'BROWSER_PENDING',
-        actor: { name: 'shopee-scraper' }
+        actor: { name: { in: BROWSER_ACTOR_NAMES } }
       },
       orderBy: { createdAt: 'asc' },
       include: { actor: true }
@@ -633,19 +634,24 @@ app.get('/api/browser-agent/jobs/next', requireAuth, async (req: any, res: any) 
     const maxItems = Number.isFinite(maxItemsValue)
       ? Math.min(500, Math.max(1, Math.floor(maxItemsValue)))
       : 30;
+    const platform = candidate.actor.name === 'tiktok-scraper' ? 'tiktok' : 'shopee';
+    const platformLabel = platform === 'tiktok' ? 'TikTok' : 'Shopee';
+    const keyword = String(input.keyword || 'máy in 3d').trim() || 'máy in 3d';
+    const mode = platform === 'tiktok' && input.mode === 'videos' ? 'videos' : 'products';
     appendRunLog(
       candidate.id,
-      `[INFO] [BrowserAgent] Claimed Shopee job for keyword "${String(input.keyword || 'máy in 3d')}".`
+      `[INFO] [BrowserAgent] Claimed ${platformLabel} ${mode} job for keyword "${keyword}".`
     );
-    const keyword = String(input.keyword || 'máy in 3d').trim() || 'máy in 3d';
     const includeDetails = input.includeDetails !== false;
     const maxReviewsValue = Number(input.maxReviewsPerProduct ?? 20);
     const maxReviewsPerProduct = includeDetails && Number.isFinite(maxReviewsValue)
       ? Math.min(100, Math.max(0, Math.floor(maxReviewsValue)))
       : 0;
     await new Dataset(candidate.id).setMetadata({
-      source: 'shopee.vn',
-      query: { keyword, maxItems, includeDetails, maxReviewsPerProduct },
+      source: platform === 'tiktok' ? 'tiktok.com' : 'shopee.vn',
+      platform,
+      mode,
+      query: { keyword, mode, maxItems, includeDetails, maxReviewsPerProduct },
       detailProgress: {
         enabled: includeDetails,
         completed: 0,
@@ -655,6 +661,9 @@ app.get('/api/browser-agent/jobs/next', requireAuth, async (req: any, res: any) 
     });
     res.json({
       runId: candidate.id,
+      actorName: candidate.actor.name,
+      platform,
+      mode,
       keyword,
       maxItems,
       includeDetails,
@@ -672,9 +681,9 @@ app.post('/api/browser-agent/jobs/:id/items', requireAuth, async (req: any, res:
         id: req.params.id,
         userId: req.user.id,
         status: 'BROWSER_RUNNING',
-        actor: { name: 'shopee-scraper' }
+        actor: { name: { in: BROWSER_ACTOR_NAMES } }
       },
-      select: { id: true }
+      select: { id: true, actor: { select: { name: true } } }
     });
     if (!run) return res.status(404).json({ error: 'Active browser job not found' });
 
@@ -689,13 +698,32 @@ app.post('/api/browser-agent/jobs/:id/items', requireAuth, async (req: any, res:
       };
       safeItems.push({
         itemId: String(item.itemId || '').slice(0, 200),
+        sourceType: String(item.sourceType || '').slice(0, 50),
         shopId: String(item.shopId || '').slice(0, 200),
         title: String(item.title || '').slice(0, 1000),
+        description: String(item.description || '').slice(0, 50_000),
         price: String(item.price || '').slice(0, 100),
         priceValue: numeric(item.priceValue),
         originalPrice: numeric(item.originalPrice),
         discountPercent: numeric(item.discountPercent),
         sold: item.sold ?? 0,
+        views: numeric(item.views),
+        likes: numeric(item.likes),
+        comments: numeric(item.comments),
+        shares: numeric(item.shares),
+        saves: numeric(item.saves),
+        duration: numeric(item.duration),
+        rating: numeric(item.rating),
+        reviewCount: numeric(item.reviewCount),
+        author: String(item.author || '').slice(0, 1000),
+        authorId: String(item.authorId || '').slice(0, 200),
+        authorUrl: String(item.authorUrl || '').slice(0, 2000),
+        musicTitle: String(item.musicTitle || '').slice(0, 1000),
+        hashtags: Array.isArray(item.hashtags)
+          ? item.hashtags.slice(0, 100).map((value: unknown) => String(value).slice(0, 200))
+          : [],
+        currency: String(item.currency || '').slice(0, 20),
+        publishedAt: String(item.publishedAt || '').slice(0, 100),
         searchKeyword: String(item.searchKeyword || '').slice(0, 500),
         searchPage: numeric(item.searchPage),
         searchPosition: numeric(item.searchPosition),
@@ -709,12 +737,15 @@ app.post('/api/browser-agent/jobs/:id/items', requireAuth, async (req: any, res:
         url: String(item.url || '').slice(0, 2000),
         image: String(item.image || '').slice(0, 2000),
         observedAt: String(item.observedAt || new Date().toISOString()).slice(0, 100),
-        detailStatus: item.detailStatus === 'PENDING' ? 'PENDING' : 'SKIPPED'
+        detailStatus: ['PENDING', 'COMPLETED', 'PARTIAL'].includes(item.detailStatus)
+          ? item.detailStatus
+          : 'SKIPPED'
       });
     }
     await new Dataset(run.id).pushData(safeItems);
     const storedCount = safeItems.length;
-    appendRunLog(run.id, `[INFO] [BrowserAgent] Stored ${storedCount} products.`);
+    const itemLabel = run.actor.name === 'tiktok-scraper' ? 'TikTok items' : 'products';
+    appendRunLog(run.id, `[INFO] [BrowserAgent] Stored ${storedCount} ${itemLabel}.`);
     res.json({ accepted: storedCount });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -770,7 +801,7 @@ app.post('/api/browser-agent/jobs/:id/log', requireAuth, async (req: any, res: a
       id: req.params.id,
       userId: req.user.id,
       status: 'BROWSER_RUNNING',
-      actor: { name: 'shopee-scraper' }
+      actor: { name: { in: BROWSER_ACTOR_NAMES } }
     },
     select: { id: true }
   });
@@ -784,6 +815,17 @@ app.post('/api/browser-agent/jobs/:id/log', requireAuth, async (req: any, res: a
 });
 
 app.post('/api/browser-agent/jobs/:id/complete', requireAuth, async (req: any, res: any) => {
+  const run = await prisma.run.findFirst({
+    where: {
+      id: req.params.id,
+      userId: req.user.id,
+      status: 'BROWSER_RUNNING',
+      actor: { name: { in: BROWSER_ACTOR_NAMES } }
+    },
+    include: { actor: true }
+  });
+  if (!run) return res.status(409).json({ error: 'Browser job is no longer active' });
+  const platformLabel = run.actor.name === 'tiktok-scraper' ? 'TikTok' : 'Shopee';
   const dataset = new Dataset(req.params.id);
   const storedCount = (await dataset.getData()).stats.itemCount;
   if (storedCount === 0) {
@@ -800,10 +842,10 @@ app.post('/api/browser-agent/jobs/:id/complete', requireAuth, async (req: any, r
     }
     appendRunLog(
       req.params.id,
-      '[ERROR] [BrowserAgent] Shopee crawl ended without storing any products.'
+      `[ERROR] [BrowserAgent] ${platformLabel} crawl ended without storing any items.`
     );
-    await dataset.finalize('FAILED', 'Shopee crawl produced no products');
-    return res.status(422).json({ error: 'Shopee crawl produced no products' });
+    await dataset.finalize('FAILED', `${platformLabel} crawl produced no items`);
+    return res.status(422).json({ error: `${platformLabel} crawl produced no items` });
   }
 
   const detailCompleted = Math.max(0, Math.floor(Number(req.body?.details?.completed) || 0));
@@ -835,7 +877,7 @@ app.post('/api/browser-agent/jobs/:id/complete', requireAuth, async (req: any, r
   await dataset.finalize('SUCCESS');
   appendRunLog(
     req.params.id,
-    `[INFO] [BrowserAgent] Completed with ${storedCount} products` +
+    `[INFO] [BrowserAgent] Completed with ${storedCount} ${platformLabel} items` +
     (req.body?.details
       ? `; details: ${detailCompleted} completed, ${detailFailed} failed.`
       : '.')

@@ -88,7 +88,7 @@ cron.schedule('* * * * *', async () => {
             await prisma.run.update({
               where: { id: createdRun.id },
               data: {
-                status: schedule.actor.name === 'shopee-scraper'
+                status: ['shopee-scraper', 'tiktok-scraper'].includes(schedule.actor.name)
                   ? 'BROWSER_PENDING'
                   : 'PENDING'
               }

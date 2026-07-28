@@ -1,7 +1,7 @@
 {
   "name": "tiktok-scraper",
-  "version": "1.0.0",
-  "description": "Advanced stealth scraper for TikTok & TikTok Shop using Crawlee and Browser Agent",
+  "version": "1.1.0",
+  "description": "TikTok and TikTok Shop Browser Agent actor",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc",

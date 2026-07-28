@@ -9,14 +9,29 @@
   };
 
   const requestKind = (url) => {
-    const value = String(url);
-    if (value.includes('/api/search/item/full/') || value.includes('/api/search/general/full/')) {
+    const value = String(url).toLowerCase();
+    if (
+      value.includes('/api/search/item/full/') ||
+      value.includes('/api/search/general/full/') ||
+      value.includes('/api/search/video/full/') ||
+      value.includes('/api/search/item/')
+    ) {
       return 'video-search';
     }
-    if (value.includes('/api/v1/shop/product/search/') || value.includes('/api/v1/shop/product/get_recommend/')) {
+    if (
+      value.includes('/api/v1/shop/product/search/') ||
+      value.includes('/api/v1/shop/product/get_recommend/') ||
+      value.includes('/api/v1/shop/product/get_products/') ||
+      value.includes('/product/search') ||
+      value.includes('/search/products')
+    ) {
       return 'product-search';
     }
-    if (value.includes('/api/v1/shop/product/get_detail/') || value.includes('/api/item/detail/')) {
+    if (
+      value.includes('/api/v1/shop/product/get_detail/') ||
+      value.includes('/api/item/detail/') ||
+      value.includes('/product/detail')
+    ) {
       return 'detail';
     }
     return null;

@@ -179,9 +179,12 @@ async function main() {
       mode: {
         type: 'string',
         title: 'Chế độ tìm kiếm',
-        default: 'products',
-        enum: ['products', 'videos'],
-        enumNames: ['TikTok Shop Sản Phẩm', 'TikTok Video Tìm Kiếm']
+        default: 'videos',
+        enum: ['videos', 'products'],
+        enumNames: [
+          'Video TikTok',
+          'Sản phẩm TikTok Shop (cần tab Shop trên web)'
+        ]
       },
       maxItems: {
         type: 'integer',
@@ -192,8 +195,8 @@ async function main() {
       },
       includeDetails: {
         type: 'boolean',
-        title: 'Thu thập chi tiết từng sản phẩm / video',
-        description: 'Bóc tách thêm mô tả chi tiết, tồn kho, người tạo, lượt thích, lượt xem.',
+        title: 'Thu thập dữ liệu phân tích',
+        description: 'Lấy mô tả, tác giả hoặc cửa hàng, tương tác, âm thanh, hashtag, giá và doanh số khi TikTok cung cấp.',
         default: true
       }
     }
@@ -204,17 +207,37 @@ async function main() {
     required: ['itemId', 'title', 'url'],
     properties: {
       itemId: { type: 'string', title: 'Mã sản phẩm / Video ID' },
+      sourceType: { type: 'string', title: 'Loại dữ liệu' },
       title: { type: 'string', title: 'Tên sản phẩm / Tiêu đề Video' },
+      description: { type: 'string', title: 'Mô tả' },
       price: { type: 'string', title: 'Giá bán' },
+      priceValue: { type: 'number', title: 'Giá trị giá bán' },
+      originalPrice: { type: 'number', title: 'Giá gốc' },
+      currency: { type: 'string', title: 'Tiền tệ' },
       sold: { type: ['string', 'number'], title: 'Đã bán / Lượt xem' },
+      views: { type: 'number', title: 'Lượt xem' },
       url: { type: 'string', format: 'uri', title: 'Liên kết TikTok' },
       image: { type: 'string', format: 'uri', title: 'Hình ảnh / Cover' },
-      description: { type: 'string', title: 'Mô tả chi tiết' },
       author: { type: 'string', title: 'Creator / Tên Shop' },
+      authorId: { type: 'string', title: 'Mã Creator' },
+      authorUrl: { type: 'string', format: 'uri', title: 'Trang Creator' },
+      shopName: { type: 'string', title: 'Tên cửa hàng' },
       likes: { type: 'number', title: 'Lượt thích' },
       comments: { type: 'number', title: 'Lượt bình luận' },
       shares: { type: 'number', title: 'Lượt chia sẻ' },
-      rating: { type: 'number', title: 'Điểm đánh giá' }
+      saves: { type: 'number', title: 'Lượt lưu' },
+      duration: { type: 'number', title: 'Thời lượng video (giây)' },
+      musicTitle: { type: 'string', title: 'Âm thanh' },
+      hashtags: { type: 'array', title: 'Hashtag' },
+      rating: { type: 'number', title: 'Điểm đánh giá' },
+      reviewCount: { type: 'number', title: 'Số lượt đánh giá' },
+      publishedAt: { type: 'string', format: 'date-time', title: 'Thời gian đăng' },
+      searchKeyword: { type: 'string', title: 'Từ khóa tìm kiếm' },
+      searchPage: { type: 'number', title: 'Lần tải kết quả' },
+      searchPosition: { type: 'number', title: 'Vị trí trong kết quả' },
+      searchRank: { type: 'number', title: 'Thứ hạng tìm kiếm' },
+      observedAt: { type: 'string', format: 'date-time', title: 'Thời điểm quan sát' },
+      detailStatus: { type: 'string', title: 'Mức độ đầy đủ dữ liệu' }
     }
   });
 
@@ -222,12 +245,14 @@ async function main() {
     where: { name: 'tiktok-scraper' },
     update: {
       userId: null,
+      version: '1.1.0',
       inputSchema: tiktokInputSchema,
       outputSchema: tiktokOutputSchema
     },
     create: {
       name: 'tiktok-scraper',
-      description: 'Advanced stealth scraper for TikTok Shop products & TikTok Video search results.',
+      description: 'Browser Agent crawler for TikTok videos and available TikTok Shop web results.',
+      version: '1.1.0',
       userId: null,
       inputSchema: tiktokInputSchema,
       outputSchema: tiktokOutputSchema

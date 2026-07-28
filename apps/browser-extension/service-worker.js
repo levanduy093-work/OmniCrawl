@@ -4,12 +4,15 @@ let pollTimer = null;
 let pageTimer = null;
 
 const SEARCH_TIMEOUT_MS = 30000;
+const TIKTOK_SEARCH_TIMEOUT_MS = 45000;
 const DETAIL_TIMEOUT_MS = 90000;
 
 const stateReady = chrome.storage.session.get(['config', 'activeJob']).then((stored) => {
   config = stored.config || null;
   activeJob = stored.activeJob || null;
   if (activeJob) {
+    activeJob.platform = activeJob.platform || 'shopee';
+    activeJob.mode = activeJob.mode || 'products';
     activeJob.phase = activeJob.phase || 'SEARCH';
     activeJob.products = Array.isArray(activeJob.products) ? activeJob.products : [];
     activeJob.detailIndex = Number(activeJob.detailIndex || 0);
@@ -49,6 +52,10 @@ function armPageTimeout(timeoutMs) {
   }, timeoutMs);
 }
 
+function searchTimeoutForJob(job = activeJob) {
+  return job?.platform === 'tiktok' ? TIKTOK_SEARCH_TIMEOUT_MS : SEARCH_TIMEOUT_MS;
+}
+
 async function handlePageTimeout() {
   if (!activeJob || !activeJob.pageDeadline || Date.now() < activeJob.pageDeadline) return;
   if (activeJob.phase === 'DETAIL' && activeJob.currentProduct) {
@@ -68,12 +75,18 @@ async function handlePageTimeout() {
   if (activeJob.phase === 'SEARCH' && activeJob.seen.length > 0) {
     clearPageTimeout();
     await continueAfterNoNewSearchData(
-      `Shopee page ${activeJob.page} did not return new data within 30 seconds; ` +
+      `${platformLabel(activeJob)} page ${activeJob.page} did not return new data within ` +
+      `${Math.round(searchTimeoutForJob(activeJob) / 1000)} seconds; ` +
       'continuing with the products already collected.'
     );
     return;
   }
-  await finishJob(false, 'Không nhận được dữ liệu tìm kiếm từ Shopee sau 30 giây.');
+  const label = platformLabel(activeJob);
+  await finishJob(
+    false,
+    `Không nhận được dữ liệu tìm kiếm từ ${label} sau ` +
+    `${Math.round(searchTimeoutForJob(activeJob) / 1000)} giây.`
+  );
 }
 
 function authHeaders(json = false) {
@@ -100,6 +113,18 @@ async function api(path, options = {}) {
 
 function searchUrl(keyword, page) {
   return `https://shopee.vn/search?keyword=${encodeURIComponent(keyword)}&page=${page}`;
+}
+
+function platformLabel(job = activeJob) {
+  return job?.platform === 'tiktok' ? 'TikTok' : 'Shopee';
+}
+
+function searchUrlForJob(job, page) {
+  if (job?.platform !== 'tiktok') return searchUrl(job.keyword, page);
+  return (
+    `https://www.tiktok.com/search?q=${encodeURIComponent(job.keyword)}` +
+    `&omnicrawl_mode=${encodeURIComponent(job.mode || 'videos')}`
+  );
 }
 
 function findItemObject(entry) {
@@ -148,10 +173,16 @@ function extractPrice(value) {
   if (typeof value !== 'object') return null;
   const candidates = [
     value.current_price,
+    value.sale_price,
+    value.salePrice,
+    value.sale_price_decimal,
+    value.price_decimal,
     value.price,
     value.value,
+    value.amount,
     value.single_value,
     value.min_price,
+    value.min_sale_price,
     value.price_min,
     value.range_min
   ];
@@ -192,6 +223,221 @@ function imageUrl(value) {
   if (/^https?:\/\//i.test(text)) return text;
   if (text.startsWith('//')) return `https:${text}`;
   return `https://down-vn.img.susercontent.com/file/${text}`;
+}
+
+function firstTikTokImage(...values) {
+  for (const value of values.flat(Infinity)) {
+    if (!value) continue;
+    const candidate = typeof value === 'object'
+      ? value.url_list?.[0] || value.urlList?.[0] || value.url || value.uri
+      : value;
+    if (candidate) return String(candidate);
+  }
+  return '';
+}
+
+function tikTokTimestamp(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return '';
+  return new Date(numeric * (numeric < 10_000_000_000 ? 1000 : 1)).toISOString();
+}
+
+function formatTikTokPrice(value, currency = 'VND') {
+  const numeric = extractPrice(value);
+  if (numeric === null) return { price: '', priceValue: null };
+  const normalized = Math.round(numeric);
+  return {
+    price: currency === 'VND'
+      ? `${normalized.toLocaleString('vi-VN')}₫`
+      : `${normalized.toLocaleString()} ${currency}`,
+    priceValue: normalized
+  };
+}
+
+function mapTikTokVideo(entry, context = {}) {
+  const item = (
+    entry?.item ??
+    entry?.itemStruct ??
+    entry?.item_struct ??
+    entry?.aweme_info ??
+    entry?.awemeInfo ??
+    entry
+  );
+  const itemId = item?.id ?? item?.itemId ?? item?.item_id ?? item?.aweme_id;
+  const description = String(
+    item?.desc ?? item?.description ?? item?.title ?? entry?.desc ?? ''
+  ).trim();
+  const author = item?.author ?? item?.authorInfo ?? item?.author_info ?? {};
+  const authorName = String(
+    author?.uniqueId ?? author?.unique_id ?? author?.nickname ?? item?.author_name ?? ''
+  ).replace(/^@/, '');
+  const stats = item?.stats ?? item?.statistics ?? item?.statsV2 ?? {};
+  const video = item?.video ?? item?.videoInfo ?? {};
+  const music = item?.music ?? {};
+  const challenges = item?.challenges ?? item?.textExtra ?? item?.text_extra ?? [];
+  if (!itemId || !description) return null;
+  return {
+    itemId: String(itemId),
+    sourceType: 'video',
+    title: description,
+    description,
+    author: String(author?.nickname ?? authorName),
+    authorId: String(author?.id ?? author?.uid ?? author?.secUid ?? ''),
+    authorUrl: authorName ? `https://www.tiktok.com/@${authorName}` : '',
+    url: String(
+      item?.shareUrl ??
+      item?.share_url ??
+      (authorName ? `https://www.tiktok.com/@${authorName}/video/${itemId}` : '')
+    ),
+    image: firstTikTokImage(
+      video?.cover,
+      video?.originCover,
+      video?.dynamicCover,
+      item?.cover
+    ),
+    views: extractNumber(stats?.playCount ?? stats?.play_count ?? stats?.viewCount),
+    likes: extractNumber(stats?.diggCount ?? stats?.digg_count ?? stats?.likeCount),
+    comments: extractNumber(stats?.commentCount ?? stats?.comment_count),
+    shares: extractNumber(stats?.shareCount ?? stats?.share_count),
+    saves: extractNumber(stats?.collectCount ?? stats?.collect_count),
+    duration: extractNumber(video?.duration ?? item?.duration),
+    musicTitle: String(music?.title ?? music?.musicName ?? ''),
+    hashtags: Array.isArray(challenges)
+      ? challenges
+        .map((challenge) => (
+          challenge?.title ??
+          challenge?.hashtagName ??
+          challenge?.hashtag_name ??
+          challenge?.hashtagId
+        ))
+        .filter(Boolean)
+        .map(String)
+      : [],
+    publishedAt: tikTokTimestamp(item?.createTime ?? item?.create_time),
+    searchKeyword: String(context.keyword || ''),
+    searchPage: Number(context.page || 0),
+    searchPosition: Number(context.position || 0),
+    searchRank: Number(context.page || 0) * 100 + Number(context.position || 0),
+    observedAt: new Date().toISOString(),
+    detailStatus: 'COMPLETED'
+  };
+}
+
+function mapTikTokProduct(entry, context = {}) {
+  const product = (
+    entry?.product ??
+    entry?.productInfo ??
+    entry?.product_info ??
+    entry?.product_data ??
+    entry?.productData ??
+    entry
+  );
+  const itemId = (
+    product?.product_id ??
+    product?.productId ??
+    product?.id ??
+    product?.item_id
+  );
+  const title = String(
+    product?.title ??
+    product?.name ??
+    product?.product_name ??
+    product?.productName ??
+    ''
+  ).trim();
+  if (!itemId || !title) return null;
+  const priceInfo = (
+    product?.price ??
+    product?.sale_price ??
+    product?.salePrice ??
+    product?.price_info ??
+    product?.priceInfo
+  );
+  const currency = String(
+    priceInfo?.currency ??
+    priceInfo?.currency_code ??
+    product?.currency ??
+    'VND'
+  ).toUpperCase();
+  const formatted = formatTikTokPrice(priceInfo, currency);
+  const shop = product?.shop ?? product?.seller ?? product?.shop_info ?? {};
+  const rating = product?.rating ?? product?.review_info ?? {};
+  const productUrl = String(
+    product?.product_url ??
+    product?.productUrl ??
+    product?.share_url ??
+    product?.url ??
+    `https://shop.tiktok.com/view/product/${itemId}?region=VN`
+  );
+  return {
+    itemId: String(itemId),
+    sourceType: 'product',
+    shopId: String(shop?.shop_id ?? shop?.shopId ?? shop?.id ?? ''),
+    title,
+    description: String(product?.description ?? product?.desc ?? ''),
+    price: formatted.price,
+    priceValue: formatted.priceValue,
+    originalPrice: extractPrice(
+      product?.original_price ?? product?.originalPrice ?? product?.market_price
+    ),
+    currency,
+    sold: product?.sold_count ?? product?.soldCount ?? product?.sales ?? 0,
+    rating: extractNumber(rating?.rating ?? rating?.score ?? product?.rating),
+    reviewCount: extractNumber(
+      rating?.review_count ?? rating?.reviewCount ?? product?.review_count
+    ),
+    author: String(shop?.name ?? shop?.shop_name ?? shop?.seller_name ?? ''),
+    shopName: String(shop?.name ?? shop?.shop_name ?? shop?.seller_name ?? ''),
+    url: productUrl,
+    image: firstTikTokImage(
+      product?.main_image,
+      product?.mainImage,
+      product?.images,
+      product?.image
+    ),
+    searchKeyword: String(context.keyword || ''),
+    searchPage: Number(context.page || 0),
+    searchPosition: Number(context.position || 0),
+    searchRank: Number(context.page || 0) * 100 + Number(context.position || 0),
+    observedAt: new Date().toISOString(),
+    detailStatus: 'COMPLETED'
+  };
+}
+
+function collectTikTokItems(payload, kind, context = {}) {
+  const mapper = kind === 'product-search' ? mapTikTokProduct : mapTikTokVideo;
+  const output = [];
+  const seenIds = new Set();
+  const visited = new WeakSet();
+
+  const visit = (value, depth = 0) => {
+    if (!value || depth > 6 || output.length >= 500) return;
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        const mapped = mapper(entry, {
+          ...context,
+          position: output.length + 1
+        });
+        if (mapped?.itemId && !seenIds.has(mapped.itemId)) {
+          seenIds.add(mapped.itemId);
+          output.push(mapped);
+        }
+        visit(entry, depth + 1);
+      }
+      return;
+    }
+    if (typeof value !== 'object' || visited.has(value)) return;
+    visited.add(value);
+    for (const [key, child] of Object.entries(value)) {
+      if (
+        depth < 2 ||
+        /(?:item|product|aweme|search|data|list|result)/i.test(key)
+      ) visit(child, depth + 1);
+    }
+  };
+
+  visit(payload);
+  return output;
 }
 
 function mapItem(entry, context = {}) {
@@ -597,13 +843,21 @@ async function storeItems(items) {
         Number(original.searchPage ?? activeJob.page ?? 0) * 60 + fallbackPosition
       ),
       observedAt: String(original.observedAt || new Date().toISOString()),
-      detailStatus: activeJob.includeDetails ? 'PENDING' : 'SKIPPED'
+      detailStatus: activeJob.platform === 'tiktok'
+        ? String(original.detailStatus || (activeJob.includeDetails ? 'PARTIAL' : 'SKIPPED'))
+        : (activeJob.includeDetails ? 'PENDING' : 'SKIPPED')
     };
     const key = String(item.itemId || item.url || item.title);
-    if (!item.title || !item.price || seenSet.has(key)) continue;
+    const requiresPrice = activeJob.platform !== 'tiktok';
+    if (!item.title || (requiresPrice && !item.price) || seenSet.has(key)) continue;
     seenSet.add(key);
     activeJob.seen.push(key);
-    if (activeJob.includeDetails && item.itemId && item.url) {
+    if (
+      activeJob.platform === 'shopee' &&
+      activeJob.includeDetails &&
+      item.itemId &&
+      item.url
+    ) {
       activeJob.products.push({
         itemId: item.itemId,
         shopId: item.shopId,
@@ -611,6 +865,13 @@ async function storeItems(items) {
         title: item.title,
         image: item.image
       });
+    }
+    if (
+      activeJob.platform === 'tiktok' &&
+      activeJob.includeDetails &&
+      ['COMPLETED', 'PARTIAL'].includes(item.detailStatus)
+    ) {
+      activeJob.detailCompleted = Number(activeJob.detailCompleted || 0) + 1;
     }
     freshItems.push(item);
     if (activeJob.seen.length >= activeJob.maxItems) break;
@@ -633,11 +894,12 @@ async function scheduleNextPage() {
   activeJob.scheduledPage = activeJob.page + 1;
   const runId = activeJob.runId;
   const nextPage = activeJob.scheduledPage;
-  const nextUrl = searchUrl(activeJob.keyword, nextPage);
+  const nextUrl = searchUrlForJob(activeJob, nextPage);
   const delay = 9000 + Math.floor(Math.random() * 6000);
   await persistActiveJob();
   await logJob(
-    `Waiting ${Math.ceil(delay / 1000)} seconds before loading Shopee page ${nextPage}.`
+    `Waiting ${Math.ceil(delay / 1000)} seconds before loading ` +
+    `${platformLabel(activeJob)} page ${nextPage}.`
   );
   setTimeout(() => {
     if (!activeJob || activeJob.runId !== runId || activeJob.phase !== 'SEARCH') return;
@@ -645,7 +907,20 @@ async function scheduleNextPage() {
     activeJob.page = nextPage;
     activeJob.scheduledPage = null;
     void persistActiveJob();
-    armPageTimeout(SEARCH_TIMEOUT_MS);
+    armPageTimeout(searchTimeoutForJob(activeJob));
+    if (activeJob.platform === 'tiktok') {
+      chrome.tabs.sendMessage(activeJob.tabId, {
+        type: 'TIKTOK_LOAD_MORE',
+        page: nextPage
+      }).then(() => {
+        armPageTimeout(searchTimeoutForJob(activeJob));
+      }).catch(() => {
+        chrome.tabs.update(activeJob.tabId, { url: nextUrl }).catch((error) => {
+          void finishJob(false, error?.message || 'Không thể mở trang tìm kiếm TikTok.');
+        });
+      });
+      return;
+    }
     chrome.tabs.update(activeJob.tabId, { url: nextUrl }).catch((error) => {
       void finishJob(false, error?.message || 'Không thể mở trang tìm kiếm Shopee.');
     });
@@ -663,8 +938,9 @@ async function continueAfterNoNewSearchData(message) {
 
   if (activeJob.consecutiveNoNewPages >= 3) {
     await logJob(
-      `No new products on ${activeJob.consecutiveNoNewPages} consecutive Shopee pages. ` +
-      `Continuing with ${activeJob.seen.length} collected products.`
+      `No new items on ${activeJob.consecutiveNoNewPages} consecutive ` +
+      `${platformLabel(activeJob)} pages. Continuing with ` +
+      `${activeJob.seen.length} collected items.`
     );
     await beginDetailPhase();
     return;
@@ -683,6 +959,14 @@ async function logJob(message) {
 }
 
 function detailProgress(job = activeJob) {
+  if (job?.platform === 'tiktok') {
+    return {
+      enabled: Boolean(job.includeDetails),
+      completed: Number(job.detailCompleted || 0),
+      failed: Number(job.detailFailed || 0),
+      total: Number(job.seen?.length || 0)
+    };
+  }
   return {
     enabled: Boolean(job?.includeDetails),
     completed: Number(job?.detailCompleted || 0),
@@ -714,6 +998,10 @@ async function finishJob(success, error) {
 
 async function beginDetailPhase() {
   if (!activeJob || activeJob.phase === 'DETAIL') return;
+  if (activeJob.platform === 'tiktok') {
+    await finishJob(true);
+    return;
+  }
   if (!activeJob.includeDetails || !activeJob.products.length) {
     await finishJob(true);
     return;
@@ -939,6 +1227,65 @@ async function processSearchResponse(detail, sender) {
   await scheduleNextPage();
 }
 
+async function processTikTokSearchResponse(detail, sender) {
+  if (
+    !activeJob ||
+    activeJob.platform !== 'tiktok' ||
+    activeJob.phase !== 'SEARCH' ||
+    sender.tab?.id !== activeJob.tabId
+  ) return;
+
+  const payload = detail?.payload;
+  if (
+    detail?.status === 401 ||
+    detail?.status === 403 ||
+    payload?.status_code === 10216 ||
+    payload?.statusCode === 10216
+  ) {
+    await finishJob(false, 'TikTok yêu cầu đăng nhập lại trong Chrome.');
+    return;
+  }
+
+  const expectedKind = activeJob.mode === 'products' ? 'product-search' : 'video-search';
+  if (detail?.kind !== expectedKind) return;
+  const mappedItems = collectTikTokItems(payload, detail.kind, {
+    keyword: activeJob.keyword,
+    page: activeJob.page
+  }).slice(0, activeJob.maxItems);
+
+  if (!mappedItems.length) {
+    activeJob.unexpectedResponses = Number(activeJob.unexpectedResponses || 0) + 1;
+    await persistActiveJob();
+    if (activeJob.unexpectedResponses <= 3) {
+      const payloadKeys = payload && typeof payload === 'object'
+        ? Object.keys(payload).slice(0, 20).join(',')
+        : typeof payload;
+      await logJob(
+        `TikTok ${detail.kind} response contained no mappable items: ` +
+        `HTTP ${String(detail?.status)}, keys=${payloadKeys || 'none'}. ` +
+        'Waiting for rendered cards.'
+      );
+    }
+    return;
+  }
+
+  const storedCount = await storeItems(mappedItems);
+  if (activeJob.seen.length >= activeJob.maxItems) {
+    await beginDetailPhase();
+    return;
+  }
+  if (!storedCount) {
+    if (activeJob.seen.length > 0) {
+      await continueAfterNoNewSearchData(
+        'TikTok returned no new items; loading more rendered results.'
+      );
+    }
+    return;
+  }
+  await logJob(`Captured ${storedCount} items from TikTok ${activeJob.mode} response.`);
+  await scheduleNextPage();
+}
+
 async function processDetailResponse(detail, sender) {
   if (
     !activeJob ||
@@ -1006,7 +1353,9 @@ async function processDomItems(items, sender) {
   ) return;
   const storedCount = await storeItems(items);
   if (!storedCount) return;
-  await logJob(`Captured ${storedCount} products from rendered Shopee cards.`);
+  await logJob(
+    `Captured ${storedCount} items from rendered ${platformLabel(activeJob)} cards.`
+  );
   if (activeJob.seen.length >= activeJob.maxItems) {
     await beginDetailPhase();
     return;
@@ -1038,6 +1387,8 @@ async function poll() {
     const job = await response.json();
     activeJob = {
       ...job,
+      platform: job.platform || 'shopee',
+      mode: job.mode || 'products',
       phase: 'SEARCH',
       page: 0,
       seen: [],
@@ -1055,7 +1406,7 @@ async function poll() {
       scheduledPage: null,
       consecutiveNoNewPages: 0,
       lastNoNewPage: null,
-      pageDeadline: Date.now() + SEARCH_TIMEOUT_MS
+      pageDeadline: Date.now() + searchTimeoutForJob(job)
     };
     await persistActiveJob();
     const tab = await chrome.tabs.create({
@@ -1065,12 +1416,17 @@ async function poll() {
     activeJob.tabId = tab.id;
     await persistActiveJob();
     await chrome.tabs.update(tab.id, {
-      url: searchUrl(job.keyword, 0)
+      url: searchUrlForJob(activeJob, 0)
     });
-    armPageTimeout(SEARCH_TIMEOUT_MS);
+    armPageTimeout(searchTimeoutForJob(activeJob));
   } catch (error) {
     if (activeJob) {
-      await finishJob(false, error instanceof Error ? error.message : 'Không thể mở tab Shopee.');
+      await finishJob(
+        false,
+        error instanceof Error
+          ? error.message
+          : `Không thể mở tab ${platformLabel(activeJob)}.`
+      );
     }
     // Dashboard polling will retry when the API becomes available again.
   }
@@ -1093,7 +1449,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       schedulePoll(0);
     } else if (message.type === 'POLL_NOW') {
       void poll();
-    } else if (message.type === 'SHOPEE_RESPONSE' || message.type === 'TIKTOK_RESPONSE') {
+    } else if (message.type === 'TIKTOK_RESPONSE') {
+      void processTikTokSearchResponse(message.detail, sender).catch((error) => {
+        void finishJob(
+          false,
+          error instanceof Error ? error.message : 'Không thể xử lý dữ liệu TikTok.'
+        ).catch(() => undefined);
+      });
+    } else if (
+      message.type === 'TIKTOK_PAGE_STATUS' &&
+      activeJob?.platform === 'tiktok' &&
+      sender.tab?.id === activeJob.tabId
+    ) {
+      void logJob(
+        `TikTok page ready: mode=${String(message.mode || activeJob.mode)}, ` +
+        `shopTab=${message.shopTabFound ? 'found' : 'not-found'}, ` +
+        `url=${String(message.url || '').slice(0, 500)}.`
+      );
+    } else if (message.type === 'SHOPEE_RESPONSE') {
       const handler = message.detail?.kind === 'detail'
         ? processDetailResponse
         : message.detail?.kind === 'reviews'
@@ -1120,13 +1493,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         ).catch(() => undefined);
       });
     } else if (
-      message.type === 'SHOPEE_BLOCKED' &&
+      (message.type === 'SHOPEE_BLOCKED' || message.type === 'TIKTOK_BLOCKED') &&
       activeJob &&
       sender.tab?.id === activeJob.tabId
     ) {
+      const label = message.type === 'TIKTOK_BLOCKED' ? 'TikTok' : 'Shopee';
       void finishJob(
         false,
-        'Shopee yêu cầu CAPTCHA hoặc đăng nhập trong Chrome.'
+        `${label} yêu cầu CAPTCHA hoặc đăng nhập trong Chrome.`
       ).catch(() => undefined);
     } else if (message.type === 'GET_AUTH_STATUS') {
       const statuses = await checkAuthStatuses();
@@ -1175,7 +1549,7 @@ async function checkAuthStatuses() {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (activeJob?.tabId === tabId) {
-    void finishJob(false, 'Tab Shopee của Browser Agent đã bị đóng.')
+    void finishJob(false, `Tab ${platformLabel(activeJob)} của Browser Agent đã bị đóng.`)
       .catch(() => undefined);
   }
 });
