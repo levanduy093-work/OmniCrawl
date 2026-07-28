@@ -1,7 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { Prisma, prisma } from '@omnicrawl/database';
 
-export const RUN_STORAGE_SCHEMA_VERSION = '1.0';
+export const RUN_STORAGE_SCHEMA_VERSION = '2.0';
 export const RUN_INPUT_KIND = 'omnicrawl/run-input';
 export const RUN_OUTPUT_KIND = 'omnicrawl/run-output';
 
@@ -42,6 +43,7 @@ export interface LegacyMigrationResult {
   inputMigrated: boolean;
   outputMigrated: boolean;
   itemCount: number;
+  runMissing: boolean;
 }
 
 function getStorageRoot() {
@@ -69,93 +71,92 @@ function readJson<T>(filePath: string): T | null {
   }
 }
 
-function atomicWriteJson(filePath: string, value: unknown) {
-  const directory = path.dirname(filePath);
-  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const temporaryPath = path.join(
-    directory,
-    `.${path.basename(filePath)}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
-  );
-  fs.writeFileSync(temporaryPath, JSON.stringify(value, null, 2), { mode: 0o600 });
-  fs.renameSync(temporaryPath, filePath);
+function toJsonValue(value: unknown): Prisma.InputJsonValue {
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) {
+    throw new Error('Value cannot be serialized as JSON');
+  }
+  return JSON.parse(serialized) as Prisma.InputJsonValue;
 }
 
-export function createRunInputDocument<TInput>(
+function asRecord(value: Prisma.JsonValue | null): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function actorReference(actor: { id: string; name: string; version: string }): ActorReference {
+  return { id: actor.id, name: actor.name, version: actor.version };
+}
+
+export async function writeRunInput<TInput>(
   runId: string,
-  actor: ActorReference,
+  _actor: ActorReference,
   payload: TInput
-): RunInputDocument<TInput> {
+) {
+  const run = await prisma.run.update({
+    where: { id: runId },
+    data: { input: toJsonValue(payload) },
+    include: { actor: true }
+  });
   return {
     schemaVersion: RUN_STORAGE_SCHEMA_VERSION,
     kind: RUN_INPUT_KIND,
     runId,
-    actor,
-    createdAt: new Date().toISOString(),
+    actor: actorReference(run.actor),
+    createdAt: run.createdAt.toISOString(),
     payload
+  } as RunInputDocument<TInput>;
+}
+
+export async function readRunInputDocument<TInput = Record<string, unknown>>(
+  runId: string
+): Promise<RunInputDocument<TInput> | null> {
+  const run = await prisma.run.findUnique({
+    where: { id: runId },
+    include: { actor: true }
+  });
+  if (!run) return null;
+  return {
+    schemaVersion: RUN_STORAGE_SCHEMA_VERSION,
+    kind: RUN_INPUT_KIND,
+    runId,
+    actor: actorReference(run.actor),
+    createdAt: run.createdAt.toISOString(),
+    payload: (run.input ?? {}) as TInput
   };
 }
 
-export function writeRunInput<TInput>(
-  runId: string,
-  actor: ActorReference,
-  payload: TInput
-) {
-  const document = createRunInputDocument(runId, actor, payload);
-  atomicWriteJson(getRunInputPath(runId), document);
-  return document;
-}
-
-export function readRunInputDocument<TInput = Record<string, unknown>>(
+export async function readRunInput<TInput = Record<string, unknown>>(
   runId: string
-): RunInputDocument<TInput> | null {
-  const current = readJson<RunInputDocument<TInput>>(getRunInputPath(runId));
-  if (current?.kind === RUN_INPUT_KIND && current.runId === runId) return current;
-
-  const legacyPath = path.join(
-    getStorageRoot(),
-    'key_value_stores',
-    runId,
-    'INPUT.json'
-  );
-  const legacy = readJson<TInput | RunInputDocument<TInput>>(legacyPath);
-  if (!legacy) return null;
-  if (
-    typeof legacy === 'object' &&
-    'kind' in legacy &&
-    legacy.kind === RUN_INPUT_KIND &&
-    'payload' in legacy
-  ) {
-    return legacy as RunInputDocument<TInput>;
-  }
-  return createRunInputDocument(runId, { name: 'unknown' }, legacy as TInput);
+): Promise<TInput> {
+  return (await readRunInputDocument<TInput>(runId))?.payload ?? ({} as TInput);
 }
 
-export function readRunInput<TInput = Record<string, unknown>>(runId: string): TInput {
-  return readRunInputDocument<TInput>(runId)?.payload ?? ({} as TInput);
-}
-
-export function readRunOutput<TItem = unknown>(
+export async function readRunOutput<TItem = unknown>(
   runId: string
-): RunOutputDocument<TItem> | null {
-  return readJson<RunOutputDocument<TItem>>(getRunOutputPath(runId));
-}
-
-function createRunOutput<TItem>(runId: string): RunOutputDocument<TItem> {
-  const now = new Date().toISOString();
-  const input = readRunInputDocument(runId);
+): Promise<RunOutputDocument<TItem> | null> {
+  const run = await prisma.run.findUnique({
+    where: { id: runId },
+    include: {
+      actor: true,
+      items: { orderBy: { position: 'asc' } }
+    }
+  });
+  if (!run) return null;
   return {
     schemaVersion: RUN_STORAGE_SCHEMA_VERSION,
     kind: RUN_OUTPUT_KIND,
     runId,
-    actor: input?.actor ?? { name: 'unknown' },
-    status: 'RUNNING',
-    createdAt: now,
-    updatedAt: now,
-    completedAt: null,
-    stats: { itemCount: 0 },
-    metadata: {},
-    items: [],
-    error: null
+    actor: actorReference(run.actor),
+    status: run.status,
+    createdAt: run.createdAt.toISOString(),
+    updatedAt: run.updatedAt.toISOString(),
+    completedAt: run.finishedAt?.toISOString() ?? null,
+    stats: { itemCount: run.itemCount },
+    metadata: asRecord(run.outputMetadata),
+    items: run.items.map((item) => item.data as TItem),
+    error: run.outputError
   };
 }
 
@@ -173,16 +174,10 @@ export class Logger {
 
 export class Dataset<TItem = unknown> {
   private static locks = new Map<string, Promise<void>>();
-  private runId: string;
-  private outputPath: string;
 
-  constructor(runId: string) {
-    this.runId = runId;
-    this.outputPath = getRunOutputPath(runId);
-    fs.mkdirSync(getRunDirectory(runId), { recursive: true, mode: 0o700 });
-  }
+  constructor(private readonly runId: string) {}
 
-  private async locked<T>(operation: () => Promise<T> | T): Promise<T> {
+  private async locked<T>(operation: () => Promise<T>): Promise<T> {
     const previous = Dataset.locks.get(this.runId) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => {
@@ -195,101 +190,166 @@ export class Dataset<TItem = unknown> {
       return await operation();
     } finally {
       release();
-      if (Dataset.locks.get(this.runId) === queued) {
-        Dataset.locks.delete(this.runId);
-      }
+      if (Dataset.locks.get(this.runId) === queued) Dataset.locks.delete(this.runId);
     }
   }
 
   async pushData(data: TItem | TItem[]) {
-    const items = Array.isArray(data) ? data : [data];
+    const items = (Array.isArray(data) ? data : [data]).map(toJsonValue);
     if (!items.length) return;
-    await this.locked(() => {
-      const output = readRunOutput<TItem>(this.runId) ?? createRunOutput<TItem>(this.runId);
-      output.items.push(...items);
-      output.stats.itemCount = output.items.length;
-      output.updatedAt = new Date().toISOString();
-      atomicWriteJson(this.outputPath, output);
+
+    await this.locked(async () => {
+      for (let attempt = 1; attempt <= 6; attempt += 1) {
+        try {
+          await prisma.$transaction(async (tx) => {
+            const run = await tx.run.findUnique({
+              where: { id: this.runId },
+              select: { itemCount: true }
+            });
+            if (!run) throw new Error(`Run ${this.runId} not found`);
+            await tx.datasetItem.createMany({
+              data: items.map((item, index) => ({
+                runId: this.runId,
+                position: run.itemCount + index,
+                data: item
+              }))
+            });
+            await tx.run.update({
+              where: { id: this.runId },
+              data: { itemCount: { increment: items.length } }
+            });
+          }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+          return;
+        } catch (error: any) {
+          if (!['P2002', 'P2034'].includes(error?.code) || attempt === 6) throw error;
+          await new Promise((resolve) => setTimeout(resolve, attempt * 10));
+        }
+      }
     });
   }
 
   async setMetadata(metadata: Record<string, unknown>) {
-    await this.locked(() => {
-      const output = readRunOutput<TItem>(this.runId) ?? createRunOutput<TItem>(this.runId);
-      output.metadata = { ...output.metadata, ...metadata };
-      output.updatedAt = new Date().toISOString();
-      atomicWriteJson(this.outputPath, output);
+    const run = await prisma.run.findUnique({
+      where: { id: this.runId },
+      select: { outputMetadata: true }
+    });
+    if (!run) throw new Error(`Run ${this.runId} not found`);
+    await prisma.run.update({
+      where: { id: this.runId },
+      data: {
+        outputMetadata: toJsonValue({
+          ...asRecord(run.outputMetadata),
+          ...metadata
+        })
+      }
     });
   }
 
   async getData() {
-    return readRunOutput<TItem>(this.runId) ?? createRunOutput<TItem>(this.runId);
+    const output = await readRunOutput<TItem>(this.runId);
+    if (!output) throw new Error(`Run ${this.runId} not found`);
+    return output;
   }
 
   async finalize(status: string, error?: string) {
-    await this.locked(() => {
-      const output = readRunOutput<TItem>(this.runId) ?? createRunOutput<TItem>(this.runId);
-      const now = new Date().toISOString();
-      output.status = status;
-      output.updatedAt = now;
-      output.completedAt = now;
-      output.stats.itemCount = output.items.length;
-      output.error = error ? String(error).slice(0, 2000) : null;
-      atomicWriteJson(this.outputPath, output);
+    await prisma.run.update({
+      where: { id: this.runId },
+      data: {
+        status,
+        finishedAt: new Date(),
+        outputError: error ? String(error).slice(0, 2000) : null
+      }
     });
   }
 }
 
 export async function migrateLegacyRunStorage(
   runId: string,
-  actor: ActorReference = { name: 'unknown' },
-  status = 'UNKNOWN'
+  _actor: ActorReference = { name: 'unknown' },
+  _status = 'UNKNOWN'
 ): Promise<LegacyMigrationResult> {
-  const legacyInputPath = path.join(
-    getStorageRoot(),
-    'key_value_stores',
-    runId,
-    'INPUT.json'
-  );
-  const legacyDatasetDir = path.join(getStorageRoot(), 'datasets', runId);
+  const run = await prisma.run.findUnique({
+    where: { id: runId },
+    select: { id: true, input: true, itemCount: true }
+  });
+  if (!run) {
+    return {
+      runId,
+      inputMigrated: false,
+      outputMigrated: false,
+      itemCount: 0,
+      runMissing: true
+    };
+  }
+
+  const currentInput = readJson<any>(getRunInputPath(runId));
+  const legacyInputPath = path.join(getStorageRoot(), 'key_value_stores', runId, 'INPUT.json');
+  const legacyInput = readJson<any>(legacyInputPath);
+  const inputPayload = currentInput?.kind === 'omnicrawl/run-input'
+    ? currentInput.payload
+    : legacyInput?.kind === 'omnicrawl/run-input'
+      ? legacyInput.payload
+      : legacyInput;
   let inputMigrated = false;
-  if (
-    !fs.existsSync(getRunInputPath(runId)) &&
-    (fs.existsSync(legacyInputPath) || fs.existsSync(legacyDatasetDir))
-  ) {
-    const payload = fs.existsSync(legacyInputPath)
-      ? readJson<Record<string, unknown>>(legacyInputPath) ?? {}
-      : {};
-    writeRunInput(runId, actor, payload);
-    if (fs.existsSync(legacyInputPath)) {
-      fs.unlinkSync(legacyInputPath);
-      const legacyStoreDir = path.dirname(legacyInputPath);
-      if (fs.readdirSync(legacyStoreDir).length === 0) fs.rmdirSync(legacyStoreDir);
-    }
+  if (run.input === null && inputPayload !== null && inputPayload !== undefined) {
+    await prisma.run.update({
+      where: { id: runId },
+      data: { input: toJsonValue(inputPayload) }
+    });
     inputMigrated = true;
   }
 
-  let outputMigrated = false;
-  let itemCount = readRunOutput(runId)?.stats.itemCount ?? 0;
-  if (fs.existsSync(legacyDatasetDir) && !fs.existsSync(getRunOutputPath(runId))) {
-    const items = fs.readdirSync(legacyDatasetDir)
+  const currentOutput = readJson<any>(getRunOutputPath(runId));
+  const legacyDatasetDir = path.join(getStorageRoot(), 'datasets', runId);
+  const legacyItems = fs.existsSync(legacyDatasetDir)
+    ? fs.readdirSync(legacyDatasetDir)
       .filter((filename) => filename.endsWith('.json'))
       .sort()
       .map((filename) => readJson(path.join(legacyDatasetDir, filename)))
-      .filter((item) => item !== null);
+      .filter((item) => item !== null)
+    : [];
+  const outputItems = Array.isArray(currentOutput?.items) ? currentOutput.items : legacyItems;
+  let outputMigrated = false;
+  if (run.itemCount === 0 && outputItems.length > 0) {
     const dataset = new Dataset(runId);
-    if (items.length) await dataset.pushData(items);
-    await dataset.finalize(status);
-    const output = readRunOutput(runId);
-    if (!output || output.stats.itemCount !== items.length) {
-      throw new Error(`Unable to verify migrated output for run ${runId}`);
-    }
-    fs.rmSync(legacyDatasetDir, { recursive: true, force: true });
-    itemCount = items.length;
+    await dataset.pushData(outputItems);
+    await prisma.run.update({
+      where: { id: runId },
+      data: {
+        outputMetadata: toJsonValue(currentOutput?.metadata ?? {}),
+        outputError: currentOutput?.error ? String(currentOutput.error).slice(0, 2000) : null
+      }
+    });
     outputMigrated = true;
   }
 
-  return { runId, inputMigrated, outputMigrated, itemCount };
+  const verified = await prisma.run.findUnique({
+    where: { id: runId },
+    select: { itemCount: true, input: true }
+  });
+  const expectedItems = outputItems.length || run.itemCount;
+  if (!verified || verified.itemCount !== expectedItems) {
+    throw new Error(`Unable to verify database migration for run ${runId}`);
+  }
+  if (inputPayload !== null && inputPayload !== undefined && verified.input === null) {
+    throw new Error(`Unable to verify input migration for run ${runId}`);
+  }
+
+  fs.rmSync(getRunDirectory(runId), { recursive: true, force: true });
+  fs.rmSync(legacyDatasetDir, { recursive: true, force: true });
+  if (fs.existsSync(legacyInputPath)) fs.unlinkSync(legacyInputPath);
+  const legacyStoreDir = path.dirname(legacyInputPath);
+  if (fs.existsSync(legacyStoreDir) && fs.readdirSync(legacyStoreDir).length === 0) {
+    fs.rmdirSync(legacyStoreDir);
+  }
+
+  return {
+    runId,
+    inputMigrated,
+    outputMigrated,
+    itemCount: verified.itemCount,
+    runMissing: false
+  };
 }
 
 export function removeRunStorage(runId: string) {
@@ -318,7 +378,10 @@ export class KeyValueStore {
   }
 
   async setValue(key: string, value: any) {
-    atomicWriteJson(path.join(this.storePath, `${key}.json`), value);
+    const filePath = path.join(this.storePath, `${key}.json`);
+    const temporaryPath = `${filePath}.${process.pid}.tmp`;
+    fs.writeFileSync(temporaryPath, JSON.stringify(value, null, 2), { mode: 0o600 });
+    fs.renameSync(temporaryPath, filePath);
   }
 
   async getValue(key: string): Promise<any> {

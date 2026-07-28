@@ -24,11 +24,13 @@ async function main() {
     update: {
       ...passwordUpgrade,
       role: 'ADMIN',
+      status: 'ACTIVE',
     },
     create: {
       email: 'admin@omnicrawl.local',
       password: hashedPassword,
       role: 'ADMIN',
+      status: 'ACTIVE',
       credits: 1000,
     },
   });
@@ -62,13 +64,13 @@ async function main() {
     type: 'object',
     required: ['itemId', 'shopId', 'title', 'price', 'url'],
     properties: {
-      itemId: { type: 'string' },
-      shopId: { type: 'string' },
-      title: { type: 'string' },
-      price: { type: 'string' },
-      sold: { type: ['string', 'number'] },
-      url: { type: 'string', format: 'uri' },
-      image: { type: 'string', format: 'uri' }
+      itemId: { type: 'string', title: 'Mã sản phẩm' },
+      shopId: { type: 'string', title: 'Mã cửa hàng' },
+      title: { type: 'string', title: 'Tên sản phẩm' },
+      price: { type: 'string', title: 'Giá bán' },
+      sold: { type: ['string', 'number'], title: 'Đã bán' },
+      url: { type: 'string', format: 'uri', title: 'Liên kết sản phẩm' },
+      image: { type: 'string', format: 'uri', title: 'Hình ảnh' }
     }
   });
 

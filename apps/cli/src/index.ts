@@ -104,7 +104,7 @@ program
     const input = options.input
       ? JSON.parse(fs.readFileSync(path.resolve(process.cwd(), options.input), 'utf8'))
       : {};
-    writeRunInput(
+    await writeRunInput(
       run.id,
       { id: dbActor.id, name: dbActor.name, version: dbActor.version },
       input
@@ -143,14 +143,20 @@ program
 
 program
   .command('storage:migrate')
-  .description('Consolidate legacy per-item datasets into the v1 run storage contract')
+  .description('Import file-based run inputs and outputs into PostgreSQL')
   .action(async () => {
     const storageRoot = path.resolve(__dirname, '..', '..', '..', 'storage');
     process.env.OMNICRAWL_STORAGE_DIR = storageRoot;
     const runIds = new Set<string>();
     const datasetsRoot = path.join(storageRoot, 'datasets');
     const keyValueRoot = path.join(storageRoot, 'key_value_stores');
+    const runsRoot = path.join(storageRoot, 'runs');
 
+    if (fs.existsSync(runsRoot)) {
+      for (const name of fs.readdirSync(runsRoot)) {
+        if (fs.statSync(path.join(runsRoot, name)).isDirectory()) runIds.add(name);
+      }
+    }
     if (fs.existsSync(datasetsRoot)) {
       for (const name of fs.readdirSync(datasetsRoot)) {
         if (fs.statSync(path.join(datasetsRoot, name)).isDirectory()) runIds.add(name);
@@ -166,6 +172,7 @@ program
     let migratedInputs = 0;
     let migratedOutputs = 0;
     let migratedItems = 0;
+    let orphanRunsRemoved = 0;
     for (const runId of runIds) {
       const run = await prisma.run.findUnique({
         where: { id: runId },
@@ -181,13 +188,21 @@ program
       if (result.inputMigrated) migratedInputs += 1;
       if (result.outputMigrated) migratedOutputs += 1;
       migratedItems += result.itemCount;
+      if (result.runMissing) {
+        fs.rmSync(path.join(runsRoot, runId), { recursive: true, force: true });
+        fs.rmSync(path.join(datasetsRoot, runId), { recursive: true, force: true });
+        fs.rmSync(path.join(keyValueRoot, runId), { recursive: true, force: true });
+        fs.rmSync(path.join(storageRoot, 'logs', `${runId}.log`), { force: true });
+        orphanRunsRemoved += 1;
+      }
     }
 
     console.log(JSON.stringify({
       runsScanned: runIds.size,
       inputsMigrated: migratedInputs,
       outputsMigrated: migratedOutputs,
-      itemsConsolidated: migratedItems
+      itemsConsolidated: migratedItems,
+      orphanRunsRemoved
     }, null, 2));
   });
 

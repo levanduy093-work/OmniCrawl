@@ -14,6 +14,7 @@ model User {
   email     String   @unique
   password  String
   role      String   @default("USER") // USER or ADMIN
+  status    String   @default("ACTIVE") // ACTIVE or SUSPENDED
   credits   Int      @default(1000)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -21,6 +22,8 @@ model User {
   runs      Run[]
   schedules Schedule[]
   shopeeSession ShopeeSession?
+
+  @@index([role, status])
 }
 
 model ShopeeSession {
@@ -53,16 +56,37 @@ model Actor {
 }
 
 model Run {
-  id          String    @id @default(cuid())
-  actorId     String
-  userId      String?
-  actor       Actor     @relation(fields: [actorId], references: [id])
-  user        User?     @relation(fields: [userId], references: [id])
-  status      String    @default("PENDING") // CREATING, PENDING, BROWSER_PENDING, RUNNING, BROWSER_RUNNING, STOPPING, STOPPED, SUCCESS, FAILED
-  startedAt   DateTime?
-  finishedAt  DateTime?
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  id             String    @id @default(cuid())
+  actorId        String
+  userId         String?
+  actor          Actor     @relation(fields: [actorId], references: [id])
+  user           User?     @relation(fields: [userId], references: [id])
+  status         String    @default("PENDING") // CREATING, PENDING, BROWSER_PENDING, RUNNING, BROWSER_RUNNING, STOPPING, STOPPED, SUCCESS, FAILED
+  input          Json?
+  outputMetadata Json?
+  outputError    String?
+  itemCount      Int       @default(0)
+  startedAt      DateTime?
+  finishedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  items          DatasetItem[]
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+}
+
+model DatasetItem {
+  id        String   @id @default(cuid())
+  runId     String
+  position  Int
+  data      Json
+  createdAt DateTime @default(now())
+
+  run       Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, position])
+  @@index([runId, position])
 }
 
 model Schedule {
@@ -70,13 +94,15 @@ model Schedule {
   actorId     String
   userId      String?
   cron        String
-  input       String?  // JSON payload reused for each scheduled run
+  input       Json?    // JSON payload reused for each scheduled run
   enabled     Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   
   actor       Actor    @relation(fields: [actorId], references: [id])
   user        User?    @relation(fields: [userId], references: [id])
+
+  @@index([enabled, updatedAt])
 }
 
 model Webhook {

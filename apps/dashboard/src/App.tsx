@@ -1,5 +1,24 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Play, Activity, Clock, Settings, Search, Bot, Package, Download, LogOut, Wallet, Menu } from 'lucide-react'
+import {
+  Play,
+  Activity,
+  Clock,
+  Settings,
+  Search,
+  Bot,
+  Package,
+  Download,
+  LogOut,
+  Wallet,
+  Menu,
+  Eye,
+  Users,
+  FileJson,
+  FileSpreadsheet,
+  ChevronLeft,
+  ChevronRight,
+  ExternalLink
+} from 'lucide-react'
 import Login from './Login'
 import OmniCrawlLogo from './Logo'
 import './App.css'
@@ -50,6 +69,32 @@ function applyInputDefaults(schema: string | null | undefined, values: Record<st
   return result
 }
 
+function isAdminRole(role?: string) {
+  return role === 'ADMIN' || role === 'SUPER_ADMIN'
+}
+
+function humanizeFieldName(field: string) {
+  const knownLabels: Record<string, string> = {
+    id: 'Mã',
+    itemId: 'Mã sản phẩm',
+    shopId: 'Mã cửa hàng',
+    title: 'Tên sản phẩm',
+    name: 'Tên',
+    price: 'Giá bán',
+    sold: 'Đã bán',
+    url: 'Liên kết',
+    image: 'Hình ảnh',
+    createdAt: 'Ngày tạo',
+    updatedAt: 'Ngày cập nhật'
+  }
+  if (knownLabels[field]) return knownLabels[field]
+  const words = field
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .trim()
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : field
+}
+
 function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem('token'))
   const [user, setUser] = useState<any>(null)
@@ -60,6 +105,12 @@ function App() {
   useEffect(() => {
     localStorage.setItem('activeTab', activeTab);
   }, [activeTab]);
+
+  useEffect(() => {
+    if (activeTab === 'users' && user && !isAdminRole(user.role)) {
+      setActiveTab('actors')
+    }
+  }, [activeTab, user])
   
   const [actors, setActors] = useState([])
   const [runs, setRuns] = useState([])
@@ -78,6 +129,17 @@ function App() {
   const [logModalOpen, setLogModalOpen] = useState(false)
   const [activeLogRunId, setActiveLogRunId] = useState<string | null>(null)
   const [logs, setLogs] = useState<string>('')
+  const [runDetailOpen, setRunDetailOpen] = useState(false)
+  const [runDetail, setRunDetail] = useState<any>(null)
+  const [runDetailPage, setRunDetailPage] = useState(1)
+  const [runDetailLoading, setRunDetailLoading] = useState(false)
+  const [users, setUsers] = useState<any[]>([])
+  const [newUser, setNewUser] = useState({
+    email: '',
+    password: '',
+    role: 'USER',
+    credits: 1000
+  })
 
   const handleLogout = useCallback(() => {
     localStorage.removeItem('token')
@@ -313,25 +375,86 @@ function App() {
     fetchLogs(id);
   }
 
-  const downloadRunOutput = async (id: string) => {
+  const fetchRunDetail = useCallback(async (id: string, page = 1) => {
+    setRunDetailLoading(true)
     try {
-      const res = await fetch(`http://localhost:3001/api/runs/${id}/output`, {
+      const res = await fetch(`http://localhost:3001/api/runs/${id}/items?page=${page}&pageSize=25`, {
         headers: { 'Authorization': `Bearer ${token}` }
       })
       const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Output is not available')
-      const blob = new Blob([JSON.stringify(data, null, 2)], {
-        type: 'application/json'
+      if (!res.ok) throw new Error(data.error || 'Run data is not available')
+      setRunDetail(data)
+      setRunDetailPage(page)
+    } catch (err: any) {
+      alert(`Không thể đọc dữ liệu: ${err.message}`)
+    } finally {
+      setRunDetailLoading(false)
+    }
+  }, [token])
+
+  const openRunDetail = (id: string) => {
+    setRunDetailOpen(true)
+    setRunDetail(null)
+    setRunDetailPage(1)
+    fetchRunDetail(id, 1)
+  }
+
+  const downloadRunOutput = async (id: string, format: 'json' | 'csv') => {
+    try {
+      const res = await fetch(`http://localhost:3001/api/runs/${id}/export?format=${format}`, {
+        headers: { 'Authorization': `Bearer ${token}` }
       })
+      if (!res.ok) {
+        const data = await res.json()
+        throw new Error(data.error || 'Output is not available')
+      }
+      const blob = await res.blob()
       const url = URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = url
-      link.download = `omnicrawl-${id}-output.json`
+      const disposition = res.headers.get('content-disposition') || ''
+      link.download = disposition.match(/filename="([^"]+)"/)?.[1] || `omnicrawl-${id}.${format}`
       link.click()
       URL.revokeObjectURL(url)
     } catch (err: any) {
       alert(`Không thể tải output: ${err.message}`)
     }
+  }
+
+  const fetchUsers = useCallback(async () => {
+    if (!isAdminRole(user?.role)) return
+    const res = await fetch('http://localhost:3001/api/admin/users', {
+      headers: { 'Authorization': `Bearer ${token}` }
+    })
+    if (res.ok) setUsers(await res.json())
+  }, [token, user?.role])
+
+  useEffect(() => {
+    if (activeTab === 'users' && isAdminRole(user?.role)) fetchUsers()
+  }, [activeTab, fetchUsers, user?.role])
+
+  const createUser = async () => {
+    const res = await fetch('http://localhost:3001/api/admin/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify(newUser)
+    })
+    const data = await res.json()
+    if (!res.ok) return alert(data.error || 'Không thể tạo user')
+    setNewUser({ email: '', password: '', role: 'USER', credits: 1000 })
+    fetchUsers()
+  }
+
+  const updateUser = async (id: string, changes: Record<string, unknown>) => {
+    const res = await fetch(`http://localhost:3001/api/admin/users/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify(changes)
+    })
+    const data = await res.json()
+    if (!res.ok) return alert(data.error || 'Không thể cập nhật user')
+    setUsers((current) => current.map((entry) => entry.id === id ? data : entry))
+    if (id === user?.id) fetchUser()
   }
 
   // Poll logs if modal is open
@@ -406,6 +529,15 @@ function App() {
             onClick={() => setActiveTab('marketplace')} 
             collapsed={!isSidebarOpen}
           />
+          {isAdminRole(user?.role) && (
+            <NavItem
+              icon={<Users />}
+              label="Users"
+              active={activeTab === 'users'}
+              onClick={() => setActiveTab('users')}
+              collapsed={!isSidebarOpen}
+            />
+          )}
         </nav>
         
         <div className="mt-auto pb-4 space-y-1">
@@ -495,20 +627,25 @@ function App() {
         {activeTab === 'runs' && (
           <div className="bg-white rounded-3xl shadow-sm border border-gray-50 overflow-hidden">
             <table className="w-full text-left">
-              <thead className="bg-[#F8F9FA] text-gray-500 font-medium text-sm">
+              <thead className="bg-[#F1F3F5] text-gray-800 font-semibold text-sm border-b border-gray-200">
                 <tr>
                   <th className="px-6 py-4">ID</th>
-                  <th className="px-6 py-4">Actor ID</th>
+                  <th className="px-6 py-4">Crawler</th>
                   <th className="px-6 py-4">Status</th>
+                  <th className="px-6 py-4">Items</th>
                   <th className="px-6 py-4">Created At</th>
                   <th className="px-6 py-4 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {runs.map((run: any) => (
-                  <tr key={run.id} className="hover:bg-gray-50 transition-colors">
+                  <tr 
+                    key={run.id} 
+                    onClick={() => openRunDetail(run.id)}
+                    className="hover:bg-blue-50/25 transition-colors group cursor-pointer"
+                  >
                     <td className="px-6 py-5 font-mono text-xs text-gray-400">{run.id}</td>
-                    <td className="px-6 py-5 text-gray-900">{run.actor?.name || run.actorId}</td>
+                    <td className="px-6 py-5 text-gray-900 font-medium">{run.actor?.name || run.actorId}</td>
                     <td className="px-6 py-5">
                       <span className={`px-3 py-1 text-xs font-semibold rounded-full ${
                         run.status === 'SUCCESS' ? 'bg-green-100 text-green-700' :
@@ -520,19 +657,30 @@ function App() {
                         {run.status}
                       </span>
                     </td>
+                    <td className="px-6 py-5 text-gray-700">{run.itemCount ?? 0}</td>
                     <td className="px-6 py-5 text-gray-500">{new Date(run.createdAt).toLocaleString()}</td>
-                    <td className="px-6 py-5 text-right space-x-2">
-                      <button onClick={() => downloadRunOutput(run.id)} className="px-3 py-1 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 text-xs font-medium">Data</button>
-                      <button onClick={() => openLogViewer(run.id)} className="px-3 py-1 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 text-xs font-medium">Logs</button>
-                      {(
-                        run.status === 'RUNNING' ||
-                        run.status === 'PENDING' ||
-                        run.status === 'BROWSER_RUNNING' ||
-                        run.status === 'BROWSER_PENDING'
-                      ) && (
-                        <button onClick={() => handleStopRun(run.id)} className="px-3 py-1 bg-yellow-100 text-yellow-700 rounded hover:bg-yellow-200 text-xs font-medium">Stop</button>
-                      )}
-                      <button onClick={() => handleDeleteRun(run.id)} className="px-3 py-1 bg-red-100 text-red-700 rounded hover:bg-red-200 text-xs font-medium">Delete</button>
+                    <td className="px-6 py-4">
+                      <div className="flex items-center justify-end gap-2" onClick={(e) => e.stopPropagation()}>
+                        <button onClick={() => openRunDetail(run.id)} className="inline-flex items-center justify-center gap-1.5 h-8 px-3 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 text-xs font-medium transition-colors">
+                          <Eye size={14} /> View
+                        </button>
+                        <button onClick={() => openLogViewer(run.id)} className="inline-flex items-center justify-center gap-1.5 h-8 px-3 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 text-xs font-medium transition-colors">
+                          Logs
+                        </button>
+                        {(
+                          run.status === 'RUNNING' ||
+                          run.status === 'PENDING' ||
+                          run.status === 'BROWSER_RUNNING' ||
+                          run.status === 'BROWSER_PENDING'
+                        ) && (
+                          <button onClick={() => handleStopRun(run.id)} className="inline-flex items-center justify-center gap-1.5 h-8 px-3 bg-amber-50 text-amber-700 rounded-lg hover:bg-amber-100 text-xs font-medium transition-colors">
+                            Stop
+                          </button>
+                        )}
+                        <button onClick={() => handleDeleteRun(run.id)} className="inline-flex items-center justify-center gap-1.5 h-8 px-3 bg-red-50 text-red-700 rounded-lg hover:bg-red-100 text-xs font-medium transition-colors">
+                          Delete
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -592,7 +740,7 @@ function App() {
 
             <div className="bg-white rounded-3xl shadow-sm border border-gray-50 overflow-hidden">
               <table className="w-full text-left">
-                <thead className="bg-[#F8F9FA] text-gray-500 font-medium text-sm">
+                <thead className="bg-[#F1F3F5] text-gray-800 font-semibold text-sm border-b border-gray-200">
                   <tr>
                     <th className="px-6 py-4">Crawler</th>
                     <th className="px-6 py-4">Cron Expression</th>
@@ -602,7 +750,7 @@ function App() {
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {schedules.map((schedule: any) => (
-                    <tr key={schedule.id} className="hover:bg-gray-50 transition-colors">
+                    <tr key={schedule.id} className="hover:bg-blue-50/25 transition-colors group">
                       <td className="px-6 py-5 text-gray-900 font-medium">{schedule.actor?.name || schedule.actorId}</td>
                       <td className="px-6 py-5 font-mono text-sm text-gray-600 bg-gray-100 rounded my-4 inline-block ml-6 px-2">{schedule.cron}</td>
                       <td className="px-6 py-5">
@@ -664,6 +812,105 @@ function App() {
           </div>
         )}
 
+        {activeTab === 'users' && isAdminRole(user?.role) && (
+          <div className="space-y-6">
+            <div className="bg-white rounded-3xl shadow-sm border border-gray-50 p-6">
+              <h2 className="text-lg font-medium text-gray-900 mb-4">Create user</h2>
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                <input
+                  type="email"
+                  value={newUser.email}
+                  onChange={(event) => setNewUser({ ...newUser, email: event.target.value })}
+                  placeholder="Email"
+                  className="px-4 py-3 bg-gray-50 rounded-xl border border-gray-200"
+                />
+                <input
+                  type="password"
+                  value={newUser.password}
+                  onChange={(event) => setNewUser({ ...newUser, password: event.target.value })}
+                  placeholder="Password (8+ characters)"
+                  className="px-4 py-3 bg-gray-50 rounded-xl border border-gray-200"
+                />
+                <select
+                  value={newUser.role}
+                  onChange={(event) => setNewUser({ ...newUser, role: event.target.value })}
+                  className="px-4 py-3 bg-gray-50 rounded-xl border border-gray-200"
+                >
+                  <option value="USER">USER</option>
+                  <option value="ADMIN">ADMIN</option>
+                  {user?.role === 'SUPER_ADMIN' && <option value="SUPER_ADMIN">SUPER_ADMIN</option>}
+                </select>
+                <button onClick={createUser} className="px-5 py-3 bg-blue-600 text-white rounded-xl font-medium">
+                  Create
+                </button>
+              </div>
+            </div>
+
+            <div className="bg-white rounded-3xl shadow-sm border border-gray-50 overflow-hidden">
+              <table className="w-full text-left">
+                <thead className="bg-[#F1F3F5] text-gray-800 font-semibold text-sm border-b border-gray-200">
+                  <tr>
+                    <th className="px-5 py-4">User</th>
+                    <th className="px-5 py-4">Role</th>
+                    <th className="px-5 py-4">Status</th>
+                    <th className="px-5 py-4">Credits</th>
+                    <th className="px-5 py-4">Usage</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {users.map((entry) => (
+                    <tr key={entry.id} className="hover:bg-blue-50/25 transition-colors group">
+                      <td className="px-5 py-4">
+                        <div className="font-medium text-gray-900">{entry.email}</div>
+                        <div className="text-xs text-gray-400">{entry.id}</div>
+                      </td>
+                      <td className="px-5 py-4">
+                        <select
+                          value={entry.role}
+                          disabled={entry.id === user.id || (entry.role === 'SUPER_ADMIN' && user.role !== 'SUPER_ADMIN')}
+                          onChange={(event) => updateUser(entry.id, { role: event.target.value })}
+                          className="px-3 py-2 rounded-lg border border-gray-200 bg-gray-50 disabled:opacity-50"
+                        >
+                          <option value="USER">USER</option>
+                          <option value="ADMIN">ADMIN</option>
+                          {user?.role === 'SUPER_ADMIN' && <option value="SUPER_ADMIN">SUPER_ADMIN</option>}
+                        </select>
+                      </td>
+                      <td className="px-5 py-4">
+                        <select
+                          value={entry.status}
+                          disabled={entry.id === user.id || (entry.role === 'SUPER_ADMIN' && user.role !== 'SUPER_ADMIN')}
+                          onChange={(event) => updateUser(entry.id, { status: event.target.value })}
+                          className="px-3 py-2 rounded-lg border border-gray-200 bg-gray-50 disabled:opacity-50"
+                        >
+                          <option value="ACTIVE">ACTIVE</option>
+                          <option value="SUSPENDED">SUSPENDED</option>
+                        </select>
+                      </td>
+                      <td className="px-5 py-4">
+                        <input
+                          type="number"
+                          min={0}
+                          max={1000000}
+                          defaultValue={entry.credits}
+                          onBlur={(event) => {
+                            const value = Number(event.target.value)
+                            if (value !== entry.credits) updateUser(entry.id, { credits: value })
+                          }}
+                          className="w-28 px-3 py-2 rounded-lg border border-gray-200 bg-gray-50"
+                        />
+                      </td>
+                      <td className="px-5 py-4 text-sm text-gray-500">
+                        {entry._count?.runs ?? 0} runs · {entry._count?.actors ?? 0} crawlers
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
         {activeTab === 'settings' && (
           <div className="bg-white rounded-3xl shadow-sm border border-gray-50 p-8 max-w-2xl">
             <h2 className="text-xl font-medium text-gray-900 mb-6">Account Settings</h2>
@@ -683,10 +930,25 @@ function App() {
                 </div>
                 <button className="mt-3 text-sm text-blue-600 font-medium hover:underline">Buy more credits</button>
               </div>
+              <div className="flex gap-3">
+                <span className="px-3 py-1 rounded-full bg-violet-100 text-violet-700 text-xs font-semibold">{user?.role}</span>
+                <span className="px-3 py-1 rounded-full bg-emerald-100 text-emerald-700 text-xs font-semibold">{user?.status}</span>
+              </div>
             </div>
           </div>
         )}
       </main>
+
+      {runDetailOpen && (
+        <RunDetailModal
+          detail={runDetail}
+          loading={runDetailLoading}
+          page={runDetailPage}
+          onPageChange={(page) => runDetail?.run?.id && fetchRunDetail(runDetail.run.id, page)}
+          onDownload={(format) => runDetail?.run?.id && downloadRunOutput(runDetail.run.id, format)}
+          onClose={() => setRunDetailOpen(false)}
+        />
+      )}
 
       {/* Log Modal */}
       {logModalOpen && (
@@ -704,6 +966,227 @@ function App() {
             <div className="flex-1 overflow-auto p-4 font-mono text-sm">
               <pre className="text-green-400 whitespace-pre-wrap leading-relaxed">{logs}</pre>
             </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function RunDetailModal({
+  detail,
+  loading,
+  page,
+  onPageChange,
+  onDownload,
+  onClose
+}: {
+  detail: any
+  loading: boolean
+  page: number
+  onPageChange: (page: number) => void
+  onDownload: (format: 'json' | 'csv') => void
+  onClose: () => void
+}) {
+  const [previewImage, setPreviewImage] = useState<string | null>(null)
+  const records = (detail?.items || []).map((item: any) => item.data || {})
+  let schemaColumns: string[] = []
+  let schemaLabels: Record<string, string> = {}
+  try {
+    const schema = JSON.parse(detail?.run?.actor?.outputSchema || '{}')
+    schemaColumns = Object.keys(schema?.properties || {})
+    schemaLabels = Object.fromEntries(
+      Object.entries(schema?.properties || {}).map(([key, property]: [string, any]) => [
+        key,
+        typeof property?.title === 'string' ? property.title : humanizeFieldName(key)
+      ])
+    )
+  } catch {
+    schemaColumns = []
+    schemaLabels = {}
+  }
+  const columns = Array.from(new Set([
+    ...schemaColumns,
+    ...records.flatMap((record: Record<string, unknown>) => Object.keys(record))
+  ]))
+
+  const renderValue = (value: unknown, column: string) => {
+    if (value === null || value === undefined || value === '') {
+      return <span className="text-gray-300">—</span>
+    }
+    const text = typeof value === 'object' ? JSON.stringify(value) : String(value)
+    if (/^https?:\/\//.test(text)) {
+      const isImage = /image|thumbnail|avatar|photo|picture|img|hinh/i.test(column) || /\.(jpg|jpeg|png|webp|gif|svg)(\?.*)?$/i.test(text)
+      if (isImage) {
+        return (
+          <button 
+            type="button"
+            onClick={(e) => { e.stopPropagation(); setPreviewImage(text); }}
+            title="Bấm để xem ảnh phóng to trực tiếp" 
+            className="inline-block relative group text-left cursor-pointer"
+          >
+            <img 
+              src={text} 
+              alt="" 
+              className="w-14 h-14 rounded-xl object-cover bg-gray-100 border border-gray-200 shadow-sm group-hover:opacity-85 group-hover:scale-105 transition-all" 
+            />
+          </button>
+        )
+      }
+      return (
+        <a href={text} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline block max-w-xs truncate">
+          {text}
+        </a>
+      )
+    }
+    return <span className="block max-w-xs whitespace-normal break-words">{text}</span>
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white w-full max-w-[94vw] h-[90vh] rounded-3xl shadow-2xl flex flex-col overflow-hidden">
+        <div className="flex justify-between items-start gap-4 p-6 border-b border-gray-100">
+          <div>
+            <div className="flex items-center gap-3">
+              <h2 className="text-xl font-semibold text-gray-900">Run data</h2>
+              {detail?.run?.status && (
+                <span className="px-3 py-1 rounded-full bg-gray-100 text-gray-700 text-xs font-semibold">
+                  {detail.run.status}
+                </span>
+              )}
+            </div>
+            <p className="mt-1 text-xs font-mono text-gray-400">{detail?.run?.id}</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={() => onDownload('json')} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-50 text-blue-700 text-sm font-medium">
+              <FileJson size={16} /> JSON
+            </button>
+            <button onClick={() => onDownload('csv')} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-50 text-emerald-700 text-sm font-medium">
+              <FileSpreadsheet size={16} /> CSV
+            </button>
+            <button onClick={onClose} className="ml-2 text-gray-400 hover:text-gray-800 text-2xl">×</button>
+          </div>
+        </div>
+
+        {loading && !detail ? (
+          <div className="flex-1 flex items-center justify-center text-gray-500">Loading data…</div>
+        ) : detail ? (
+          <>
+            <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 p-5 bg-gray-50 border-b border-gray-100">
+              <div className="bg-white rounded-2xl p-4">
+                <div className="text-xs uppercase tracking-wide text-gray-400">Crawler</div>
+                <div className="mt-1 font-medium">{detail.run.actor?.name}</div>
+                <div className="text-sm text-gray-500">v{detail.run.actor?.version}</div>
+              </div>
+              <div className="bg-white rounded-2xl p-4">
+                <div className="text-xs uppercase tracking-wide text-gray-400">Input</div>
+                <pre className="mt-2 text-xs text-gray-700 whitespace-pre-wrap max-h-24 overflow-auto">{JSON.stringify(detail.run.input, null, 2)}</pre>
+              </div>
+              <div className="bg-white rounded-2xl p-4">
+                <div className="text-xs uppercase tracking-wide text-gray-400">Metadata</div>
+                <pre className="mt-2 text-xs text-gray-700 whitespace-pre-wrap max-h-24 overflow-auto">{JSON.stringify(detail.run.outputMetadata, null, 2)}</pre>
+              </div>
+              <div className="bg-white rounded-2xl p-4">
+                <div className="text-xs uppercase tracking-wide text-gray-400">Result</div>
+                <div className="mt-1 text-2xl font-semibold">{detail.run.itemCount}</div>
+                <div className="text-sm text-gray-500">items stored in database</div>
+                {detail.run.outputError && <div className="mt-2 text-xs text-red-600">{detail.run.outputError}</div>}
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-auto">
+              {records.length > 0 ? (
+                <table className="min-w-full text-left text-sm">
+                  <thead className="sticky top-0 bg-white border-b border-gray-200 text-gray-500">
+                    <tr>
+                      <th className="px-4 py-3">STT</th>
+                      {columns.map((column) => (
+                        <th key={column} className="px-4 py-3 whitespace-nowrap">
+                          {schemaLabels[column] || humanizeFieldName(column)}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {detail.items.map((item: any) => (
+                      <tr key={item.id} className="hover:bg-blue-50/40 align-top">
+                        <td className="px-4 py-3 text-gray-400">{item.position + 1}</td>
+                        {columns.map((column) => (
+                          <td key={column} className="px-4 py-3 text-gray-700">{renderValue(item.data?.[column], column)}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <div className="h-full flex items-center justify-center text-gray-400">This run has no data items.</div>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between px-5 py-4 border-t border-gray-100 bg-white">
+              <span className="text-sm text-gray-500">
+                Page {detail.pagination.page} of {detail.pagination.totalPages} · {detail.pagination.total} items
+              </span>
+              <div className="flex gap-2">
+                <button
+                  disabled={page <= 1 || loading}
+                  onClick={() => onPageChange(page - 1)}
+                  className="p-2 rounded-lg bg-gray-100 disabled:opacity-40"
+                >
+                  <ChevronLeft size={18} />
+                </button>
+                <button
+                  disabled={page >= detail.pagination.totalPages || loading}
+                  onClick={() => onPageChange(page + 1)}
+                  className="p-2 rounded-lg bg-gray-100 disabled:opacity-40"
+                >
+                  <ChevronRight size={18} />
+                </button>
+              </div>
+            </div>
+          </>
+        ) : (
+          <div className="flex-1 flex items-center justify-center text-red-500">Unable to load run data.</div>
+        )}
+      </div>
+
+      {previewImage && (
+        <div 
+          className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[70] flex items-center justify-center p-4"
+          onClick={() => setPreviewImage(null)}
+        >
+          <div 
+            className="relative max-w-5xl max-h-[90vh] flex flex-col items-center justify-center"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <img 
+              src={previewImage} 
+              alt="Preview" 
+              className="max-w-full max-h-[82vh] object-contain rounded-2xl shadow-2xl border border-white/10" 
+            />
+            <div className="mt-4 flex items-center gap-4 bg-white/10 backdrop-blur-md px-5 py-2.5 rounded-full border border-white/20 text-white text-xs font-medium">
+              <a 
+                href={previewImage} 
+                target="_blank" 
+                rel="noreferrer"
+                className="hover:underline flex items-center gap-1.5 text-white"
+              >
+                Mở tab mới <ExternalLink size={13} />
+              </a>
+              <span className="text-white/40">•</span>
+              <button 
+                onClick={() => setPreviewImage(null)}
+                className="hover:underline text-white/80 hover:text-white"
+              >
+                Đóng
+              </button>
+            </div>
+            <button 
+              onClick={() => setPreviewImage(null)}
+              className="absolute -top-10 -right-2 text-white/80 hover:text-white text-3xl font-light p-2"
+            >
+              ✕
+            </button>
           </div>
         </div>
       )}

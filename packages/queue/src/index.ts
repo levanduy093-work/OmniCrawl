@@ -1,10 +1,12 @@
 import { prisma } from '@omnicrawl/database';
+import type { Run } from '@omnicrawl/database';
 
 export class JobQueue {
-  async pushJob(actorId: string, _inputData: any = {}) {
+  async pushJob(actorId: string, inputData: any = {}): Promise<Run> {
     const run = await prisma.run.create({
       data: {
         actorId,
+        input: inputData,
         status: 'PENDING',
       }
     });

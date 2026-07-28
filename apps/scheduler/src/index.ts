@@ -70,23 +70,29 @@ cron.schedule('* * * * *', async () => {
               data: {
                 actorId: schedule.actorId,
                 userId: schedule.userId!,
-                status: schedule.actor.name === 'shopee-scraper'
-                  ? 'BROWSER_PENDING'
-                  : 'PENDING'
+                status: 'CREATING'
               }
             });
           });
           if (!createdRun) continue;
           try {
-            writeRunInput(
+            await writeRunInput(
               createdRun.id,
               {
                 id: schedule.actor.id,
                 name: schedule.actor.name,
                 version: schedule.actor.version
               },
-              schedule.input ? JSON.parse(schedule.input) : {}
+              schedule.input ?? {}
             );
+            await prisma.run.update({
+              where: { id: createdRun.id },
+              data: {
+                status: schedule.actor.name === 'shopee-scraper'
+                  ? 'BROWSER_PENDING'
+                  : 'PENDING'
+              }
+            });
           } catch (storageError) {
             await prisma.$transaction([
               prisma.run.update({

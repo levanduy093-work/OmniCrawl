@@ -4,6 +4,7 @@ import { prisma } from '@omnicrawl/database';
 import { queue } from '@omnicrawl/queue';
 import {
   Dataset,
+  RUN_OUTPUT_KIND,
   readRunInput,
   readRunInputDocument,
   readRunOutput,
@@ -112,20 +113,57 @@ function normalizeActorInput(schemaJson: string | null, rawInput: Record<string,
   return input;
 }
 
+function csvCell(value: unknown) {
+  let text = value === null || value === undefined
+    ? ''
+    : typeof value === 'object'
+      ? JSON.stringify(value)
+      : String(value);
+  if (/^[=+\-@]/.test(text)) text = `'${text}`;
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function outputSchemaColumns(schemaJson: string | null) {
+  if (!schemaJson) return [];
+  try {
+    const schema = JSON.parse(schemaJson);
+    return schema?.properties && typeof schema.properties === 'object'
+      ? Object.keys(schema.properties)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
 // Auth Middleware
-const requireAuth = (req: any, res: any, next: any) => {
+const requireAuth = async (req: any, res: any, next: any) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   const token = authHeader.split(' ')[1];
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded;
+    const decoded = jwt.verify(token, JWT_SECRET) as jwt.JwtPayload;
+    const user = await prisma.user.findUnique({
+      where: { id: String(decoded.id || '') },
+      select: { id: true, email: true, role: true, status: true, credits: true }
+    });
+    if (!user) return res.status(401).json({ error: 'User no longer exists' });
+    if (user.status !== 'ACTIVE') {
+      return res.status(403).json({ error: 'Account is suspended' });
+    }
+    req.user = user;
     next();
   } catch (err) {
     return res.status(401).json({ error: 'Invalid token' });
   }
+};
+
+const requireAdmin = (req: any, res: any, next: any) => {
+  if (!['ADMIN', 'SUPER_ADMIN'].includes(req.user?.role)) {
+    return res.status(403).json({ error: 'Administrator role required' });
+  }
+  next();
 };
 
 // --- AUTH ROUTES ---
@@ -146,7 +184,16 @@ app.post('/api/auth/register', async (req, res) => {
     });
 
     const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ token, user: { id: user.id, email: user.email, credits: user.credits } });
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        status: user.status,
+        credits: user.credits
+      }
+    });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -162,12 +209,22 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const user = await prisma.user.findUnique({ where: { email: normalizedEmail } });
     if (!user) return res.status(400).json({ error: 'Invalid credentials' });
+    if (user.status !== 'ACTIVE') return res.status(403).json({ error: 'Account is suspended' });
     
     const valid = await bcrypt.compare(password, user.password);
     if (!valid) return res.status(400).json({ error: 'Invalid credentials' });
     
     const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ token, user: { id: user.id, email: user.email, credits: user.credits } });
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        status: user.status,
+        credits: user.credits
+      }
+    });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -176,7 +233,139 @@ app.post('/api/auth/login', async (req, res) => {
 app.get('/api/auth/me', requireAuth, async (req: any, res: any) => {
   const user = await prisma.user.findUnique({ where: { id: req.user.id } });
   if (!user) return res.status(404).json({ error: 'User not found' });
-  res.json({ id: user.id, email: user.email, credits: user.credits });
+  res.json({
+    id: user.id,
+    email: user.email,
+    role: user.role,
+    status: user.status,
+    credits: user.credits
+  });
+});
+
+// --- USER ADMINISTRATION ---
+
+app.get('/api/admin/users', requireAuth, requireAdmin, async (_req: any, res: any) => {
+  const users = await prisma.user.findMany({
+    orderBy: { createdAt: 'desc' },
+    select: {
+      id: true,
+      email: true,
+      role: true,
+      status: true,
+      credits: true,
+      createdAt: true,
+      updatedAt: true,
+      _count: { select: { runs: true, actors: true, schedules: true } }
+    }
+  });
+  res.json(users);
+});
+
+app.post('/api/admin/users', requireAuth, requireAdmin, async (req: any, res: any) => {
+  const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+  const password = typeof req.body?.password === 'string' ? req.body.password : '';
+  const requestedRole = String(req.body?.role || 'USER');
+  if (!['USER', 'ADMIN', 'SUPER_ADMIN'].includes(requestedRole)) {
+    return res.status(400).json({ error: 'Role must be USER, ADMIN or SUPER_ADMIN' });
+  }
+  if (requestedRole === 'SUPER_ADMIN' && req.user.role !== 'SUPER_ADMIN') {
+    return res.status(403).json({ error: 'Only a super administrator can grant SUPER_ADMIN' });
+  }
+  const role = requestedRole;
+  const credits = Number.isInteger(Number(req.body?.credits))
+    ? Math.max(0, Math.min(1_000_000, Number(req.body.credits)))
+    : 1000;
+  if (!email || password.length < 8) {
+    return res.status(400).json({ error: 'Valid email and password of at least 8 characters are required' });
+  }
+  try {
+    const created = await prisma.user.create({
+      data: {
+        email,
+        password: await bcrypt.hash(password, 10),
+        role,
+        status: 'ACTIVE',
+        credits
+      },
+      select: { id: true, email: true, role: true, status: true, credits: true, createdAt: true }
+    });
+    res.status(201).json(created);
+  } catch (error: any) {
+    if (error?.code === 'P2002') return res.status(409).json({ error: 'Email already exists' });
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.patch('/api/admin/users/:id', requireAuth, requireAdmin, async (req: any, res: any) => {
+  const target = await prisma.user.findUnique({ where: { id: req.params.id } });
+  if (!target) return res.status(404).json({ error: 'User not found' });
+
+  const role = req.body?.role;
+  const status = req.body?.status;
+  const credits = req.body?.credits;
+  if (role !== undefined && !['SUPER_ADMIN', 'ADMIN', 'USER'].includes(role)) {
+    return res.status(400).json({ error: 'Role must be SUPER_ADMIN, ADMIN or USER' });
+  }
+  if (status !== undefined && !['ACTIVE', 'SUSPENDED'].includes(status)) {
+    return res.status(400).json({ error: 'Status must be ACTIVE or SUSPENDED' });
+  }
+  if (credits !== undefined && (!Number.isInteger(Number(credits)) || Number(credits) < 0 || Number(credits) > 1_000_000)) {
+    return res.status(400).json({ error: 'Credits must be an integer from 0 to 1000000' });
+  }
+  if (target.role === 'SUPER_ADMIN' && req.user.role !== 'SUPER_ADMIN') {
+    return res.status(403).json({ error: 'Only a super administrator can modify a SUPER_ADMIN account' });
+  }
+  if (role === 'SUPER_ADMIN' && req.user.role !== 'SUPER_ADMIN') {
+    return res.status(403).json({ error: 'Only a super administrator can grant SUPER_ADMIN' });
+  }
+  if (target.id === req.user.id && ((role !== undefined && role !== target.role) || status === 'SUSPENDED')) {
+    return res.status(409).json({ error: 'You cannot change your own role or suspend your own account' });
+  }
+
+  if (
+    ['ADMIN', 'SUPER_ADMIN'].includes(target.role) &&
+    target.status === 'ACTIVE' &&
+    (role === 'USER' || status === 'SUSPENDED')
+  ) {
+    const activeAdmins = await prisma.user.count({
+      where: { role: { in: ['ADMIN', 'SUPER_ADMIN'] }, status: 'ACTIVE' }
+    });
+    if (activeAdmins <= 1) {
+      return res.status(409).json({ error: 'At least one active administrator is required' });
+    }
+  }
+  if (
+    target.role === 'SUPER_ADMIN' &&
+    target.status === 'ACTIVE' &&
+    (role !== undefined && role !== 'SUPER_ADMIN' || status === 'SUSPENDED')
+  ) {
+    const activeSuperAdmins = await prisma.user.count({
+      where: { role: 'SUPER_ADMIN', status: 'ACTIVE' }
+    });
+    if (activeSuperAdmins <= 1) {
+      return res.status(409).json({ error: 'At least one active super administrator is required' });
+    }
+  }
+
+  const updated = await prisma.user.update({
+    where: { id: target.id },
+    data: {
+      ...(role !== undefined ? { role } : {}),
+      ...(status !== undefined ? { status } : {}),
+      ...(credits !== undefined ? { credits: Number(credits) } : {})
+    },
+    select: {
+      id: true,
+      email: true,
+      role: true,
+      status: true,
+      credits: true,
+      createdAt: true,
+      updatedAt: true,
+      _count: { select: { runs: true, actors: true, schedules: true } }
+    }
+  });
+  res.json(updated);
 });
 
 // --- SHOPEE SESSION ROUTES ---
@@ -266,7 +455,7 @@ app.post('/api/actors/:id/run', requireAuth, async (req: any, res: any) => {
     });
 
     try {
-      writeRunInput(
+      await writeRunInput(
         run.id,
         { id: actor.id, name: actor.name, version: actor.version },
         input
@@ -329,7 +518,7 @@ app.get('/api/browser-agent/jobs/next', requireAuth, async (req: any, res: any) 
     });
     if (claim.count !== 1) return res.status(204).send();
 
-    const input: any = readRunInput(candidate.id);
+    const input: any = await readRunInput(candidate.id);
     const maxItemsValue = Number(input.maxItems ?? 30);
     const maxItems = Number.isFinite(maxItemsValue)
       ? Math.min(500, Math.max(1, Math.floor(maxItemsValue)))
@@ -496,7 +685,7 @@ app.get('/api/runs/:id/input', requireAuth, async (req: any, res: any) => {
     select: { id: true }
   });
   if (!run) return res.status(404).json({ error: 'Run not found' });
-  const input = readRunInputDocument(run.id);
+  const input = await readRunInputDocument(run.id);
   if (!input) return res.status(404).json({ error: 'Run input not found' });
   res.json(input);
 });
@@ -507,9 +696,150 @@ app.get('/api/runs/:id/output', requireAuth, async (req: any, res: any) => {
     select: { id: true }
   });
   if (!run) return res.status(404).json({ error: 'Run not found' });
-  const output = readRunOutput(run.id);
+  const output = await readRunOutput(run.id);
   if (!output) return res.status(404).json({ error: 'Run output not found' });
   res.json(output);
+});
+
+app.get('/api/runs/:id/items', requireAuth, async (req: any, res: any) => {
+  const page = Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
+  const pageSize = Math.min(
+    100,
+    Math.max(1, Number.parseInt(String(req.query.pageSize || '25'), 10) || 25)
+  );
+  const run = await prisma.run.findFirst({
+    where: { id: req.params.id, userId: req.user.id },
+    include: { actor: true }
+  });
+  if (!run) return res.status(404).json({ error: 'Run not found' });
+
+  const items = await prisma.datasetItem.findMany({
+    where: { runId: run.id },
+    orderBy: { position: 'asc' },
+    skip: (page - 1) * pageSize,
+    take: pageSize,
+    select: { id: true, position: true, data: true, createdAt: true }
+  });
+  res.json({
+    run: {
+      id: run.id,
+      status: run.status,
+      input: run.input ?? {},
+      outputMetadata: run.outputMetadata ?? {},
+      outputError: run.outputError,
+      itemCount: run.itemCount,
+      startedAt: run.startedAt,
+      finishedAt: run.finishedAt,
+      createdAt: run.createdAt,
+      actor: {
+        id: run.actor.id,
+        name: run.actor.name,
+        version: run.actor.version,
+        outputSchema: run.actor.outputSchema
+      }
+    },
+    pagination: {
+      page,
+      pageSize,
+      total: run.itemCount,
+      totalPages: Math.max(1, Math.ceil(run.itemCount / pageSize))
+    },
+    items: items.map((item) => ({
+      id: item.id,
+      position: item.position,
+      createdAt: item.createdAt,
+      data: item.data
+    }))
+  });
+});
+
+app.get('/api/runs/:id/export', requireAuth, async (req: any, res: any) => {
+  const format = String(req.query.format || 'json').toLowerCase();
+  if (!['json', 'csv'].includes(format)) {
+    return res.status(400).json({ error: 'Format must be json or csv' });
+  }
+  const run = await prisma.run.findFirst({
+    where: { id: req.params.id, userId: req.user.id },
+    include: { actor: true }
+  });
+  if (!run) return res.status(404).json({ error: 'Run not found' });
+
+  const filename = `omnicrawl-${run.actor.name}-${run.id}.${format}`;
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  if (format === 'json') {
+    res.type('application/json');
+    const envelope = {
+      schemaVersion: '2.0',
+      kind: RUN_OUTPUT_KIND,
+      runId: run.id,
+      actor: { id: run.actor.id, name: run.actor.name, version: run.actor.version },
+      status: run.status,
+      createdAt: run.createdAt,
+      updatedAt: run.updatedAt,
+      completedAt: run.finishedAt,
+      stats: { itemCount: run.itemCount },
+      metadata: run.outputMetadata ?? {},
+      error: run.outputError
+    };
+    const prefix = JSON.stringify(envelope, null, 2).replace(/\n}$/, ',\n  "items": [\n');
+    res.write(prefix);
+    let cursor = -1;
+    let first = true;
+    while (true) {
+      const batch = await prisma.datasetItem.findMany({
+        where: { runId: run.id, position: { gt: cursor } },
+        orderBy: { position: 'asc' },
+        take: 1000,
+        select: { position: true, data: true }
+      });
+      if (!batch.length) break;
+      for (const item of batch) {
+        res.write(`${first ? '' : ',\n'}    ${JSON.stringify(item.data)}`);
+        first = false;
+        cursor = item.position;
+      }
+    }
+    return res.end('\n  ]\n}');
+  }
+
+  const schemaColumns = outputSchemaColumns(run.actor.outputSchema);
+  const sample = schemaColumns.length === 0
+    ? await prisma.datasetItem.findMany({
+      where: { runId: run.id },
+      orderBy: { position: 'asc' },
+      take: 100,
+      select: { data: true }
+    })
+    : [];
+  const records = sample.map((item) => (
+    item.data && typeof item.data === 'object' && !Array.isArray(item.data)
+      ? item.data as Record<string, unknown>
+      : { value: item.data }
+  ));
+  const columns = Array.from(new Set([
+    ...schemaColumns,
+    ...records.flatMap((record) => Object.keys(record))
+  ]));
+  res.type('text/csv; charset=utf-8');
+  res.write(`\uFEFF${columns.map(csvCell).join(',')}\r\n`);
+  let cursor = -1;
+  while (true) {
+    const batch = await prisma.datasetItem.findMany({
+      where: { runId: run.id, position: { gt: cursor } },
+      orderBy: { position: 'asc' },
+      take: 1000,
+      select: { position: true, data: true }
+    });
+    if (!batch.length) break;
+    for (const item of batch) {
+      const record = item.data && typeof item.data === 'object' && !Array.isArray(item.data)
+        ? item.data as Record<string, unknown>
+        : { value: item.data };
+      res.write(`${columns.map((column) => csvCell(record[column])).join(',')}\r\n`);
+      cursor = item.position;
+    }
+  }
+  return res.end();
 });
 
 // Stop a run
@@ -630,7 +960,7 @@ app.post('/api/schedules', requireAuth, async (req: any, res: any) => {
       actorId,
       userId: req.user.id,
       cron,
-      input: JSON.stringify(input),
+      input: input as any,
       enabled: true
     }
   });

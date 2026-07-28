@@ -26,10 +26,10 @@ async function main() {
     process.exit(1);
   }
 
-  const input: any = readRunInput(runId);
+  const input: any = await readRunInput(runId);
   if (typeof input.cookie === 'string' && input.cookie) {
-    const inputDocument = readRunInputDocument(runId);
-    writeRunInput(
+    const inputDocument = await readRunInputDocument(runId);
+    await writeRunInput(
       runId,
       inputDocument?.actor ?? { name: actorName },
       { ...input, cookie: '[REDACTED]' }
