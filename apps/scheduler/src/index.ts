@@ -1,6 +1,7 @@
 import cron from 'node-cron';
 import { CronExpressionParser } from 'cron-parser';
 import { prisma } from '@omnicrawl/database';
+import { writeRunInput } from '@omnicrawl/sdk';
 import dotenv from 'dotenv';
 import * as path from 'path';
 
@@ -16,7 +17,7 @@ cron.schedule('* * * * *', async () => {
       where: { enabled: true },
       include: {
         actor: true,
-        user: { include: { shopeeSession: true } }
+        user: true
       }
     });
     
@@ -27,13 +28,6 @@ cron.schedule('* * * * *', async () => {
     for (const schedule of schedules) {
       if (!schedule.user) continue;
       if (schedule.updatedAt.getTime() >= minuteStart.getTime()) continue;
-      if (
-        schedule.actor.name === 'shopee-scraper' &&
-        schedule.user.shopeeSession?.status !== 'CONNECTED'
-      ) {
-        console.log(`[Scheduler] Skipping Shopee schedule ${schedule.id}: account is not connected.`);
-        continue;
-      }
 
       let nextDate: Date;
       try {
@@ -53,7 +47,7 @@ cron.schedule('* * * * *', async () => {
 
           // Claim this schedule snapshot before charging and creating the run.
           // A second scheduler instance will lose the compare-and-set claim.
-          const triggered = await prisma.$transaction(async (tx) => {
+          const createdRun = await prisma.$transaction(async (tx) => {
             const claim = await tx.schedule.updateMany({
               where: {
                 id: schedule.id,
@@ -62,7 +56,7 @@ cron.schedule('* * * * *', async () => {
               },
               data: { updatedAt: now }
             });
-            if (claim.count !== 1) return false;
+            if (claim.count !== 1) return null;
 
             const debit = await tx.user.updateMany({
               where: { id: schedule.userId!, credits: { gte: 10 } },
@@ -72,16 +66,40 @@ cron.schedule('* * * * *', async () => {
               throw new Error('INSUFFICIENT_CREDITS');
             }
 
-            await tx.run.create({
+            return tx.run.create({
               data: {
                 actorId: schedule.actorId,
                 userId: schedule.userId!,
-                status: 'PENDING'
+                status: schedule.actor.name === 'shopee-scraper'
+                  ? 'BROWSER_PENDING'
+                  : 'PENDING'
               }
             });
-            return true;
           });
-          if (!triggered) continue;
+          if (!createdRun) continue;
+          try {
+            writeRunInput(
+              createdRun.id,
+              {
+                id: schedule.actor.id,
+                name: schedule.actor.name,
+                version: schedule.actor.version
+              },
+              schedule.input ? JSON.parse(schedule.input) : {}
+            );
+          } catch (storageError) {
+            await prisma.$transaction([
+              prisma.run.update({
+                where: { id: createdRun.id },
+                data: { status: 'FAILED', finishedAt: new Date() }
+              }),
+              prisma.user.update({
+                where: { id: schedule.userId! },
+                data: { credits: { increment: 10 } }
+              })
+            ]);
+            throw storageError;
+          }
           console.log(`[Scheduler] Triggered run and deducted 10 credits.`);
         }
       } catch (err) {

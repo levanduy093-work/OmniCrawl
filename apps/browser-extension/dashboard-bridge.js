@@ -1,0 +1,51 @@
+const DASHBOARD_ORIGIN = 'http://localhost:5173';
+const EXTENSION_VERSION = chrome.runtime.getManifest().version;
+
+function reportStatus(connected) {
+  window.postMessage({
+    source: 'OMNICRAWL_EXTENSION',
+    type: 'STATUS',
+    connected,
+    version: EXTENSION_VERSION
+  }, DASHBOARD_ORIGIN);
+}
+
+function sendToBackground(message) {
+  try {
+    return chrome.runtime.sendMessage(message).catch((error) => {
+      reportStatus(false);
+      throw error;
+    });
+  } catch (error) {
+    reportStatus(false);
+    return Promise.reject(error);
+  }
+}
+
+window.addEventListener('message', (event) => {
+  if (event.source !== window || event.origin !== DASHBOARD_ORIGIN) return;
+  const message = event.data;
+  if (!message || message.source !== 'OMNICRAWL_DASHBOARD') return;
+
+  if (message.type === 'CONFIGURE') {
+    sendToBackground({
+      type: 'CONFIGURE',
+      token: message.token,
+      apiBase: 'http://localhost:3001'
+    }).then(() => reportStatus(true)).catch(() => reportStatus(false));
+  }
+
+  if (message.type === 'PING') {
+    sendToBackground({ type: 'PING' })
+      .then(() => reportStatus(true))
+      .catch(() => reportStatus(false));
+  }
+
+  if (message.type === 'POLL_NOW') {
+    sendToBackground({ type: 'POLL_NOW' }).catch(() => undefined);
+  }
+});
+
+sendToBackground({ type: 'PING' })
+  .then(() => reportStatus(true))
+  .catch(() => reportStatus(false));

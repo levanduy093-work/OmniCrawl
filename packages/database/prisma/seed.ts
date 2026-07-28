@@ -35,16 +35,57 @@ async function main() {
 
   console.log(`User created with id: ${user.id}`);
 
+  const shopeeInputSchema = JSON.stringify({
+    type: 'object',
+    required: ['keyword'],
+    properties: {
+      keyword: {
+        type: 'string',
+        title: 'Từ khóa tìm kiếm',
+        minLength: 1
+      },
+      maxItems: {
+        type: 'integer',
+        title: 'Số sản phẩm tối đa',
+        minimum: 1,
+        maximum: 500,
+        default: 50
+      },
+      allowEmpty: {
+        type: 'boolean',
+        title: 'Cho phép kết quả rỗng',
+        default: false
+      }
+    }
+  });
+  const shopeeOutputSchema = JSON.stringify({
+    type: 'object',
+    required: ['itemId', 'shopId', 'title', 'price', 'url'],
+    properties: {
+      itemId: { type: 'string' },
+      shopId: { type: 'string' },
+      title: { type: 'string' },
+      price: { type: 'string' },
+      sold: { type: ['string', 'number'] },
+      url: { type: 'string', format: 'uri' },
+      image: { type: 'string', format: 'uri' }
+    }
+  });
+
   // Create Shopee scraper actor
   const actor = await prisma.actor.upsert({
     where: { name: 'shopee-scraper' },
     update: {
-      userId: null
+      userId: null,
+      inputSchema: shopeeInputSchema,
+      outputSchema: shopeeOutputSchema
     },
     create: {
       name: 'shopee-scraper',
       description: 'Advanced stealth scraper for Shopee VN search results using Crawlee.',
-      userId: null
+      userId: null,
+      inputSchema: shopeeInputSchema,
+      outputSchema: shopeeOutputSchema
     }
   });
 

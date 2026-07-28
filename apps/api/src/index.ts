@@ -2,6 +2,14 @@ import express from 'express';
 import cors from 'cors';
 import { prisma } from '@omnicrawl/database';
 import { queue } from '@omnicrawl/queue';
+import {
+  Dataset,
+  readRunInput,
+  readRunInputDocument,
+  readRunOutput,
+  removeRunStorage,
+  writeRunInput
+} from '@omnicrawl/sdk';
 import * as fs from 'fs';
 import * as path from 'path';
 import { exec } from 'child_process';
@@ -25,6 +33,84 @@ const PORT = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || 'omnicrawl-secret-key-12345';
 const WORKSPACE_ROOT = path.resolve(__dirname, '..', '..', '..');
 const STORAGE_ROOT = path.join(WORKSPACE_ROOT, 'storage');
+
+function appendRunLog(runId: string, message: string) {
+  const logsDir = path.join(STORAGE_ROOT, 'logs');
+  fs.mkdirSync(logsDir, { recursive: true });
+  fs.appendFileSync(path.join(logsDir, `${runId}.log`), `${message}\n`);
+}
+
+function normalizeActorInput(schemaJson: string | null, rawInput: Record<string, unknown>) {
+  if (!schemaJson) return rawInput;
+
+  let schema: any;
+  try {
+    schema = JSON.parse(schemaJson);
+  } catch {
+    throw new Error('Actor input schema is invalid');
+  }
+
+  const input: Record<string, unknown> = { ...rawInput };
+  const invalidInput = (message: string): never => {
+    const error = new Error(message);
+    error.name = 'ActorInputValidationError';
+    throw error;
+  };
+  const properties = schema?.properties && typeof schema.properties === 'object'
+    ? schema.properties
+    : {};
+
+  for (const [key, propertyValue] of Object.entries(properties)) {
+    const property: any = propertyValue;
+    if ((input[key] === undefined || input[key] === '') && property.default !== undefined) {
+      input[key] = property.default;
+    }
+    if (
+      (property.type === 'integer' || property.type === 'number') &&
+      input[key] !== undefined &&
+      input[key] !== ''
+    ) {
+      const numberValue = Number(input[key]);
+      if (!Number.isFinite(numberValue)) invalidInput(`${key} must be a number`);
+      input[key] = property.type === 'integer' ? Math.trunc(numberValue) : numberValue;
+    }
+  }
+
+  for (const key of Array.isArray(schema.required) ? schema.required : []) {
+    if (input[key] === undefined || input[key] === null || input[key] === '') {
+      invalidInput(`${key} is required`);
+    }
+  }
+
+  for (const [key, value] of Object.entries(input)) {
+    const property: any = properties[key];
+    if (!property) continue;
+    if (property.type === 'string' && typeof value !== 'string') {
+      invalidInput(`${key} must be a string`);
+    }
+    if (property.type === 'boolean' && typeof value !== 'boolean') {
+      invalidInput(`${key} must be a boolean`);
+    }
+    if (property.type === 'integer' && !Number.isInteger(value)) {
+      invalidInput(`${key} must be an integer`);
+    }
+    if (
+      typeof value === 'string' &&
+      typeof property.minLength === 'number' &&
+      value.trim().length < property.minLength
+    ) {
+      invalidInput(`${key} is too short`);
+    }
+    if (typeof value === 'number' && typeof property.minimum === 'number' && value < property.minimum) {
+      invalidInput(`${key} must be at least ${property.minimum}`);
+    }
+    if (typeof value === 'number' && typeof property.maximum === 'number' && value > property.maximum) {
+      invalidInput(`${key} must be at most ${property.maximum}`);
+    }
+  }
+
+  return input;
+}
 
 // Auth Middleware
 const requireAuth = (req: any, res: any, next: any) => {
@@ -146,7 +232,7 @@ app.get('/api/actors', requireAuth, async (req: any, res) => {
 // Trigger a run
 app.post('/api/actors/:id/run', requireAuth, async (req: any, res: any) => {
   const { id } = req.params;
-  const input = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+  const rawInput = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
 
   try {
     const actor = await prisma.actor.findFirst({
@@ -158,18 +244,13 @@ app.post('/api/actors/:id/run', requireAuth, async (req: any, res: any) => {
     if (!actor) {
       return res.status(404).json({ error: 'Actor not found' });
     }
-    if (actor.name === 'shopee-scraper') {
-      const session = await prisma.shopeeSession.findUnique({
-        where: { userId: req.user.id }
-      });
-      const hasLegacyCookie = typeof input.cookie === 'string' && input.cookie.trim();
-      if (session?.status !== 'CONNECTED' && !hasLegacyCookie && !process.env.SHOPEE_COOKIE) {
-        return res.status(400).json({
-          error: 'Connect your Shopee account before running this crawler'
-        });
-      }
+    const input = normalizeActorInput(actor.inputSchema, rawInput);
+    if (
+      actor.name === 'shopee-scraper' &&
+      (typeof input.keyword !== 'string' || !input.keyword.trim())
+    ) {
+      return res.status(400).json({ error: 'Shopee keyword is required' });
     }
-
     const run = await prisma.$transaction(async (tx) => {
       const debit = await tx.user.updateMany({
         where: { id: req.user.id, credits: { gte: 10 } },
@@ -185,9 +266,11 @@ app.post('/api/actors/:id/run', requireAuth, async (req: any, res: any) => {
     });
 
     try {
-      const kvPath = path.join(STORAGE_ROOT, 'key_value_stores', run.id);
-      fs.mkdirSync(kvPath, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(path.join(kvPath, 'INPUT.json'), JSON.stringify(input), { mode: 0o600 });
+      writeRunInput(
+        run.id,
+        { id: actor.id, name: actor.name, version: actor.version },
+        input
+      );
     } catch (storageError) {
       await prisma.$transaction([
         prisma.run.update({
@@ -204,16 +287,178 @@ app.post('/api/actors/:id/run', requireAuth, async (req: any, res: any) => {
 
     const queuedRun = await prisma.run.update({
       where: { id: run.id },
-      data: { status: 'PENDING' }
+      data: {
+        status: actor.name === 'shopee-scraper' ? 'BROWSER_PENDING' : 'PENDING'
+      }
     });
 
     res.json({ message: 'Run scheduled. Deducted 10 credits.', run: queuedRun });
   } catch (err: any) {
+    if (err.name === 'ActorInputValidationError') {
+      return res.status(400).json({ error: err.message });
+    }
     if (err.message === 'INSUFFICIENT_CREDITS') {
       return res.status(403).json({ error: 'Insufficient credits. You need at least 10 credits to run.' });
     }
     res.status(500).json({ error: err.message });
   }
+});
+
+// --- BROWSER AGENT ROUTES ---
+
+app.get('/api/browser-agent/jobs/next', requireAuth, async (req: any, res: any) => {
+  try {
+    const candidate = await prisma.run.findFirst({
+      where: {
+        userId: req.user.id,
+        status: 'BROWSER_PENDING',
+        actor: { name: 'shopee-scraper' }
+      },
+      orderBy: { createdAt: 'asc' },
+      include: { actor: true }
+    });
+    if (!candidate) return res.status(204).send();
+
+    const claim = await prisma.run.updateMany({
+      where: {
+        id: candidate.id,
+        userId: req.user.id,
+        status: 'BROWSER_PENDING'
+      },
+      data: { status: 'BROWSER_RUNNING', startedAt: new Date() }
+    });
+    if (claim.count !== 1) return res.status(204).send();
+
+    const input: any = readRunInput(candidate.id);
+    const maxItemsValue = Number(input.maxItems ?? 30);
+    const maxItems = Number.isFinite(maxItemsValue)
+      ? Math.min(500, Math.max(1, Math.floor(maxItemsValue)))
+      : 30;
+    appendRunLog(
+      candidate.id,
+      `[INFO] [BrowserAgent] Claimed Shopee job for keyword "${String(input.keyword || 'máy in 3d')}".`
+    );
+    const keyword = String(input.keyword || 'máy in 3d').trim() || 'máy in 3d';
+    await new Dataset(candidate.id).setMetadata({
+      source: 'shopee.vn',
+      query: { keyword, maxItems }
+    });
+    res.json({
+      runId: candidate.id,
+      keyword,
+      maxItems
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/browser-agent/jobs/:id/items', requireAuth, async (req: any, res: any) => {
+  try {
+    const run = await prisma.run.findFirst({
+      where: {
+        id: req.params.id,
+        userId: req.user.id,
+        status: 'BROWSER_RUNNING',
+        actor: { name: 'shopee-scraper' }
+      },
+      select: { id: true }
+    });
+    if (!run) return res.status(404).json({ error: 'Active browser job not found' });
+
+    const items = Array.isArray(req.body?.items) ? req.body.items.slice(0, 100) : [];
+    const safeItems = [];
+    for (const item of items) {
+      if (!item || typeof item !== 'object') continue;
+      safeItems.push({
+        itemId: item.itemId,
+        shopId: item.shopId,
+        title: String(item.title || '').slice(0, 1000),
+        price: String(item.price || '').slice(0, 100),
+        sold: item.sold ?? 0,
+        url: String(item.url || '').slice(0, 2000),
+        image: String(item.image || '').slice(0, 2000)
+      });
+    }
+    await new Dataset(run.id).pushData(safeItems);
+    const storedCount = safeItems.length;
+    appendRunLog(run.id, `[INFO] [BrowserAgent] Stored ${storedCount} products.`);
+    res.json({ accepted: storedCount });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/browser-agent/jobs/:id/log', requireAuth, async (req: any, res: any) => {
+  const run = await prisma.run.findFirst({
+    where: {
+      id: req.params.id,
+      userId: req.user.id,
+      status: 'BROWSER_RUNNING',
+      actor: { name: 'shopee-scraper' }
+    },
+    select: { id: true }
+  });
+  if (!run) return res.status(404).json({ error: 'Active browser job not found' });
+
+  const message = String(req.body?.message || '')
+    .replace(/[\r\n]+/g, ' ')
+    .slice(0, 1000);
+  if (message) appendRunLog(run.id, `[INFO] [BrowserAgent] ${message}`);
+  res.json({ success: true });
+});
+
+app.post('/api/browser-agent/jobs/:id/complete', requireAuth, async (req: any, res: any) => {
+  const dataset = new Dataset(req.params.id);
+  const storedCount = (await dataset.getData()).stats.itemCount;
+  if (storedCount === 0) {
+    const failed = await prisma.run.updateMany({
+      where: {
+        id: req.params.id,
+        userId: req.user.id,
+        status: 'BROWSER_RUNNING'
+      },
+      data: { status: 'FAILED', finishedAt: new Date() }
+    });
+    if (failed.count !== 1) {
+      return res.status(409).json({ error: 'Browser job is no longer active' });
+    }
+    appendRunLog(
+      req.params.id,
+      '[ERROR] [BrowserAgent] Shopee crawl ended without storing any products.'
+    );
+    await dataset.finalize('FAILED', 'Shopee crawl produced no products');
+    return res.status(422).json({ error: 'Shopee crawl produced no products' });
+  }
+
+  const completed = await prisma.run.updateMany({
+    where: {
+      id: req.params.id,
+      userId: req.user.id,
+      status: 'BROWSER_RUNNING'
+    },
+    data: { status: 'SUCCESS', finishedAt: new Date() }
+  });
+  if (completed.count !== 1) return res.status(409).json({ error: 'Browser job is no longer active' });
+  await dataset.finalize('SUCCESS');
+  appendRunLog(req.params.id, `[INFO] [BrowserAgent] Completed with ${storedCount} products.`);
+  res.json({ success: true });
+});
+
+app.post('/api/browser-agent/jobs/:id/fail', requireAuth, async (req: any, res: any) => {
+  const message = String(req.body?.error || 'Browser Agent failed').slice(0, 1000);
+  const failed = await prisma.run.updateMany({
+    where: {
+      id: req.params.id,
+      userId: req.user.id,
+      status: 'BROWSER_RUNNING'
+    },
+    data: { status: 'FAILED', finishedAt: new Date() }
+  });
+  if (failed.count !== 1) return res.status(409).json({ error: 'Browser job is no longer active' });
+  await new Dataset(req.params.id).finalize('FAILED', message);
+  appendRunLog(req.params.id, `[ERROR] [BrowserAgent] ${message}`);
+  res.json({ success: true });
 });
 
 // List runs
@@ -245,6 +490,28 @@ app.get('/api/runs/:id/logs', requireAuth, async (req: any, res) => {
   }
 });
 
+app.get('/api/runs/:id/input', requireAuth, async (req: any, res: any) => {
+  const run = await prisma.run.findFirst({
+    where: { id: req.params.id, userId: req.user.id },
+    select: { id: true }
+  });
+  if (!run) return res.status(404).json({ error: 'Run not found' });
+  const input = readRunInputDocument(run.id);
+  if (!input) return res.status(404).json({ error: 'Run input not found' });
+  res.json(input);
+});
+
+app.get('/api/runs/:id/output', requireAuth, async (req: any, res: any) => {
+  const run = await prisma.run.findFirst({
+    where: { id: req.params.id, userId: req.user.id },
+    select: { id: true }
+  });
+  if (!run) return res.status(404).json({ error: 'Run not found' });
+  const output = readRunOutput(run.id);
+  if (!output) return res.status(404).json({ error: 'Run output not found' });
+  res.json(output);
+});
+
 // Stop a run
 app.post('/api/runs/:id/stop', requireAuth, async (req: any, res) => {
   const { id } = req.params;
@@ -254,15 +521,28 @@ app.post('/api/runs/:id/stop', requireAuth, async (req: any, res) => {
     });
     if (!run) return res.status(404).json({ error: 'Run not found' });
 
-    if (run.status === 'PENDING') {
+    if (run.status === 'PENDING' || run.status === 'BROWSER_PENDING') {
       const stopped = await prisma.run.updateMany({
-        where: { id, userId: req.user.id, status: 'PENDING' },
+        where: { id, userId: req.user.id, status: run.status },
         data: { status: 'STOPPED', finishedAt: new Date() }
       });
       if (stopped.count !== 1) {
         return res.status(409).json({ error: 'Run status changed; refresh and try again' });
       }
+      await new Dataset(id).finalize('STOPPED');
       return res.json({ message: 'Pending run stopped.' });
+    }
+
+    if (run.status === 'BROWSER_RUNNING') {
+      const stopped = await prisma.run.updateMany({
+        where: { id, userId: req.user.id, status: 'BROWSER_RUNNING' },
+        data: { status: 'STOPPED', finishedAt: new Date() }
+      });
+      if (stopped.count !== 1) {
+        return res.status(409).json({ error: 'Run status changed; refresh and try again' });
+      }
+      await new Dataset(id).finalize('STOPPED');
+      return res.json({ message: 'Browser run stopped.' });
     }
 
     if (run.status !== 'RUNNING') {
@@ -290,11 +570,12 @@ app.delete('/api/runs/:id', requireAuth, async (req: any, res) => {
       where: { id, userId: req.user.id }
     });
     if (!run) return res.status(404).json({ error: 'Run not found' });
-    if (run.status === 'RUNNING' || run.status === 'STOPPING') {
+    if (run.status === 'RUNNING' || run.status === 'STOPPING' || run.status === 'BROWSER_RUNNING') {
       return res.status(409).json({ error: 'Stop the run before deleting it' });
     }
 
     await prisma.run.delete({ where: { id } });
+    removeRunStorage(id);
     res.json({ message: 'Run deleted.' });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -314,6 +595,9 @@ app.get('/api/schedules', requireAuth, async (req: any, res) => {
 // Create schedule
 app.post('/api/schedules', requireAuth, async (req: any, res: any) => {
   const { actorId, cron } = req.body;
+  const rawInput = req.body?.input && typeof req.body.input === 'object' && !Array.isArray(req.body.input)
+    ? req.body.input
+    : {};
   if (!actorId || !cron) {
     return res.status(400).json({ error: 'actorId and cron are required' });
   }
@@ -331,11 +615,22 @@ app.post('/api/schedules', requireAuth, async (req: any, res: any) => {
     return res.status(403).json({ error: 'Unauthorized to use this actor' });
   }
 
+  let input: Record<string, unknown>;
+  try {
+    input = normalizeActorInput(actor.inputSchema, rawInput);
+  } catch (err: any) {
+    if (err.name === 'ActorInputValidationError') {
+      return res.status(400).json({ error: err.message });
+    }
+    throw err;
+  }
+
   const schedule = await prisma.schedule.create({
     data: {
       actorId,
       userId: req.user.id,
       cron,
+      input: JSON.stringify(input),
       enabled: true
     }
   });
@@ -405,8 +700,19 @@ app.post('/api/templates/scaffold', requireAuth, async (req: any, res: any) => {
     pkg.name = name;
     fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
 
+    const manifestPath = path.join(actualTargetPath, 'actor.json');
+    const manifest = fs.existsSync(manifestPath)
+      ? JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+      : {};
     const actor = await prisma.actor.create({
-      data: { name, description: `Scaffolded from ${templateName}`, userId: req.user.id }
+      data: {
+        name,
+        description: manifest.description || `Scaffolded from ${templateName}`,
+        version: manifest.version || '1.0.0',
+        inputSchema: manifest.inputSchema ? JSON.stringify(manifest.inputSchema) : null,
+        outputSchema: manifest.outputSchema ? JSON.stringify(manifest.outputSchema) : null,
+        userId: req.user.id
+      }
     });
     
     exec(`cd ${WORKSPACE_ROOT} && pnpm install && pnpm build`);

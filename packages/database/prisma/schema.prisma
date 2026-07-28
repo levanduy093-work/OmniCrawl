@@ -42,6 +42,7 @@ model Actor {
   description String?
   version     String     @default("1.0.0")
   inputSchema String?    // JSON schema cho input
+  outputSchema String?   // JSON schema cho each item in output.items
   userId      String?    // Bổ sung userId (Optional for backward compatibility during dev)
   user        User?      @relation(fields: [userId], references: [id])
   createdAt   DateTime   @default(now())
@@ -57,7 +58,7 @@ model Run {
   userId      String?
   actor       Actor     @relation(fields: [actorId], references: [id])
   user        User?     @relation(fields: [userId], references: [id])
-  status      String    @default("PENDING") // CREATING, PENDING, RUNNING, STOPPING, STOPPED, SUCCESS, FAILED
+  status      String    @default("PENDING") // CREATING, PENDING, BROWSER_PENDING, RUNNING, BROWSER_RUNNING, STOPPING, STOPPED, SUCCESS, FAILED
   startedAt   DateTime?
   finishedAt  DateTime?
   createdAt   DateTime  @default(now())
@@ -69,6 +70,7 @@ model Schedule {
   actorId     String
   userId      String?
   cron        String
+  input       String?  // JSON payload reused for each scheduled run
   enabled     Boolean  @default(true)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt

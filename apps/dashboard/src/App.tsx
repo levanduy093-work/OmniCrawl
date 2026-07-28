@@ -4,6 +4,52 @@ import Login from './Login'
 import OmniCrawlLogo from './Logo'
 import './App.css'
 
+const REQUIRED_BROWSER_AGENT_VERSION = '0.3.3'
+
+type JsonSchemaProperty = {
+  type?: 'string' | 'integer' | 'number' | 'boolean'
+  title?: string
+  description?: string
+  default?: unknown
+  minimum?: number
+  maximum?: number
+  placeholder?: string
+}
+
+type JsonInputSchema = {
+  properties?: Record<string, JsonSchemaProperty>
+  required?: string[]
+}
+
+function parseInputSchema(schema?: string | null): JsonInputSchema | null {
+  if (!schema) return null
+  try {
+    const parsed = JSON.parse(schema)
+    return parsed && typeof parsed === 'object' ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function applyInputDefaults(schema: string | null | undefined, values: Record<string, unknown>) {
+  const parsed = parseInputSchema(schema)
+  const result: Record<string, unknown> = { ...values }
+
+  for (const [key, property] of Object.entries(parsed?.properties || {})) {
+    if ((result[key] === undefined || result[key] === '') && property.default !== undefined) {
+      result[key] = property.default
+    }
+    if ((property.type === 'integer' || property.type === 'number') && result[key] !== undefined && result[key] !== '') {
+      const numberValue = Number(result[key])
+      if (Number.isFinite(numberValue)) {
+        result[key] = property.type === 'integer' ? Math.trunc(numberValue) : numberValue
+      }
+    }
+  }
+
+  return result
+}
+
 function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem('token'))
   const [user, setUser] = useState<any>(null)
@@ -21,10 +67,12 @@ function App() {
   const [newActorName, setNewActorName] = useState('')
   const [newScheduleActorId, setNewScheduleActorId] = useState('')
   const [newScheduleCron, setNewScheduleCron] = useState('* * * * *')
+  const [newScheduleInput, setNewScheduleInput] = useState<Record<string, unknown>>({})
   const [isSidebarOpen, setIsSidebarOpen] = useState(true)
   const [runInputs, setRunInputs] = useState<Record<string, any>>({})
-  const [shopeeSession, setShopeeSession] = useState<any>({ status: 'DISCONNECTED' })
-  const [shopeeActionPending, setShopeeActionPending] = useState(false)
+  const [browserAgentConnected, setBrowserAgentConnected] = useState(false)
+  const [browserAgentDetected, setBrowserAgentDetected] = useState(false)
+  const [browserAgentVersion, setBrowserAgentVersion] = useState<string | null>(null)
   
   // Log Viewer State
   const [logModalOpen, setLogModalOpen] = useState(false)
@@ -52,11 +100,10 @@ function App() {
   const fetchData = useCallback(async () => {
     try {
       const headers = { 'Authorization': `Bearer ${token}` }
-      const [actorsRes, runsRes, schedulesRes, shopeeSessionRes] = await Promise.all([
+      const [actorsRes, runsRes, schedulesRes] = await Promise.all([
         fetch('http://localhost:3001/api/actors', { headers }),
         fetch('http://localhost:3001/api/runs', { headers }),
-        fetch('http://localhost:3001/api/schedules', { headers }),
-        fetch('http://localhost:3001/api/integrations/shopee/session', { headers })
+        fetch('http://localhost:3001/api/schedules', { headers })
       ])
       if (actorsRes.status === 401 || runsRes.status === 401) {
         handleLogout()
@@ -65,7 +112,10 @@ function App() {
       setActors(await actorsRes.json())
       setRuns(await runsRes.json())
       if (schedulesRes.ok) setSchedules(await schedulesRes.json())
-      if (shopeeSessionRes.ok) setShopeeSession(await shopeeSessionRes.json())
+      window.postMessage({
+        source: 'OMNICRAWL_DASHBOARD',
+        type: 'POLL_NOW'
+      }, window.location.origin)
     } catch (err) {
       console.error('Failed to fetch data', err)
     }
@@ -89,12 +139,49 @@ function App() {
     };
   }, [fetchData, token]);
 
+  useEffect(() => {
+    if (!token) {
+      setBrowserAgentConnected(false)
+      setBrowserAgentDetected(false)
+      setBrowserAgentVersion(null)
+      return
+    }
+    const handleAgentMessage = (event: MessageEvent) => {
+      if (
+        event.origin === window.location.origin &&
+        event.data?.source === 'OMNICRAWL_EXTENSION' &&
+        event.data?.type === 'STATUS'
+      ) {
+        const version = typeof event.data.version === 'string' ? event.data.version : null
+        setBrowserAgentDetected(true)
+        setBrowserAgentVersion(version)
+        setBrowserAgentConnected(
+          Boolean(event.data.connected) && version === REQUIRED_BROWSER_AGENT_VERSION
+        )
+      }
+    }
+    window.addEventListener('message', handleAgentMessage)
+    const configure = () => window.postMessage({
+      source: 'OMNICRAWL_DASHBOARD',
+      type: 'CONFIGURE',
+      token
+    }, window.location.origin)
+    configure()
+    const interval = setInterval(configure, 3000)
+    return () => {
+      window.removeEventListener('message', handleAgentMessage)
+      clearInterval(interval)
+    }
+  }, [token])
+
   const triggerRun = async (id: string) => {
     try {
+      const actor: any = actors.find((candidate: any) => candidate.id === id)
+      const input = applyInputDefaults(actor?.inputSchema, runInputs[id] || {})
       const res = await fetch(`http://localhost:3001/api/actors/${id}/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify(runInputs[id] || {})
+        body: JSON.stringify(input)
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
@@ -103,46 +190,6 @@ function App() {
       fetchUser()
     } catch(err: any) {
       alert(`Failed to trigger run: ${err.message}`)
-    }
-  }
-
-  const connectShopee = async () => {
-    setShopeeActionPending(true)
-    try {
-      const res = await fetch('http://localhost:3001/api/integrations/shopee/connect', {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` }
-      })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error)
-      setShopeeSession((current: any) => ({ ...current, status: data.status }))
-      alert('Edge đã được mở. Hãy đăng nhập Shopee và hoàn tất CAPTCHA nếu có.')
-      fetchData()
-    } catch (err: any) {
-      alert(`Không thể mở Shopee: ${err.message}`)
-    } finally {
-      setShopeeActionPending(false)
-    }
-  }
-
-  const disconnectShopee = async () => {
-    const confirmation = shopeeSession.status === 'CONNECTING'
-      ? 'Hủy quá trình chờ đăng nhập Shopee?'
-      : 'Ngắt kết nối và xóa phiên Shopee đã lưu?'
-    if (!confirm(confirmation)) return
-    setShopeeActionPending(true)
-    try {
-      const res = await fetch('http://localhost:3001/api/integrations/shopee/session', {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
-      })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error)
-      setShopeeSession({ status: 'DISCONNECTED' })
-    } catch (err: any) {
-      alert(`Không thể ngắt kết nối: ${err.message}`)
-    } finally {
-      setShopeeActionPending(false)
     }
   }
 
@@ -181,10 +228,18 @@ function App() {
       const res = await fetch('http://localhost:3001/api/schedules', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ actorId: newScheduleActorId, cron: newScheduleCron })
+        body: JSON.stringify({
+          actorId: newScheduleActorId,
+          cron: newScheduleCron,
+          input: applyInputDefaults(
+            (actors.find((actor: any) => actor.id === newScheduleActorId) as any)?.inputSchema,
+            newScheduleInput
+          )
+        })
       });
       if (!res.ok) throw new Error(await res.text());
       setNewScheduleCron('* * * * *');
+      setNewScheduleInput({});
       fetchData();
     } catch (err: any) {
       alert(`Error: ${err.message}`);
@@ -256,6 +311,27 @@ function App() {
     setActiveLogRunId(id);
     setLogModalOpen(true);
     fetchLogs(id);
+  }
+
+  const downloadRunOutput = async (id: string) => {
+    try {
+      const res = await fetch(`http://localhost:3001/api/runs/${id}/output`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Output is not available')
+      const blob = new Blob([JSON.stringify(data, null, 2)], {
+        type: 'application/json'
+      })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `omnicrawl-${id}-output.json`
+      link.click()
+      URL.revokeObjectURL(url)
+    } catch (err: any) {
+      alert(`Không thể tải output: ${err.message}`)
+    }
   }
 
   // Poll logs if modal is open
@@ -370,74 +446,42 @@ function App() {
                         <div>
                           <div className="flex items-center gap-2">
                             <span className={`h-2.5 w-2.5 rounded-full ${
-                              shopeeSession.status === 'CONNECTED'
-                                ? 'bg-emerald-500'
-                                : shopeeSession.status === 'CONNECTING'
-                                  ? 'bg-amber-500 animate-pulse'
-                                  : 'bg-gray-400'
+                              browserAgentConnected ? 'bg-emerald-500' : 'bg-gray-400'
                             }`} />
                             <span className="text-sm font-medium text-gray-800">
-                              {shopeeSession.status === 'CONNECTED' && 'Shopee đã kết nối'}
-                              {shopeeSession.status === 'CONNECTING' && 'Đang chờ đăng nhập'}
-                              {shopeeSession.status === 'EXPIRED' && 'Phiên Shopee đã hết hạn'}
-                              {shopeeSession.status === 'ERROR' && 'Kết nối Shopee bị lỗi'}
-                              {(!shopeeSession.status || shopeeSession.status === 'DISCONNECTED') && 'Shopee chưa kết nối'}
+                              {browserAgentConnected
+                                ? `Browser Agent v${browserAgentVersion} đã kết nối`
+                                : browserAgentDetected
+                                  ? 'Browser Agent cần reload'
+                                  : 'Chưa phát hiện Browser Agent'}
                             </span>
                           </div>
                           <p className="mt-1 text-xs text-gray-500">
-                            {shopeeSession.status === 'CONNECTING'
-                              ? 'Hoàn tất đăng nhập trong cửa sổ Edge vừa mở.'
-                              : shopeeSession.status === 'CONNECTED'
-                                ? 'Crawler sẽ tự dùng phiên này, không cần sao chép cookie.'
-                                : shopeeSession.lastError || 'Đăng nhập một lần để hệ thống lưu phiên riêng.'}
+                            {browserAgentConnected
+                              ? 'Job sẽ chạy trong Chrome đang đăng nhập Shopee; cookie không rời trình duyệt.'
+                              : browserAgentDetected
+                                ? `Dashboard yêu cầu v${REQUIRED_BROWSER_AGENT_VERSION}; phiên bản hiện tại là ${browserAgentVersion || 'cũ'}.`
+                              : 'Cài extension từ apps/browser-extension rồi refresh trang này.'}
                           </p>
                         </div>
-                        {shopeeSession.status === 'CONNECTED' || shopeeSession.status === 'CONNECTING' ? (
-                          <button
-                            onClick={disconnectShopee}
-                            disabled={shopeeActionPending}
-                            className="shrink-0 rounded-lg border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
-                          >
-                            {shopeeSession.status === 'CONNECTING' ? 'Hủy' : 'Ngắt'}
-                          </button>
-                        ) : (
-                          <button
-                            onClick={connectShopee}
-                            disabled={shopeeActionPending}
-                            className="shrink-0 rounded-lg bg-orange-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-orange-600 disabled:opacity-50"
-                          >
-                            Kết nối Shopee
-                          </button>
-                        )}
                       </div>
                     </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">Từ khóa tìm kiếm</label>
-                      <input 
-                        type="text" 
-                        value={runInputs[actor.id]?.keyword || ''} 
-                        onChange={e => setRunInputs({...runInputs, [actor.id]: {...runInputs[actor.id], keyword: e.target.value}})}
-                        placeholder="Ví dụ: bàn phím cơ"
-                        className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
-                      />
-                    </div>
-                    <input 
-                      type="number" 
-                      placeholder="Số sản phẩm (ví dụ: 60)"
-                      className="border rounded px-3 py-1 text-sm bg-white text-gray-700 w-36"
-                      value={runInputs[actor.id]?.maxItems || ''}
-                      onChange={(e) => setRunInputs(prev => ({
-                        ...prev,
-                        [actor.id]: { ...prev[actor.id], maxItems: e.target.value }
-                      }))}
-                    />
                   </div>
                 )}
+
+                <ActorInputFields
+                  schema={actor.inputSchema}
+                  input={runInputs[actor.id] || {}}
+                  onChange={(input) => setRunInputs((previous) => ({
+                    ...previous,
+                    [actor.id]: input
+                  }))}
+                />
 
                 <div className="flex gap-3 mt-auto">
                   <button 
                     onClick={() => triggerRun(actor.id)}
-                    disabled={actor.name === 'shopee-scraper' && shopeeSession.status !== 'CONNECTED'}
+                    disabled={actor.name === 'shopee-scraper' && !browserAgentConnected}
                     className="flex-1 flex items-center justify-center gap-2 bg-[#E8F0FE] text-blue-700 font-medium py-2.5 text-sm rounded-full hover:bg-blue-100 transition-colors disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed"
                   >
                     <Play size={16} fill="currentColor" /> Run (10 Credits)
@@ -469,7 +513,8 @@ function App() {
                       <span className={`px-3 py-1 text-xs font-semibold rounded-full ${
                         run.status === 'SUCCESS' ? 'bg-green-100 text-green-700' :
                         run.status === 'FAILED' ? 'bg-red-100 text-red-700' :
-                        (run.status === 'RUNNING' || run.status === 'STOPPING') ? 'bg-blue-100 text-blue-700' :
+                        (run.status === 'RUNNING' || run.status === 'BROWSER_RUNNING' || run.status === 'STOPPING') ? 'bg-blue-100 text-blue-700' :
+                        (run.status === 'PENDING' || run.status === 'BROWSER_PENDING') ? 'bg-amber-100 text-amber-700' :
                         'bg-gray-100 text-gray-700'
                       }`}>
                         {run.status}
@@ -477,8 +522,14 @@ function App() {
                     </td>
                     <td className="px-6 py-5 text-gray-500">{new Date(run.createdAt).toLocaleString()}</td>
                     <td className="px-6 py-5 text-right space-x-2">
+                      <button onClick={() => downloadRunOutput(run.id)} className="px-3 py-1 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 text-xs font-medium">Data</button>
                       <button onClick={() => openLogViewer(run.id)} className="px-3 py-1 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 text-xs font-medium">Logs</button>
-                      {(run.status === 'RUNNING' || run.status === 'PENDING') && (
+                      {(
+                        run.status === 'RUNNING' ||
+                        run.status === 'PENDING' ||
+                        run.status === 'BROWSER_RUNNING' ||
+                        run.status === 'BROWSER_PENDING'
+                      ) && (
                         <button onClick={() => handleStopRun(run.id)} className="px-3 py-1 bg-yellow-100 text-yellow-700 rounded hover:bg-yellow-200 text-xs font-medium">Stop</button>
                       )}
                       <button onClick={() => handleDeleteRun(run.id)} className="px-3 py-1 bg-red-100 text-red-700 rounded hover:bg-red-200 text-xs font-medium">Delete</button>
@@ -492,39 +543,51 @@ function App() {
 
         {activeTab === 'schedules' && (
           <div className="space-y-6">
-            <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-50 flex gap-4 items-end">
-              <div className="flex-1">
-                <label className="block text-sm font-medium text-gray-700 mb-2">Select Crawler</label>
-                <select 
-                  value={newScheduleActorId} 
-                  onChange={e => setNewScheduleActorId(e.target.value)}
-                  className="w-full px-4 py-3 bg-gray-50 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-100"
+            <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-50 space-y-4">
+              <div className="flex gap-4 items-end">
+                <div className="flex-1">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Select Crawler</label>
+                  <select
+                    value={newScheduleActorId}
+                    onChange={e => {
+                      setNewScheduleActorId(e.target.value)
+                      setNewScheduleInput({})
+                    }}
+                    className="w-full px-4 py-3 bg-gray-50 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                  >
+                    <option value="">-- Select a crawler --</option>
+                    {actors.map((actor: any) => (
+                      <option key={actor.id} value={actor.id}>{actor.name}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex-1">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Schedule Interval</label>
+                  <select
+                    value={newScheduleCron}
+                    onChange={e => setNewScheduleCron(e.target.value)}
+                    className="w-full px-4 py-3 bg-gray-50 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-100"
+                  >
+                    <option value="* * * * *">Every minute</option>
+                    <option value="0 * * * *">Every hour</option>
+                    <option value="0 0 * * *">Every day at midnight</option>
+                    <option value="0 0 * * 0">Every Sunday</option>
+                  </select>
+                </div>
+                <button
+                  onClick={handleCreateSchedule}
+                  className="bg-blue-600 text-white font-medium px-6 py-3 rounded-xl hover:bg-blue-700 transition-colors h-[50px]"
                 >
-                  <option value="">-- Select a crawler --</option>
-                  {actors.map((actor: any) => (
-                    <option key={actor.id} value={actor.id}>{actor.name}</option>
-                  ))}
-                </select>
+                  Create Schedule
+                </button>
               </div>
-              <div className="flex-1">
-                <label className="block text-sm font-medium text-gray-700 mb-2">Schedule Interval</label>
-                <select 
-                  value={newScheduleCron} 
-                  onChange={e => setNewScheduleCron(e.target.value)}
-                  className="w-full px-4 py-3 bg-gray-50 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                >
-                  <option value="* * * * *">Every minute</option>
-                  <option value="0 * * * *">Every hour</option>
-                  <option value="0 0 * * *">Every day at midnight</option>
-                  <option value="0 0 * * 0">Every Sunday</option>
-                </select>
-              </div>
-              <button 
-                onClick={handleCreateSchedule}
-                className="bg-blue-600 text-white font-medium px-6 py-3 rounded-xl hover:bg-blue-700 transition-colors h-[50px]"
-              >
-                Create Schedule
-              </button>
+              {newScheduleActorId && (
+                <ActorInputFields
+                  schema={(actors.find((actor: any) => actor.id === newScheduleActorId) as any)?.inputSchema}
+                  input={newScheduleInput}
+                  onChange={setNewScheduleInput}
+                />
+              )}
             </div>
 
             <div className="bg-white rounded-3xl shadow-sm border border-gray-50 overflow-hidden">
@@ -644,6 +707,73 @@ function App() {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+function ActorInputFields({
+  schema,
+  input,
+  onChange
+}: {
+  schema?: string | null
+  input: Record<string, unknown>
+  onChange: (input: Record<string, unknown>) => void
+}) {
+  const parsed = parseInputSchema(schema)
+  const properties = Object.entries(parsed?.properties || {})
+  if (properties.length === 0) return null
+
+  const required = new Set(parsed?.required || [])
+
+  return (
+    <div className="mb-4 space-y-3">
+      {properties.map(([key, property]) => {
+        const label = property.title || key
+        const currentValue = input[key] ?? property.default ?? ''
+
+        if (property.type === 'boolean') {
+          return (
+            <label key={key} className="flex items-start gap-2 text-sm text-gray-700">
+              <input
+                type="checkbox"
+                checked={Boolean(currentValue)}
+                onChange={(event) => onChange({ ...input, [key]: event.target.checked })}
+                className="mt-0.5"
+              />
+              <span>
+                {label}
+                {property.description && (
+                  <span className="block text-xs font-normal text-gray-500">{property.description}</span>
+                )}
+              </span>
+            </label>
+          )
+        }
+
+        const numeric = property.type === 'integer' || property.type === 'number'
+        return (
+          <div key={key}>
+            <label className="mb-1 block text-xs font-medium text-gray-700">
+              {label}{required.has(key) ? ' *' : ''}
+            </label>
+            <input
+              type={numeric ? 'number' : 'text'}
+              value={String(currentValue)}
+              min={property.minimum}
+              max={property.maximum}
+              step={property.type === 'integer' ? 1 : undefined}
+              required={required.has(key)}
+              placeholder={property.placeholder || property.description}
+              onChange={(event) => onChange({ ...input, [key]: event.target.value })}
+              className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+            />
+            {property.description && !property.placeholder && (
+              <p className="mt-1 text-xs text-gray-500">{property.description}</p>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }

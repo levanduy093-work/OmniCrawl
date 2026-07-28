@@ -1,0 +1,35 @@
+{
+  "version": "1.0.0",
+  "description": "Starter crawler using the OmniCrawl run input/output contract.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "startUrl": {
+        "type": "string",
+        "title": "Start URL",
+        "default": "https://example.com"
+      }
+    }
+  },
+  "outputSchema": {
+    "type": "object",
+    "required": [
+      "url",
+      "title",
+      "crawledAt"
+    ],
+    "properties": {
+      "url": {
+        "type": "string",
+        "format": "uri"
+      },
+      "title": {
+        "type": "string"
+      },
+      "crawledAt": {
+        "type": "string",
+        "format": "date-time"
+      }
+    }
+  }
+}

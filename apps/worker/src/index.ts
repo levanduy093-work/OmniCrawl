@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { fork, ChildProcess } from 'child_process';
 import { prisma } from '@omnicrawl/database';
+import { Dataset } from '@omnicrawl/sdk';
 import dotenv from 'dotenv';
 
 const projectRoot = path.resolve(__dirname, '..', '..', '..');
@@ -34,6 +35,7 @@ setInterval(async () => {
         where: { id: run.id },
         data: { status: 'STOPPED', finishedAt: new Date() }
       });
+      await new Dataset(run.id).finalize('STOPPED');
       proc.kill('SIGTERM');
       runningProcesses.delete(run.id);
     }

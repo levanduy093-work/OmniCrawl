@@ -1,6 +1,11 @@
 import * as path from 'path';
 import * as fs from 'fs';
-import { ActorContext } from '@omnicrawl/sdk';
+import {
+  ActorContext,
+  readRunInput,
+  readRunInputDocument,
+  writeRunInput
+} from '@omnicrawl/sdk';
 
 async function main() {
   const actorName = process.env.ACTOR_NAME;
@@ -21,13 +26,14 @@ async function main() {
     process.exit(1);
   }
 
-  let input = {};
-  const kvPath = path.resolve(projectRoot, 'storage', 'key_value_stores', runId, 'INPUT.json');
-  if (fs.existsSync(kvPath)) {
-    input = JSON.parse(fs.readFileSync(kvPath, 'utf8'));
-    if (typeof (input as any).cookie === 'string' && (input as any).cookie) {
-      fs.writeFileSync(kvPath, JSON.stringify({ ...(input as any), cookie: '[REDACTED]' }));
-    }
+  const input: any = readRunInput(runId);
+  if (typeof input.cookie === 'string' && input.cookie) {
+    const inputDocument = readRunInputDocument(runId);
+    writeRunInput(
+      runId,
+      inputDocument?.actor ?? { name: actorName },
+      { ...input, cookie: '[REDACTED]' }
+    );
   }
 
   // Set Crawlee environment variables
@@ -48,8 +54,10 @@ async function main() {
     }
     
     await actorModule.main(context);
+    await context.dataset.finalize('SUCCESS');
     process.exit(0);
   } catch (err: any) {
+    await context.dataset.finalize('FAILED', err?.message || String(err));
     console.error('Actor execution failed:', err);
     process.exit(1);
   }

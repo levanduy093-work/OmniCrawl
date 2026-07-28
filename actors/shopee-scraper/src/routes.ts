@@ -1,4 +1,5 @@
-import { createPlaywrightRouter, Dataset, NonRetryableError } from 'crawlee';
+import { createPlaywrightRouter, NonRetryableError } from 'crawlee';
+import { Dataset } from '@omnicrawl/sdk';
 import { sharedState } from './sharedState.js';
 import { mapApiItem } from './productMapper.js';
 
@@ -111,7 +112,7 @@ router.addDefaultHandler(async ({ request, page, log, crawler }) => {
 
   // Push to default dataset
   if (itemsToPush.length > 0) {
-    await Dataset.pushData(itemsToPush);
+    await new Dataset(process.env.RUN_ID || 'default').pushData(itemsToPush);
   }
 
   const newTotal = totalExtracted + itemsToPush.length;
