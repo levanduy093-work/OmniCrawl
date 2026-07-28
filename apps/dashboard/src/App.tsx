@@ -5,17 +5,29 @@ import OmniCrawlLogo from './Logo'
 import './App.css'
 
 function App() {
-  const [token, setToken] = useState(localStorage.getItem('token'))
+  const [token, setToken] = useState<string | null>(localStorage.getItem('token'))
   const [user, setUser] = useState<any>(null)
+  
+  // Tabs: actors, runs, schedules, marketplace
+  const [activeTab, setActiveTab] = useState(() => localStorage.getItem('activeTab') || 'actors')
+
+  useEffect(() => {
+    localStorage.setItem('activeTab', activeTab);
+  }, [activeTab]);
   
   const [actors, setActors] = useState([])
   const [runs, setRuns] = useState([])
   const [schedules, setSchedules] = useState([])
-  const [activeTab, setActiveTab] = useState('actors') // 'actors' | 'runs' | 'schedules' | 'marketplace' | 'settings'
   const [newActorName, setNewActorName] = useState('')
   const [newScheduleActorId, setNewScheduleActorId] = useState('')
   const [newScheduleCron, setNewScheduleCron] = useState('* * * * *')
   const [isSidebarOpen, setIsSidebarOpen] = useState(true)
+  const [runInputs, setRunInputs] = useState<Record<string, any>>({})
+  
+  // Log Viewer State
+  const [logModalOpen, setLogModalOpen] = useState(false)
+  const [activeLogRunId, setActiveLogRunId] = useState<string | null>(null)
+  const [logs, setLogs] = useState<string>('')
 
   useEffect(() => {
     if (token) {
@@ -23,6 +35,17 @@ function App() {
       fetchUser()
     }
   }, [token])
+
+  // Poll data in background every 5 seconds to update statuses
+  useEffect(() => {
+    let interval: any;
+    if (token) {
+      interval = setInterval(() => {
+        fetchData();
+      }, 5000);
+    }
+    return () => clearInterval(interval);
+  }, [token]);
 
   const fetchUser = async () => {
     try {
@@ -61,7 +84,7 @@ function App() {
       const res = await fetch(`http://localhost:3001/api/actors/${id}/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({})
+        body: JSON.stringify(runInputs[id] || {})
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error)
@@ -141,6 +164,58 @@ function App() {
       alert(`Error: ${err.message}`);
     }
   }
+
+  const handleStopRun = async (id: string) => {
+    try {
+      await fetch(`http://localhost:3001/api/runs/${id}/stop`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      fetchData();
+    } catch (err: any) {
+      alert(`Error: ${err.message}`);
+    }
+  }
+
+  const handleDeleteRun = async (id: string) => {
+    if (!confirm('Are you sure you want to delete this run?')) return;
+    try {
+      await fetch(`http://localhost:3001/api/runs/${id}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      fetchData();
+    } catch (err: any) {
+      alert(`Error: ${err.message}`);
+    }
+  }
+
+  const openLogViewer = (id: string) => {
+    setActiveLogRunId(id);
+    setLogModalOpen(true);
+    fetchLogs(id);
+  }
+
+  const fetchLogs = async (id: string) => {
+    try {
+      const res = await fetch(`http://localhost:3001/api/runs/${id}/logs`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      const data = await res.json();
+      setLogs(data.logs || 'No logs available.');
+    } catch (err) {
+      setLogs('Error fetching logs.');
+    }
+  }
+
+  // Poll logs if modal is open
+  useEffect(() => {
+    let interval: any;
+    if (logModalOpen && activeLogRunId) {
+      interval = setInterval(() => fetchLogs(activeLogRunId), 2000);
+    }
+    return () => clearInterval(interval);
+  }, [logModalOpen, activeLogRunId]);
 
   const handleLogin = (newToken: string, newUser: any) => {
     localStorage.setItem('token', newToken)
@@ -241,7 +316,49 @@ function App() {
                 <h3 className="text-lg font-medium text-gray-900 mb-1">{actor.name}</h3>
                 <p className="text-sm text-gray-500 mb-6 flex-1">{actor.description || 'No description provided.'}</p>
                 
-                <div className="flex gap-3">
+                
+                {actor.name === 'shopee-scraper' && (
+                  <div className="mb-4 space-y-3">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Search Keyword</label>
+                      <input 
+                        type="text" 
+                        value={runInputs[actor.id]?.keyword || ''} 
+                        onChange={e => setRunInputs({...runInputs, [actor.id]: {...runInputs[actor.id], keyword: e.target.value}})}
+                        placeholder="e.g. bàn phím cơ" 
+                        className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                    </div>
+                    <input 
+                      type="number" 
+                      placeholder="Max items (e.g. 60)" 
+                      className="border rounded px-3 py-1 text-sm bg-white text-gray-700 w-36"
+                      value={runInputs[actor.id]?.maxItems || ''}
+                      onChange={(e) => setRunInputs(prev => ({
+                        ...prev,
+                        [actor.id]: { ...prev[actor.id], maxItems: e.target.value }
+                      }))}
+                    />
+                    <input 
+                      type="text" 
+                      placeholder="Cookie (Optional)" 
+                      className="border rounded px-3 py-1 text-sm bg-white text-gray-700 w-48"
+                      value={runInputs[actor.id]?.cookie || ''}
+                      onChange={(e) => setRunInputs(prev => ({
+                        ...prev,
+                        [actor.id]: { ...prev[actor.id], cookie: e.target.value }
+                      }))}
+                    />
+                    <button 
+                      onClick={() => triggerRun(actor.id)}
+                      className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1 rounded text-sm font-medium transition-colors whitespace-nowrap"
+                    >
+                      Run
+                    </button>
+                  </div>
+                )}
+
+                <div className="flex gap-3 mt-auto">
                   <button 
                     onClick={() => triggerRun(actor.id)}
                     className="flex-1 flex items-center justify-center gap-2 bg-[#E8F0FE] text-blue-700 font-medium py-2.5 text-sm rounded-full hover:bg-blue-100 transition-colors"
@@ -262,25 +379,33 @@ function App() {
                   <th className="px-6 py-4">ID</th>
                   <th className="px-6 py-4">Actor ID</th>
                   <th className="px-6 py-4">Status</th>
-                  <th className="px-6 py-4">Started At</th>
+                  <th className="px-6 py-4">Created At</th>
+                  <th className="px-6 py-4 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {runs.map((run: any) => (
                   <tr key={run.id} className="hover:bg-gray-50 transition-colors">
                     <td className="px-6 py-5 font-mono text-xs text-gray-400">{run.id}</td>
-                    <td className="px-6 py-5 text-gray-900">{run.actorId}</td>
+                    <td className="px-6 py-5 text-gray-900">{run.actor?.name || run.actorId}</td>
                     <td className="px-6 py-5">
                       <span className={`px-3 py-1 text-xs font-semibold rounded-full ${
                         run.status === 'SUCCESS' ? 'bg-green-100 text-green-700' :
                         run.status === 'FAILED' ? 'bg-red-100 text-red-700' :
-                        run.status === 'RUNNING' ? 'bg-blue-100 text-blue-700' :
+                        (run.status === 'RUNNING' || run.status === 'STOPPING') ? 'bg-blue-100 text-blue-700' :
                         'bg-gray-100 text-gray-700'
                       }`}>
                         {run.status}
                       </span>
                     </td>
                     <td className="px-6 py-5 text-gray-500">{new Date(run.createdAt).toLocaleString()}</td>
+                    <td className="px-6 py-5 text-right space-x-2">
+                      <button onClick={() => openLogViewer(run.id)} className="px-3 py-1 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 text-xs font-medium">Logs</button>
+                      {(run.status === 'RUNNING' || run.status === 'PENDING') && (
+                        <button onClick={() => handleStopRun(run.id)} className="px-3 py-1 bg-yellow-100 text-yellow-700 rounded hover:bg-yellow-200 text-xs font-medium">Stop</button>
+                      )}
+                      <button onClick={() => handleDeleteRun(run.id)} className="px-3 py-1 bg-red-100 text-red-700 rounded hover:bg-red-200 text-xs font-medium">Delete</button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -352,7 +477,7 @@ function App() {
                       <td className="px-6 py-5 text-right">
                         <button 
                           onClick={() => handleDeleteSchedule(schedule.id)}
-                          className="text-red-500 hover:text-red-700 font-medium text-sm"
+                          className="px-3 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-700 hover:bg-red-200 transition-colors"
                         >
                           Delete
                         </button>
@@ -422,6 +547,26 @@ function App() {
           </div>
         )}
       </main>
+
+      {/* Log Modal */}
+      {logModalOpen && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-[#1E1E1E] w-full max-w-4xl h-[80vh] rounded-xl shadow-2xl flex flex-col overflow-hidden border border-gray-800">
+            <div className="flex justify-between items-center p-4 bg-[#2D2D2D] border-b border-gray-700">
+              <h3 className="text-white font-medium flex items-center gap-2">
+                <Activity size={18} className="text-blue-400" /> 
+                Live Logs: <span className="font-mono text-xs text-gray-400 ml-1">{activeLogRunId}</span>
+              </h3>
+              <button onClick={() => setLogModalOpen(false)} className="text-gray-400 hover:text-white">
+                ✕
+              </button>
+            </div>
+            <div className="flex-1 overflow-auto p-4 font-mono text-sm">
+              <pre className="text-green-400 whitespace-pre-wrap leading-relaxed">{logs}</pre>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

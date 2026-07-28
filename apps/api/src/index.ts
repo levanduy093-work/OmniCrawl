@@ -77,10 +77,9 @@ app.get('/api/auth/me', requireAuth, async (req: any, res: any) => {
 
 // --- CORE ROUTES ---
 
-// List all actors for user
+// List all actors
 app.get('/api/actors', requireAuth, async (req: any, res) => {
   const actors = await prisma.actor.findMany({
-    where: { userId: req.user.id },
     orderBy: { createdAt: 'desc' }
   });
   res.json(actors);
@@ -97,9 +96,9 @@ app.post('/api/actors/:id/run', requireAuth, async (req: any, res: any) => {
       return res.status(403).json({ error: 'Insufficient credits. You need at least 10 credits to run.' });
     }
 
-    const actor = await prisma.actor.findFirst({ where: { id, userId: req.user.id } });
+    const actor = await prisma.actor.findFirst({ where: { id } });
     if (!actor) {
-      return res.status(404).json({ error: 'Actor not found or unauthorized' });
+      return res.status(404).json({ error: 'Actor not found' });
     }
 
     // Deduct quota
@@ -112,10 +111,13 @@ app.post('/api/actors/:id/run', requireAuth, async (req: any, res: any) => {
       data: { actorId: actor.id, userId: user.id, status: 'PENDING' }
     });
     
-    // Using simple DB create here since JobQueue logic originally created Run inside pushJob,
-    // we need to update JobQueue to support manual push or let it poll.
-    // For simplicity with our polling mechanism, just creating a PENDING run is enough,
-    // since the worker polls for PENDING runs.
+    // Save input to KV store for worker/crawlee to pick up
+    const fs = require('fs');
+    const path = require('path');
+    // Save exactly where Crawlee expects it for this runId
+    const kvPath = path.join(process.cwd(), '..', '..', 'storage', 'key_value_stores', run.id);
+    fs.mkdirSync(kvPath, { recursive: true });
+    fs.writeFileSync(path.join(kvPath, 'INPUT.json'), JSON.stringify(input));
     
     res.json({ message: 'Run scheduled. Deducted 10 credits.', run });
   } catch (err: any) {
@@ -126,24 +128,73 @@ app.post('/api/actors/:id/run', requireAuth, async (req: any, res: any) => {
 // List runs
 app.get('/api/runs', requireAuth, async (req: any, res) => {
   const runs = await prisma.run.findMany({
-    where: { userId: req.user.id },
     orderBy: { createdAt: 'desc' },
     include: { actor: true }
   });
   res.json(runs);
 });
 
+// View run logs
+app.get('/api/runs/:id/logs', requireAuth, (req: any, res) => {
+  const { id } = req.params;
+  const fs = require('fs');
+  const path = require('path');
+  const logFile = path.join(process.cwd(), '..', '..', 'storage', 'logs', `${id}.log`);
+  
+  if (fs.existsSync(logFile)) {
+    const logs = fs.readFileSync(logFile, 'utf8');
+    res.json({ logs });
+  } else {
+    res.json({ logs: 'No logs available yet.' });
+  }
+});
+
+// Stop a run
+app.post('/api/runs/:id/stop', requireAuth, async (req: any, res) => {
+  const { id } = req.params;
+  try {
+    const run = await prisma.run.update({
+      where: { id },
+      data: { status: 'STOPPING' }
+    });
+    res.json({ message: 'Stop signal sent.', run });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete a run
+app.delete('/api/runs/:id', requireAuth, async (req: any, res) => {
+  const { id } = req.params;
+  try {
+    await prisma.run.delete({ where: { id } });
+    res.json({ message: 'Run deleted.' });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // List schedules
 app.get('/api/schedules', requireAuth, async (req: any, res) => {
   const schedules = await prisma.schedule.findMany({
-    where: { userId: req.user.id },
     include: { actor: true },
     orderBy: { createdAt: 'desc' }
   });
   res.json(schedules);
 });
 
-// Create a schedule
+// Delete schedule
+app.delete('/api/schedules/:id', requireAuth, async (req: any, res) => {
+  const { id } = req.params;
+  try {
+    await prisma.schedule.delete({ where: { id } });
+    res.json({ message: 'Schedule deleted.' });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Create schedule
 app.post('/api/schedules', requireAuth, async (req: any, res: any) => {
   const { actorId, cron } = req.body;
   if (!actorId || !cron) {
