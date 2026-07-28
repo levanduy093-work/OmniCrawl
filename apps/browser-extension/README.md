@@ -15,6 +15,11 @@ attributes, variations and review content, and updates the matching database
 row. Review pagination is limited by `Số đánh giá tối đa mỗi sản phẩm`. A
 failure on one product is recorded and the remaining products continue.
 
+Each stored row also records its search keyword/rank, observation time, numeric
+price range, discount, sales and stock signals, rating distribution, shop
+metrics, variants, wholesale tiers, promotions, logistics and product media.
+Repeated runs therefore form a time series linked by `itemId`.
+
 After updating the source, click **Reload** on the extension page and then reload
 the OmniCrawl dashboard tab. The dashboard only enables Shopee jobs when the
 expected Browser Agent version is active.

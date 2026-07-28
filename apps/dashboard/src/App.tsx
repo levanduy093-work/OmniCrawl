@@ -23,7 +23,7 @@ import Login from './Login'
 import OmniCrawlLogo from './Logo'
 import './App.css'
 
-const REQUIRED_BROWSER_AGENT_VERSION = '0.4.1'
+const REQUIRED_BROWSER_AGENT_VERSION = '0.5.1'
 
 type JsonSchemaProperty = {
   type?: 'string' | 'integer' | 'number' | 'boolean'
@@ -1012,18 +1012,8 @@ function RunDetailModal({
     ...records.flatMap((record: Record<string, unknown>) => Object.keys(record))
   ]))
 
-  const isSummaryKey = (col: string) => {
-    const norm = col.toLowerCase()
-    return (
-      norm.includes('image') || norm.includes('hinh') || norm.includes('img') || norm.includes('thumbnail') ||
-      norm.includes('title') || norm.includes('ten') || norm.includes('name') ||
-      norm.includes('price') || norm.includes('gia') ||
-      norm.includes('sold') || norm.includes('da_ban') ||
-      norm.includes('url') || norm.includes('link') || norm.includes('lien_ket')
-    )
-  }
-
-  let summaryColumns = columns.filter(isSummaryKey)
+  const preferredSummaryColumns = ['title', 'price', 'sold', 'url', 'image', 'shopName', 'images']
+  let summaryColumns = preferredSummaryColumns.filter((column) => columns.includes(column))
   if (summaryColumns.length === 0) {
     summaryColumns = columns.slice(0, 5)
   }
@@ -1061,6 +1051,73 @@ function RunDetailModal({
           </div>
         </details>
       )
+    }
+    if (column === 'images' && Array.isArray(value)) {
+      if (!value.length) return <span className="text-gray-400">Chưa có ảnh</span>
+      return (
+        <div className="flex items-center gap-1.5 min-w-48">
+          {value.slice(0, 4).map((imageUrl: unknown, index: number) => (
+            <button
+              key={`${String(imageUrl)}-${index}`}
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation()
+                setPreviewImage(String(imageUrl))
+              }}
+              title="Bấm để xem ảnh phóng to"
+            >
+              <img
+                src={String(imageUrl)}
+                alt=""
+                className="w-11 h-11 rounded-lg object-cover bg-gray-100 border border-gray-200 hover:opacity-80"
+              />
+            </button>
+          ))}
+          {value.length > 4 && (
+            <span className="text-xs text-gray-500">+{value.length - 4}</span>
+          )}
+        </div>
+      )
+    }
+    if (Array.isArray(value)) {
+      if (!value.length) return <span className="text-gray-400">Không có dữ liệu</span>
+      return (
+        <details className="max-w-md">
+          <summary className="cursor-pointer text-blue-600 font-medium">
+            Xem {value.length} mục
+          </summary>
+          <div className="mt-2 space-y-2 max-h-72 overflow-auto">
+            {value.map((entry: any, index: number) => (
+              <div key={index} className="rounded-lg border border-gray-200 bg-white p-2.5">
+                {entry && typeof entry === 'object' ? (
+                  Object.entries(entry).map(([key, entryValue]) => (
+                    <div key={key} className="grid grid-cols-[7rem_1fr] gap-2 text-xs py-0.5">
+                      <span className="text-gray-400">{humanizeFieldName(key)}</span>
+                      <span className="text-gray-700 break-words">
+                        {typeof entryValue === 'object' ? JSON.stringify(entryValue) : String(entryValue ?? '—')}
+                      </span>
+                    </div>
+                  ))
+                ) : String(entry)}
+              </div>
+            ))}
+          </div>
+        </details>
+      )
+    }
+    if (typeof value === 'boolean') {
+      return value
+        ? <span className="text-emerald-700 font-medium">Có</span>
+        : <span className="text-gray-400">Không</span>
+    }
+    if (
+      typeof value === 'number' &&
+      /price|gia|minimumspend|fee/i.test(column)
+    ) {
+      return <span>{value.toLocaleString('vi-VN')}₫</span>
+    }
+    if (typeof value === 'number' && /discountpercent|percentage/i.test(column)) {
+      return <span>{value}%</span>
     }
     const text = typeof value === 'object' ? JSON.stringify(value) : String(value)
     if (/^https?:\/\//.test(text)) {

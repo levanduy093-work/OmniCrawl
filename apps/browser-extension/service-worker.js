@@ -20,6 +20,13 @@ const stateReady = chrome.storage.session.get(['config', 'activeJob']).then((sto
       ? Math.min(100, Math.max(0, Math.floor(restoredMaxReviews)))
       : 20;
     activeJob.pendingDetailData = activeJob.pendingDetailData || null;
+    activeJob.scheduledPage = activeJob.scheduledPage == null
+      ? null
+      : Number(activeJob.scheduledPage);
+    activeJob.consecutiveNoNewPages = Number(activeJob.consecutiveNoNewPages || 0);
+    activeJob.lastNoNewPage = activeJob.lastNoNewPage == null
+      ? null
+      : Number(activeJob.lastNoNewPage);
   }
 });
 
@@ -56,6 +63,14 @@ async function handlePageTimeout() {
       return;
     }
     await failCurrentDetail('Không nhận được dữ liệu chi tiết từ Shopee sau 90 giây.');
+    return;
+  }
+  if (activeJob.phase === 'SEARCH' && activeJob.seen.length > 0) {
+    clearPageTimeout();
+    await continueAfterNoNewSearchData(
+      `Shopee page ${activeJob.page} did not return new data within 30 seconds; ` +
+      'continuing with the products already collected.'
+    );
     return;
   }
   await finishJob(false, 'Không nhận được dữ liệu tìm kiếm từ Shopee sau 30 giây.');
@@ -147,19 +162,41 @@ function extractPrice(value) {
   return null;
 }
 
+function normalizeShopeePrice(value) {
+  const raw = extractPrice(value);
+  if (raw === null) return null;
+  return Math.round(raw > 100000000 ? raw / 100000 : raw);
+}
+
+function unixTimestamp(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return '';
+  return new Date(numeric * (numeric < 10_000_000_000 ? 1000 : 1)).toISOString();
+}
+
 function imageUrl(value) {
   const image = typeof value === 'object'
-    ? value?.image_id || value?.image || value?.url
+    ? (
+      value?.full_url ||
+      value?.display_url ||
+      value?.image_url ||
+      value?.display_image ||
+      value?.image_id ||
+      value?.image ||
+      value?.url
+    )
     : value;
   if (!image) return '';
+  if (image !== value && typeof image === 'object') return imageUrl(image);
   const text = String(image);
   if (/^https?:\/\//i.test(text)) return text;
+  if (text.startsWith('//')) return `https:${text}`;
   return `https://down-vn.img.susercontent.com/file/${text}`;
 }
 
-function mapItem(entry) {
+function mapItem(entry, context = {}) {
   const item = findItemObject(entry);
-  const rawPrice = extractPrice(
+  const priceValue = normalizeShopeePrice(
     item?.price_min ??
     item?.price ??
     item?.price_info ??
@@ -170,6 +207,21 @@ function mapItem(entry) {
   );
   const itemId = item?.itemid ?? item?.item_id;
   const shopId = item?.shopid ?? item?.shop_id;
+  const searchPosition = Number(context.position || 0);
+  const adId = entry?.adsid ?? entry?.item_card?.adsid ?? item?.adsid;
+  const campaignId = entry?.campaignid ?? entry?.item_card?.campaignid;
+  const hasIdentifier = (identifier) => (
+    identifier !== null &&
+    identifier !== undefined &&
+    identifier !== '' &&
+    String(identifier) !== '0'
+  );
+  const originalPrice = normalizeShopeePrice(
+    item?.price_before_discount ??
+    item?.price_min_before_discount ??
+    item?.original_price ??
+    entry?.price_before_discount
+  );
   const imageId = (
     item?.image?.image_id ??
     item?.image ??
@@ -186,12 +238,30 @@ function mapItem(entry) {
       entry?.display_name ||
       ''
     ).trim(),
-    price: rawPrice !== null
-      ? `${Math.round(rawPrice > 100000000 ? rawPrice / 100000 : rawPrice).toLocaleString('vi-VN')}₫`
+    price: priceValue !== null
+      ? `${priceValue.toLocaleString('vi-VN')}₫`
       : '',
+    priceValue,
+    originalPrice,
+    discountPercent: extractNumber(item?.discount ?? item?.discount_percentage),
     sold: item?.historical_sold ?? item?.sold ?? item?.sold_count ?? 0,
+    searchKeyword: String(context.keyword || ''),
+    searchPage: Number(context.page || 0),
+    searchPosition,
+    searchRank: Number(context.page || 0) * 60 + searchPosition,
+    isSponsored: hasIdentifier(adId) || hasIdentifier(campaignId),
+    campaignId: hasIdentifier(campaignId) ? String(campaignId) : '',
+    categoryId: String(item?.catid ?? item?.category_id ?? ''),
+    shopName: String(item?.shop_name ?? entry?.shop_name ?? ''),
+    isMall: Boolean(item?.is_official_shop || item?.is_mall),
+    isPreferred: Boolean(
+      item?.is_preferred ||
+      item?.is_preferred_plus_seller ||
+      item?.is_preferred_plus
+    ),
     url: itemId && shopId ? `https://shopee.vn/product/${shopId}/${itemId}` : '',
-    image: imageUrl(imageId)
+    image: imageUrl(imageId),
+    observedAt: new Date().toISOString()
   };
 }
 
@@ -228,7 +298,15 @@ function extendedDescription(item) {
 function mapDetailPayload(payload, expectedProduct) {
   const root = payload?.data ?? payload ?? {};
   const item = root?.item ?? root?.item_basic ?? root?.product ?? root;
-  const shop = root?.shop_detailed ?? root?.shop ?? item?.shop_detailed ?? {};
+  const shop = (
+    root?.shop_detailed ??
+    root?.shop ??
+    root?.seller ??
+    root?.shop_data ??
+    item?.shop_detailed ??
+    item?.shop ??
+    {}
+  );
   const categories = item?.categories ?? root?.categories ?? [];
   const attributes = Array.isArray(item?.attributes)
     ? item.attributes.map((attribute) => ({
@@ -244,9 +322,22 @@ function mapDetailPayload(payload, expectedProduct) {
     item?.rating_count ??
     item?.cmt_count
   );
+  const ratingBreakdown = Array.isArray(rating?.rating_count)
+    ? rating.rating_count.map((count, index) => ({
+      star: index === 0 ? 'all' : index,
+      count: extractNumber(count)
+    }))
+    : [];
   const images = [
+    item?.image,
+    item?.cover,
+    expectedProduct?.image,
     ...(Array.isArray(item?.images) ? item.images : []),
-    ...(Array.isArray(root?.images) ? root.images : [])
+    ...(Array.isArray(item?.image_info?.image_list) ? item.image_info.image_list : []),
+    ...(Array.isArray(item?.image_info?.images) ? item.image_info.images : []),
+    ...(Array.isArray(root?.images) ? root.images : []),
+    ...(Array.isArray(root?.image_info?.image_list) ? root.image_info.image_list : []),
+    ...(Array.isArray(root?.product_images) ? root.product_images : [])
   ].map(imageUrl).filter(Boolean);
   const variations = Array.isArray(item?.tier_variations)
     ? item.tier_variations.map((variation) => ({
@@ -261,8 +352,87 @@ function mapDetailPayload(payload, expectedProduct) {
       modelId: String(model?.modelid ?? model?.model_id ?? ''),
       name: String(model?.name || ''),
       sku: String(model?.sku || model?.model_sku || ''),
-      price: extractPrice(model?.price),
-      stock: extractNumber(model?.stock)
+      price: normalizeShopeePrice(model?.price),
+      originalPrice: normalizeShopeePrice(
+        model?.price_before_discount ?? model?.original_price
+      ),
+      stock: extractNumber(model?.stock),
+      sold: extractNumber(model?.sold ?? model?.historical_sold),
+      promotionId: String(model?.promotionid ?? model?.promotion_id ?? '')
+    }))
+    : [];
+  const promotionCandidates = [
+    ...(Array.isArray(root?.vouchers) ? root.vouchers : []),
+    ...(Array.isArray(root?.voucher_list) ? root.voucher_list : []),
+    ...(Array.isArray(item?.vouchers) ? item.vouchers : []),
+    root?.voucher,
+    item?.voucher_info,
+    item?.promotion_info,
+    root?.add_on_deal_info,
+    root?.flash_sale
+  ].filter(Boolean);
+  const promotions = promotionCandidates.slice(0, 30).map((promotion) => ({
+    promotionId: String(promotion?.promotionid ?? promotion?.promotion_id ?? promotion?.id ?? ''),
+    code: String(promotion?.voucher_code ?? promotion?.code ?? ''),
+    label: String(
+      promotion?.label ??
+      promotion?.title ??
+      promotion?.name ??
+      promotion?.discount_text ??
+      ''
+    ),
+    discountValue: extractNumber(
+      promotion?.discount_value ?? promotion?.discount_amount ?? promotion?.discount
+    ),
+    discountPercentage: extractNumber(
+      promotion?.discount_percentage ?? promotion?.percentage
+    ),
+    minimumSpend: normalizeShopeePrice(
+      promotion?.min_spend ?? promotion?.minimum_spend
+    ),
+    startAt: unixTimestamp(promotion?.start_time ?? promotion?.start_at),
+    endAt: unixTimestamp(promotion?.end_time ?? promotion?.end_at)
+  }));
+  const logisticCandidates = (
+    root?.logistics?.logistic_channels ??
+    root?.shipping_info?.logistic_channels ??
+    item?.logistic_info ??
+    item?.logistics ??
+    []
+  );
+  const logistics = (Array.isArray(logisticCandidates) ? logisticCandidates : [])
+    .slice(0, 30)
+    .map((channel) => ({
+      channelId: String(channel?.channelid ?? channel?.channel_id ?? ''),
+      name: String(channel?.name || channel?.channel_name || ''),
+      fee: normalizeShopeePrice(channel?.shipping_fee ?? channel?.fee),
+      feeMin: normalizeShopeePrice(channel?.shipping_fee_min ?? channel?.fee_min),
+      feeMax: normalizeShopeePrice(channel?.shipping_fee_max ?? channel?.fee_max),
+      deliveryMinDays: extractNumber(
+        channel?.min_delivery_days ?? channel?.estimated_delivery_time_min
+      ),
+      deliveryMaxDays: extractNumber(
+        channel?.max_delivery_days ?? channel?.estimated_delivery_time_max
+      ),
+      freeShipping: Boolean(
+        channel?.free_shipping ||
+        channel?.is_free_shipping ||
+        Number(channel?.shipping_fee ?? channel?.fee) === 0
+      )
+    }));
+  const videos = [
+    ...(Array.isArray(item?.video_info_list) ? item.video_info_list : []),
+    ...(Array.isArray(root?.videos) ? root.videos : [])
+  ].slice(0, 20).map((video) => ({
+    videoId: String(video?.video_id ?? video?.id ?? ''),
+    url: String(video?.video_url || video?.url || ''),
+    thumbnail: imageUrl(video?.thumbnail || video?.cover_image)
+  }));
+  const wholesaleTiers = Array.isArray(item?.wholesale_tier_list)
+    ? item.wholesale_tier_list.slice(0, 50).map((tier) => ({
+      minimumOrder: extractNumber(tier?.min_count ?? tier?.minimum_order),
+      maximumOrder: extractNumber(tier?.max_count ?? tier?.maximum_order),
+      unitPrice: normalizeShopeePrice(tier?.unit_price ?? tier?.price)
     }))
     : [];
   const itemId = String(
@@ -281,21 +451,75 @@ function mapDetailPayload(payload, expectedProduct) {
         .join(' > ')
       : String(categories || ''),
     brand: String(item?.brand || item?.brand_name || brandAttribute?.value || ''),
+    priceValue: normalizeShopeePrice(item?.price ?? item?.price_min),
+    priceMin: normalizeShopeePrice(item?.price_min ?? item?.price),
+    priceMax: normalizeShopeePrice(item?.price_max ?? item?.price),
+    originalPrice: normalizeShopeePrice(
+      item?.price_before_discount ?? item?.price_min_before_discount
+    ),
+    discountPercent: extractNumber(item?.discount ?? item?.discount_percentage),
+    currency: String(item?.currency || root?.currency || 'VND'),
     rating: extractNumber(rating?.rating_star ?? rating?.rating ?? item?.rating_star),
     ratingCount,
+    ratingBreakdown,
+    totalSold: extractNumber(item?.historical_sold ?? item?.total_sold),
+    salesLast30Days: extractNumber(item?.sold ?? item?.monthly_sold),
     stock: extractNumber(item?.stock ?? root?.stock),
     likedCount: extractNumber(item?.liked_count ?? item?.likedCount),
-    shopName: String(shop?.name || shop?.shop_name || item?.shop_name || ''),
+    viewCount: extractNumber(item?.view_count ?? item?.views),
+    condition: String(item?.condition || item?.item_condition || ''),
+    productCreatedAt: unixTimestamp(item?.ctime ?? item?.created_at),
+    productUpdatedAt: unixTimestamp(item?.mtime ?? item?.updated_at),
+    shopName: String(
+      shop?.name ||
+      shop?.shop_name ||
+      shop?.username ||
+      shop?.account?.username ||
+      item?.shop_name ||
+      ''
+    ),
     shopLocation: String(
       item?.shop_location ||
       shop?.shop_location ||
       shop?.place ||
       ''
     ),
+    shopUsername: String(shop?.username || shop?.account?.username || ''),
+    shopDescription: String(shop?.description || shop?.shop_description || ''),
+    shopRating: extractNumber(shop?.rating_star ?? shop?.rating),
+    shopFollowerCount: extractNumber(
+      shop?.follower_count ?? shop?.followers ?? shop?.follower
+    ),
+    shopResponseRate: extractNumber(shop?.response_rate),
+    shopResponseTime: extractNumber(shop?.response_time),
+    shopJoinedAt: unixTimestamp(shop?.ctime ?? shop?.created_at),
+    shopLastActiveAt: unixTimestamp(shop?.last_active_time ?? shop?.last_active_at),
+    shopProductCount: extractNumber(shop?.item_count ?? shop?.product_count),
+    shopOnVacation: Boolean(shop?.vacation || shop?.is_on_vacation),
+    shopIsMall: Boolean(
+      shop?.is_official_shop ||
+      shop?.is_mall ||
+      item?.is_official_shop
+    ),
+    shopIsPreferred: Boolean(
+      shop?.is_preferred_plus_seller ||
+      shop?.is_preferred ||
+      item?.is_preferred_plus_seller
+    ),
+    shopIsVerified: Boolean(
+      shop?.is_shopee_verified ||
+      shop?.is_verified ||
+      shop?.account?.is_verified
+    ),
     images: [...new Set(images)].slice(0, 30),
     attributes,
     variations,
     models,
+    wholesaleTiers,
+    promotions,
+    logistics,
+    videos,
+    observedAt: new Date().toISOString(),
     detailStatus: 'COMPLETED'
   };
   const usefulFields = [
@@ -359,11 +583,20 @@ async function storeItems(items) {
   if (!activeJob || activeJob.phase !== 'SEARCH') return 0;
   const seenSet = new Set(activeJob.seen);
   const freshItems = [];
-  for (const original of items) {
+  for (const [itemIndex, original] of items.entries()) {
+    const fallbackPosition = itemIndex + 1;
     const item = {
       ...original,
       itemId: String(original.itemId || ''),
       shopId: String(original.shopId || ''),
+      searchKeyword: String(original.searchKeyword || activeJob.keyword || ''),
+      searchPage: Number(original.searchPage ?? activeJob.page ?? 0),
+      searchPosition: Number(original.searchPosition || fallbackPosition),
+      searchRank: Number(
+        original.searchRank ||
+        Number(original.searchPage ?? activeJob.page ?? 0) * 60 + fallbackPosition
+      ),
+      observedAt: String(original.observedAt || new Date().toISOString()),
       detailStatus: activeJob.includeDetails ? 'PENDING' : 'SKIPPED'
     };
     const key = String(item.itemId || item.url || item.title);
@@ -375,13 +608,16 @@ async function storeItems(items) {
         itemId: item.itemId,
         shopId: item.shopId,
         url: item.url,
-        title: item.title
+        title: item.title,
+        image: item.image
       });
     }
     freshItems.push(item);
     if (activeJob.seen.length >= activeJob.maxItems) break;
   }
   if (!freshItems.length) return 0;
+  activeJob.consecutiveNoNewPages = 0;
+  activeJob.lastNoNewPage = null;
   await persistActiveJob();
   await api(`/api/browser-agent/jobs/${activeJob.runId}/items`, {
     method: 'POST',
@@ -394,23 +630,48 @@ async function scheduleNextPage() {
   if (!activeJob || activeJob.phase !== 'SEARCH' || activeJob.navigationScheduled) return;
   clearPageTimeout();
   activeJob.navigationScheduled = true;
-  activeJob.page += 1;
+  activeJob.scheduledPage = activeJob.page + 1;
   const runId = activeJob.runId;
-  const nextUrl = searchUrl(activeJob.keyword, activeJob.page);
+  const nextPage = activeJob.scheduledPage;
+  const nextUrl = searchUrl(activeJob.keyword, nextPage);
   const delay = 9000 + Math.floor(Math.random() * 6000);
   await persistActiveJob();
   await logJob(
-    `Waiting ${Math.ceil(delay / 1000)} seconds before loading Shopee page ${activeJob.page}.`
+    `Waiting ${Math.ceil(delay / 1000)} seconds before loading Shopee page ${nextPage}.`
   );
   setTimeout(() => {
     if (!activeJob || activeJob.runId !== runId || activeJob.phase !== 'SEARCH') return;
     activeJob.navigationScheduled = false;
+    activeJob.page = nextPage;
+    activeJob.scheduledPage = null;
     void persistActiveJob();
     armPageTimeout(SEARCH_TIMEOUT_MS);
     chrome.tabs.update(activeJob.tabId, { url: nextUrl }).catch((error) => {
       void finishJob(false, error?.message || 'Không thể mở trang tìm kiếm Shopee.');
     });
   }, delay);
+}
+
+async function continueAfterNoNewSearchData(message) {
+  if (!activeJob || activeJob.phase !== 'SEARCH' || activeJob.navigationScheduled) return;
+
+  if (activeJob.lastNoNewPage !== activeJob.page) {
+    activeJob.lastNoNewPage = activeJob.page;
+    activeJob.consecutiveNoNewPages = Number(activeJob.consecutiveNoNewPages || 0) + 1;
+    await persistActiveJob();
+  }
+
+  if (activeJob.consecutiveNoNewPages >= 3) {
+    await logJob(
+      `No new products on ${activeJob.consecutiveNoNewPages} consecutive Shopee pages. ` +
+      `Continuing with ${activeJob.seen.length} collected products.`
+    );
+    await beginDetailPhase();
+    return;
+  }
+
+  await logJob(message);
+  await scheduleNextPage();
 }
 
 async function logJob(message) {
@@ -633,7 +894,11 @@ async function processSearchResponse(detail, sender) {
     return;
   }
 
-  const mappedItems = rawItems.map(mapItem);
+  const mappedItems = rawItems.map((entry, index) => mapItem(entry, {
+    keyword: activeJob.keyword,
+    page: activeJob.page,
+    position: index + 1
+  }));
   const storedCount = await storeItems(mappedItems);
 
   if (!rawItems.length && activeJob.seen.length === 0) {
@@ -663,8 +928,10 @@ async function processSearchResponse(detail, sender) {
   }
 
   if (!rawItems.length || !storedCount) {
-    if (activeJob.seen.length > 0 && !activeJob.navigationScheduled) {
-      await logJob('No new API-mapped products; waiting for rendered cards instead of ending early.');
+    if (activeJob.seen.length > 0) {
+      await continueAfterNoNewSearchData(
+        'No new API-mapped products; continuing to the next Shopee page.'
+      );
     }
     return;
   }
@@ -785,6 +1052,9 @@ async function poll() {
       tabId: null,
       unexpectedResponses: 0,
       navigationScheduled: false,
+      scheduledPage: null,
+      consecutiveNoNewPages: 0,
+      lastNoNewPage: null,
       pageDeadline: Date.now() + SEARCH_TIMEOUT_MS
     };
     await persistActiveJob();
@@ -888,7 +1158,7 @@ stateReady.then(async () => {
   if (activeJob) {
     if (activeJob.navigationScheduled) {
       activeJob.navigationScheduled = false;
-      if (activeJob.phase === 'SEARCH') activeJob.page = Math.max(0, activeJob.page - 1);
+      activeJob.scheduledPage = null;
       await persistActiveJob();
       if (activeJob.phase === 'DETAIL') await navigateNextDetail();
       else await scheduleNextPage();

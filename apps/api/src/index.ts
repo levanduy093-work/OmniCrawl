@@ -177,30 +177,72 @@ function sanitizeDetailPatch(value: any) {
       detailCrawledAt: new Date().toISOString()
     };
   }
-  return {
+  const detail = {
     description: text(value?.description, 50_000),
     category: text(value?.category, 1000),
     brand: text(value?.brand, 500),
+    priceValue: number(value?.priceValue),
+    priceMin: number(value?.priceMin),
+    priceMax: number(value?.priceMax),
+    originalPrice: number(value?.originalPrice),
+    discountPercent: number(value?.discountPercent),
+    currency: text(value?.currency, 20),
     rating: number(value?.rating),
     ratingCount: number(value?.ratingCount),
+    ratingBreakdown: objectArray(value?.ratingBreakdown, 10),
     reviewsCollected: number(value?.reviewsCollected),
     reviews: objectArray(value?.reviews, 100),
     reviewsStatus: ['COMPLETED', 'PARTIAL', 'FAILED', 'SKIPPED'].includes(value?.reviewsStatus)
       ? value.reviewsStatus
       : 'SKIPPED',
     reviewsError: text(value?.reviewsError, 1000),
+    totalSold: number(value?.totalSold),
+    salesLast30Days: number(value?.salesLast30Days),
     stock: number(value?.stock),
     likedCount: number(value?.likedCount),
+    viewCount: number(value?.viewCount),
+    condition: text(value?.condition, 200),
+    productCreatedAt: text(value?.productCreatedAt, 100),
+    productUpdatedAt: text(value?.productUpdatedAt, 100),
     shopName: text(value?.shopName, 1000),
+    shopUsername: text(value?.shopUsername, 1000),
+    shopDescription: text(value?.shopDescription, 5000),
     shopLocation: text(value?.shopLocation, 1000),
+    shopRating: number(value?.shopRating),
+    shopFollowerCount: number(value?.shopFollowerCount),
+    shopResponseRate: number(value?.shopResponseRate),
+    shopResponseTime: number(value?.shopResponseTime),
+    shopJoinedAt: text(value?.shopJoinedAt, 100),
+    shopLastActiveAt: text(value?.shopLastActiveAt, 100),
+    shopProductCount: number(value?.shopProductCount),
+    shopOnVacation: Boolean(value?.shopOnVacation),
+    shopIsMall: Boolean(value?.shopIsMall),
+    shopIsPreferred: Boolean(value?.shopIsPreferred),
+    shopIsVerified: Boolean(value?.shopIsVerified),
     images: stringArray(value?.images, 30),
     attributes: objectArray(value?.attributes, 100),
     variations: objectArray(value?.variations, 50),
     models: objectArray(value?.models, 100),
+    wholesaleTiers: objectArray(value?.wholesaleTiers, 50),
+    promotions: objectArray(value?.promotions, 30),
+    logistics: objectArray(value?.logistics, 30),
+    videos: objectArray(value?.videos, 20),
+    observedAt: text(value?.observedAt, 100) || new Date().toISOString(),
     detailStatus: status,
     detailError: '',
     detailCrawledAt: new Date().toISOString()
   };
+  return Object.fromEntries(
+    Object.entries(detail).filter(([key, fieldValue]) => (
+      fieldValue !== null &&
+      fieldValue !== undefined &&
+      (
+        typeof fieldValue !== 'string' ||
+        fieldValue !== '' ||
+        ['detailError', 'reviewsError'].includes(key)
+      )
+    ))
+  );
 }
 
 // Auth Middleware
@@ -640,14 +682,33 @@ app.post('/api/browser-agent/jobs/:id/items', requireAuth, async (req: any, res:
     const safeItems = [];
     for (const item of items) {
       if (!item || typeof item !== 'object') continue;
+      const numeric = (value: unknown) => {
+        if (value === null || value === undefined || value === '') return null;
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : null;
+      };
       safeItems.push({
-        itemId: item.itemId,
-        shopId: item.shopId,
+        itemId: String(item.itemId || '').slice(0, 200),
+        shopId: String(item.shopId || '').slice(0, 200),
         title: String(item.title || '').slice(0, 1000),
         price: String(item.price || '').slice(0, 100),
+        priceValue: numeric(item.priceValue),
+        originalPrice: numeric(item.originalPrice),
+        discountPercent: numeric(item.discountPercent),
         sold: item.sold ?? 0,
+        searchKeyword: String(item.searchKeyword || '').slice(0, 500),
+        searchPage: numeric(item.searchPage),
+        searchPosition: numeric(item.searchPosition),
+        searchRank: numeric(item.searchRank),
+        isSponsored: Boolean(item.isSponsored),
+        campaignId: String(item.campaignId || '').slice(0, 200),
+        categoryId: String(item.categoryId || '').slice(0, 200),
+        shopName: String(item.shopName || '').slice(0, 1000),
+        isMall: Boolean(item.isMall),
+        isPreferred: Boolean(item.isPreferred),
         url: String(item.url || '').slice(0, 2000),
         image: String(item.image || '').slice(0, 2000),
+        observedAt: String(item.observedAt || new Date().toISOString()).slice(0, 100),
         detailStatus: item.detailStatus === 'PENDING' ? 'PENDING' : 'SKIPPED'
       });
     }
