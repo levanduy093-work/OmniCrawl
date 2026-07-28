@@ -1,0 +1,22 @@
+{
+  "name": "tiktok-scraper",
+  "version": "1.0.0",
+  "description": "Advanced stealth scraper for TikTok & TikTok Shop using Crawlee and Browser Agent",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "test": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@omnicrawl/sdk": "workspace:^",
+    "crawlee": "^3.17.0",
+    "playwright": "^1.62.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "typescript": "^7.0.2"
+  }
+}

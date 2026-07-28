@@ -1,14 +1,16 @@
 {
   "manifest_version": 3,
   "name": "OmniCrawl Browser Agent",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Runs OmniCrawl jobs inside your authenticated browser without exporting cookies.",
-  "permissions": ["tabs", "storage", "alarms"],
+  "permissions": ["tabs", "storage", "alarms", "cookies"],
   "host_permissions": [
     "http://localhost:3001/*",
     "http://127.0.0.1:3001/*",
     "http://localhost:5173/*",
-    "https://shopee.vn/*"
+    "https://shopee.vn/*",
+    "https://*.shopee.vn/*",
+    "https://*.tiktok.com/*"
   ],
   "background": {
     "service_worker": "service-worker.js"
@@ -28,6 +30,17 @@
     {
       "matches": ["https://shopee.vn/*"],
       "js": ["shopee-bridge.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://*.tiktok.com/*"],
+      "js": ["tiktok-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://*.tiktok.com/*"],
+      "js": ["tiktok-bridge.js"],
       "run_at": "document_start"
     }
   ]

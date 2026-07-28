@@ -166,6 +166,75 @@ async function main() {
   });
 
   console.log(`Actor seeded: ${actor.name}`);
+
+  const tiktokInputSchema = JSON.stringify({
+    type: 'object',
+    required: ['keyword'],
+    properties: {
+      keyword: {
+        type: 'string',
+        title: 'Từ khóa tìm kiếm trên TikTok',
+        minLength: 1
+      },
+      mode: {
+        type: 'string',
+        title: 'Chế độ tìm kiếm',
+        default: 'products',
+        enum: ['products', 'videos'],
+        enumNames: ['TikTok Shop Sản Phẩm', 'TikTok Video Tìm Kiếm']
+      },
+      maxItems: {
+        type: 'integer',
+        title: 'Số lượng tối đa',
+        minimum: 1,
+        maximum: 500,
+        default: 50
+      },
+      includeDetails: {
+        type: 'boolean',
+        title: 'Thu thập chi tiết từng sản phẩm / video',
+        description: 'Bóc tách thêm mô tả chi tiết, tồn kho, người tạo, lượt thích, lượt xem.',
+        default: true
+      }
+    }
+  });
+
+  const tiktokOutputSchema = JSON.stringify({
+    type: 'object',
+    required: ['itemId', 'title', 'url'],
+    properties: {
+      itemId: { type: 'string', title: 'Mã sản phẩm / Video ID' },
+      title: { type: 'string', title: 'Tên sản phẩm / Tiêu đề Video' },
+      price: { type: 'string', title: 'Giá bán' },
+      sold: { type: ['string', 'number'], title: 'Đã bán / Lượt xem' },
+      url: { type: 'string', format: 'uri', title: 'Liên kết TikTok' },
+      image: { type: 'string', format: 'uri', title: 'Hình ảnh / Cover' },
+      description: { type: 'string', title: 'Mô tả chi tiết' },
+      author: { type: 'string', title: 'Creator / Tên Shop' },
+      likes: { type: 'number', title: 'Lượt thích' },
+      comments: { type: 'number', title: 'Lượt bình luận' },
+      shares: { type: 'number', title: 'Lượt chia sẻ' },
+      rating: { type: 'number', title: 'Điểm đánh giá' }
+    }
+  });
+
+  const tiktokActor = await prisma.actor.upsert({
+    where: { name: 'tiktok-scraper' },
+    update: {
+      userId: null,
+      inputSchema: tiktokInputSchema,
+      outputSchema: tiktokOutputSchema
+    },
+    create: {
+      name: 'tiktok-scraper',
+      description: 'Advanced stealth scraper for TikTok Shop products & TikTok Video search results.',
+      userId: null,
+      inputSchema: tiktokInputSchema,
+      outputSchema: tiktokOutputSchema
+    }
+  });
+
+  console.log(`Actor seeded: ${tiktokActor.name}`);
   
   console.log('Seeding finished.');
 }

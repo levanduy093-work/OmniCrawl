@@ -57,6 +57,25 @@ importers:
         specifier: ^5.4.0
         version: 5.9.3
 
+  actors/tiktok-scraper:
+    dependencies:
+      '@omnicrawl/sdk':
+        specifier: workspace:^
+        version: link:../../packages/sdk
+      crawlee:
+        specifier: ^3.17.0
+        version: 3.17.0(@types/node@26.1.2)(playwright@1.62.0)
+      playwright:
+        specifier: ^1.62.0
+        version: 1.62.0
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.2
+        version: 26.1.2
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+
   apps/api:
     dependencies:
       '@omnicrawl/database':
@@ -3495,7 +3514,7 @@ snapshots:
 
   '@types/cors@2.8.19':
     dependencies:
-      '@types/node': 24.13.3
+      '@types/node': 26.1.2
 
   '@types/express-serve-static-core@4.19.9':
     dependencies:
@@ -3524,7 +3543,7 @@ snapshots:
   '@types/jsonwebtoken@9.0.10':
     dependencies:
       '@types/ms': 2.1.0
-      '@types/node': 24.13.3
+      '@types/node': 26.1.2
 
   '@types/mime@1.3.5': {}
 

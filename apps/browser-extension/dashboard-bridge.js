@@ -1,23 +1,34 @@
 const DASHBOARD_ORIGIN = 'http://localhost:5173';
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 
-function reportStatus(connected) {
+async function reportStatus(connected) {
+  let authStatus = { shopeeLoggedIn: false, tiktokLoggedIn: false };
+  if (connected) {
+    try {
+      const res = await chrome.runtime.sendMessage({ type: 'GET_AUTH_STATUS' });
+      if (res?.statuses) authStatus = res.statuses;
+    } catch {
+      // Ignore errors
+    }
+  }
+
   window.postMessage({
     source: 'OMNICRAWL_EXTENSION',
     type: 'STATUS',
     connected,
-    version: EXTENSION_VERSION
+    version: EXTENSION_VERSION,
+    authStatus
   }, DASHBOARD_ORIGIN);
 }
 
 function sendToBackground(message) {
   try {
     return chrome.runtime.sendMessage(message).catch((error) => {
-      reportStatus(false);
+      void reportStatus(false);
       throw error;
     });
   } catch (error) {
-    reportStatus(false);
+    void reportStatus(false);
     return Promise.reject(error);
   }
 }
@@ -43,6 +54,10 @@ window.addEventListener('message', (event) => {
 
   if (message.type === 'POLL_NOW') {
     sendToBackground({ type: 'POLL_NOW' }).catch(() => undefined);
+  }
+
+  if (message.type === 'OPEN_TAB') {
+    sendToBackground({ type: 'OPEN_TAB', url: message.url }).catch(() => undefined);
   }
 });
 

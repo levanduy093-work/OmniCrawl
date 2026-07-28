@@ -1093,7 +1093,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       schedulePoll(0);
     } else if (message.type === 'POLL_NOW') {
       void poll();
-    } else if (message.type === 'SHOPEE_RESPONSE') {
+    } else if (message.type === 'SHOPEE_RESPONSE' || message.type === 'TIKTOK_RESPONSE') {
       const handler = message.detail?.kind === 'detail'
         ? processDetailResponse
         : message.detail?.kind === 'reviews'
@@ -1102,14 +1102,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       void handler(message.detail, sender).catch((error) => {
         void finishJob(
           false,
-          error instanceof Error ? error.message : 'Không thể xử lý dữ liệu Shopee.'
+          error instanceof Error ? error.message : 'Không thể xử lý dữ liệu.'
         ).catch(() => undefined);
       });
-    } else if (message.type === 'SHOPEE_DOM_ITEMS') {
+    } else if (message.type === 'SHOPEE_DOM_ITEMS' || message.type === 'TIKTOK_DOM_ITEMS') {
       void processDomItems(message.items, sender).catch((error) => {
         void finishJob(
           false,
-          error instanceof Error ? error.message : 'Không thể xử lý card sản phẩm Shopee.'
+          error instanceof Error ? error.message : 'Không thể xử lý card sản phẩm.'
         ).catch(() => undefined);
       });
     } else if (message.type === 'SHOPEE_DOM_DETAIL') {
@@ -1128,11 +1128,50 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         false,
         'Shopee yêu cầu CAPTCHA hoặc đăng nhập trong Chrome.'
       ).catch(() => undefined);
+    } else if (message.type === 'GET_AUTH_STATUS') {
+      const statuses = await checkAuthStatuses();
+      sendResponse({ ok: true, statuses });
+      return;
+    } else if (message.type === 'OPEN_TAB' && message.url) {
+      chrome.tabs.create({ url: message.url }).catch(() => undefined);
+      sendResponse({ ok: true });
+      return;
     }
     sendResponse({ ok: true });
   })();
   return true;
 });
+
+async function checkAuthStatuses() {
+  try {
+    const [shopeeDomainCookies, shopeeUrlCookies, tiktokDomainCookies, tiktokUrlCookies] = await Promise.all([
+      chrome.cookies.getAll({ domain: 'shopee.vn' }).catch(() => []),
+      chrome.cookies.getAll({ url: 'https://shopee.vn' }).catch(() => []),
+      chrome.cookies.getAll({ domain: 'tiktok.com' }).catch(() => []),
+      chrome.cookies.getAll({ url: 'https://www.tiktok.com' }).catch(() => [])
+    ]);
+
+    const allShopee = [...shopeeDomainCookies, ...shopeeUrlCookies];
+    const allTikTok = [...tiktokDomainCookies, ...tiktokUrlCookies];
+
+    const isShopeeLoggedIn = allShopee.some((c) => (
+      ['SPC_U', 'SPC_EC', 'SPC_ST', 'shopee_token', 'shopee_user_id', 'SPC_SI'].includes(c.name) &&
+      Boolean(c.value) && c.value !== '-' && c.value !== '0'
+    ));
+
+    const isTikTokLoggedIn = allTikTok.some((c) => (
+      ['sessionid', 'sessionid_ss', 'sid_tt', 'uid_tt'].includes(c.name) &&
+      Boolean(c.value) && c.value !== '-' && c.value !== '0'
+    ));
+
+    return {
+      shopeeLoggedIn: isShopeeLoggedIn,
+      tiktokLoggedIn: isTikTokLoggedIn
+    };
+  } catch {
+    return { shopeeLoggedIn: false, tiktokLoggedIn: false };
+  }
+}
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   if (activeJob?.tabId === tabId) {

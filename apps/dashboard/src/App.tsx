@@ -23,7 +23,7 @@ import Login from './Login'
 import OmniCrawlLogo from './Logo'
 import './App.css'
 
-const REQUIRED_BROWSER_AGENT_VERSION = '0.5.1'
+const REQUIRED_BROWSER_AGENT_VERSION = '0.6.0'
 
 type JsonSchemaProperty = {
   type?: 'string' | 'integer' | 'number' | 'boolean'
@@ -33,6 +33,8 @@ type JsonSchemaProperty = {
   minimum?: number
   maximum?: number
   placeholder?: string
+  enum?: string[]
+  enumNames?: string[]
 }
 
 type JsonInputSchema = {
@@ -124,7 +126,8 @@ function App() {
   const [browserAgentConnected, setBrowserAgentConnected] = useState(false)
   const [browserAgentDetected, setBrowserAgentDetected] = useState(false)
   const [browserAgentVersion, setBrowserAgentVersion] = useState<string | null>(null)
-  
+  const [browserAuthStatus, setBrowserAuthStatus] = useState<{ shopeeLoggedIn: boolean; tiktokLoggedIn: boolean }>({ shopeeLoggedIn: false, tiktokLoggedIn: false })
+
   // Log Viewer State
   const [logModalOpen, setLogModalOpen] = useState(false)
   const [activeLogRunId, setActiveLogRunId] = useState<string | null>(null)
@@ -220,6 +223,9 @@ function App() {
         setBrowserAgentConnected(
           Boolean(event.data.connected) && version === REQUIRED_BROWSER_AGENT_VERSION
         )
+        if (event.data.authStatus) {
+          setBrowserAuthStatus(event.data.authStatus)
+        }
       }
     }
     window.addEventListener('message', handleAgentMessage)
@@ -235,6 +241,19 @@ function App() {
       clearInterval(interval)
     }
   }, [token])
+
+  const handleOpenLoginTab = useCallback((url: string) => {
+    window.open(url, '_blank', 'noopener,noreferrer')
+    window.postMessage({
+      source: 'OMNICRAWL_DASHBOARD',
+      type: 'OPEN_TAB',
+      url
+    }, window.location.origin)
+    window.postMessage({
+      source: 'OMNICRAWL_DASHBOARD',
+      type: 'POLL_NOW'
+    }, window.location.origin)
+  }, [])
 
   const triggerRun = async (id: string) => {
     try {
@@ -561,62 +580,119 @@ function App() {
         </header>
 
         {activeTab === 'actors' && (
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5 items-stretch max-w-[1280px]">
             {actors.map((actor: any) => (
-              <div key={actor.id} className="bg-white p-5 rounded-3xl shadow-sm border border-gray-50 hover:shadow-md transition-shadow group flex flex-col h-full">
-                <div className="w-12 h-12 bg-blue-50 rounded-xl flex items-center justify-center text-blue-600 mb-4 group-hover:scale-105 transition-transform">
-                  <Bot size={24} />
-                </div>
-                <h3 className="text-lg font-medium text-gray-900 mb-1">{actor.name}</h3>
-                <p className="text-sm text-gray-500 mb-6 flex-1">{actor.description || 'No description provided.'}</p>
-                
-                
-                {actor.name === 'shopee-scraper' && (
-                  <div className="mb-4 space-y-3">
-                    <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className={`h-2.5 w-2.5 rounded-full ${
-                              browserAgentConnected ? 'bg-emerald-500' : 'bg-gray-400'
+              <div key={actor.id} className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 hover:shadow-md transition-all group flex flex-col h-full justify-between">
+                <div>
+                  <div className="flex items-center gap-2.5 mb-2">
+                    <div className="w-9 h-9 bg-blue-50 rounded-xl flex items-center justify-center text-blue-600 group-hover:scale-105 transition-transform">
+                      <Bot size={18} />
+                    </div>
+                    <div>
+                      <h3 className="text-base font-semibold text-gray-900">{actor.name}</h3>
+                      <span className="text-[11px] text-gray-400 font-mono">v1.0.0</span>
+                    </div>
+                  </div>
+                  
+                  <p className="text-xs text-gray-500 mb-3 min-h-[32px] line-clamp-2 leading-relaxed">
+                    {actor.description || 'No description provided.'}
+                  </p>
+                  
+                  {(actor.name === 'shopee-scraper' || actor.name === 'tiktok-scraper') && (
+                    <div className="mb-3">
+                      <div className="rounded-xl border border-gray-200/80 bg-slate-50/70 px-3 py-2 flex items-center justify-between gap-2 min-h-[38px]">
+                        <div className="flex items-center gap-1.5 text-xs font-medium text-gray-800">
+                          <span className="relative flex h-2 w-2 shrink-0">
+                            <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
+                              browserAgentConnected ? 'bg-emerald-400' : 'bg-amber-400'
                             }`} />
-                            <span className="text-sm font-medium text-gray-800">
-                              {browserAgentConnected
-                                ? `Browser Agent v${browserAgentVersion} đã kết nối`
-                                : browserAgentDetected
-                                  ? 'Browser Agent cần reload'
-                                  : 'Chưa phát hiện Browser Agent'}
-                            </span>
-                          </div>
-                          <p className="mt-1 text-xs text-gray-500">
+                            <span className={`relative inline-flex rounded-full h-2 w-2 ${
+                              browserAgentConnected ? 'bg-emerald-500' : 'bg-amber-500'
+                            }`} />
+                          </span>
+                          <span className="text-[11px] leading-none flex items-center">
                             {browserAgentConnected
-                              ? 'Job sẽ chạy trong Chrome đang đăng nhập Shopee; cookie không rời trình duyệt.'
+                              ? `Agent v${browserAgentVersion}`
                               : browserAgentDetected
-                                ? `Dashboard yêu cầu v${REQUIRED_BROWSER_AGENT_VERSION}; phiên bản hiện tại là ${browserAgentVersion || 'cũ'}.`
-                              : 'Cài extension từ apps/browser-extension rồi refresh trang này.'}
-                          </p>
+                                ? 'Cần Reload Extension'
+                                : 'Chưa kết nối Extension'}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center">
+                          {actor.name === 'shopee-scraper' ? (
+                            browserAgentConnected && browserAuthStatus.shopeeLoggedIn ? (
+                              <a
+                                href="https://shopee.vn"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center justify-center gap-1 font-semibold text-emerald-700 bg-emerald-100/90 hover:bg-emerald-200/90 px-2.5 py-1 rounded-full text-[10px] leading-none transition-colors cursor-pointer min-h-[22px]"
+                                title="Đã kết nối - Click để mở trang Shopee"
+                              >
+                                Shopee: Logged In
+                                <ExternalLink size={10} />
+                              </a>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => handleOpenLoginTab('https://shopee.vn/buyer/login')}
+                                className="inline-flex items-center justify-center gap-1 font-medium text-amber-800 bg-amber-100/90 hover:bg-amber-200/90 border border-amber-300/60 px-2.5 py-1 rounded-full text-[10px] leading-none transition-all cursor-pointer shadow-xs active:scale-95 min-h-[22px]"
+                                title="Click để mở tab đăng nhập Shopee trên Chrome"
+                              >
+                                Shopee: Guest Mode
+                                <span className="font-semibold text-blue-600 underline inline-flex items-center gap-0.5 ml-0.5">
+                                  (Mở Tab Login <ExternalLink size={10} />)
+                                </span>
+                              </button>
+                            )
+                          ) : (
+                            browserAgentConnected && browserAuthStatus.tiktokLoggedIn ? (
+                              <a
+                                href="https://www.tiktok.com"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center justify-center gap-1 font-semibold text-emerald-700 bg-emerald-100/90 hover:bg-emerald-200/90 px-2.5 py-1 rounded-full text-[10px] leading-none transition-colors cursor-pointer min-h-[22px]"
+                                title="Đã kết nối - Click để mở trang TikTok"
+                              >
+                                TikTok: Logged In
+                                <ExternalLink size={10} />
+                              </a>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => handleOpenLoginTab('https://www.tiktok.com/login')}
+                                className="inline-flex items-center justify-center gap-1 font-medium text-amber-800 bg-amber-100/90 hover:bg-amber-200/90 border border-amber-300/60 px-2.5 py-1 rounded-full text-[10px] leading-none transition-all cursor-pointer shadow-xs active:scale-95 min-h-[22px]"
+                                title="Click để mở tab đăng nhập TikTok trên Chrome"
+                              >
+                                TikTok: Guest Mode
+                                <span className="font-semibold text-blue-600 underline inline-flex items-center gap-0.5 ml-0.5">
+                                  (Mở Tab Login <ExternalLink size={10} />)
+                                </span>
+                              </button>
+                            )
+                          )}
                         </div>
                       </div>
                     </div>
-                  </div>
-                )}
+                  )}
 
-                <ActorInputFields
-                  schema={actor.inputSchema}
-                  input={runInputs[actor.id] || {}}
-                  onChange={(input) => setRunInputs((previous) => ({
-                    ...previous,
-                    [actor.id]: input
-                  }))}
-                />
+                  <ActorInputFields
+                    schema={actor.inputSchema}
+                    input={runInputs[actor.id] || {}}
+                    onChange={(input) => setRunInputs((previous) => ({
+                      ...previous,
+                      [actor.id]: input
+                    }))}
+                  />
+                </div>
 
-                <div className="flex gap-3 mt-auto">
+                <div className="pt-3 mt-4 border-t border-gray-100">
                   <button 
                     onClick={() => triggerRun(actor.id)}
-                    disabled={actor.name === 'shopee-scraper' && !browserAgentConnected}
-                    className="flex-1 flex items-center justify-center gap-2 bg-[#E8F0FE] text-blue-700 font-medium py-2.5 text-sm rounded-full hover:bg-blue-100 transition-colors disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed"
+                    disabled={(actor.name === 'shopee-scraper' || actor.name === 'tiktok-scraper') && !browserAgentConnected}
+                    className="w-full flex items-center justify-center gap-2 bg-[#E8F0FE] text-blue-700 font-semibold py-2.5 text-xs rounded-xl hover:bg-blue-100 transition-colors disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed"
                   >
-                    <Play size={16} fill="currentColor" /> Run (10 Credits)
+                    <Play size={14} fill="currentColor" /> Run (10 Credits)
                   </button>
                 </div>
               </div>
@@ -1411,6 +1487,31 @@ function ActorInputFields({
                 )}
               </span>
             </label>
+          )
+        }
+
+        if (Array.isArray(property.enum) && property.enum.length > 0) {
+          const enumNames = Array.isArray(property.enumNames) ? property.enumNames : []
+          return (
+            <div key={key}>
+              <label className="mb-1 block text-xs font-medium text-gray-700">
+                {label}{required.has(key) ? ' *' : ''}
+              </label>
+              <select
+                value={String(currentValue)}
+                onChange={(event) => onChange({ ...input, [key]: event.target.value })}
+                className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 font-medium text-gray-800"
+              >
+                {property.enum.map((optVal: string, idx: number) => (
+                  <option key={optVal} value={optVal}>
+                    {enumNames[idx] || optVal}
+                  </option>
+                ))}
+              </select>
+              {property.description && (
+                <p className="mt-1 text-xs text-gray-500">{property.description}</p>
+              )}
+            </div>
           )
         }
 
