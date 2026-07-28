@@ -138,6 +138,7 @@ function outputSchemaColumns(schemaJson: string | null) {
 function sanitizeDetailPatch(value: any) {
   const text = (input: unknown, limit = 5000) => String(input ?? '').slice(0, limit);
   const number = (input: unknown) => {
+    if (input === null || input === undefined || input === '') return null;
     const parsed = Number(input);
     return Number.isFinite(parsed) ? parsed : null;
   };
@@ -182,6 +183,12 @@ function sanitizeDetailPatch(value: any) {
     brand: text(value?.brand, 500),
     rating: number(value?.rating),
     ratingCount: number(value?.ratingCount),
+    reviewsCollected: number(value?.reviewsCollected),
+    reviews: objectArray(value?.reviews, 100),
+    reviewsStatus: ['COMPLETED', 'PARTIAL', 'FAILED', 'SKIPPED'].includes(value?.reviewsStatus)
+      ? value.reviewsStatus
+      : 'SKIPPED',
+    reviewsError: text(value?.reviewsError, 1000),
     stock: number(value?.stock),
     likedCount: number(value?.likedCount),
     shopName: text(value?.shopName, 1000),
@@ -590,9 +597,13 @@ app.get('/api/browser-agent/jobs/next', requireAuth, async (req: any, res: any) 
     );
     const keyword = String(input.keyword || 'máy in 3d').trim() || 'máy in 3d';
     const includeDetails = input.includeDetails !== false;
+    const maxReviewsValue = Number(input.maxReviewsPerProduct ?? 20);
+    const maxReviewsPerProduct = includeDetails && Number.isFinite(maxReviewsValue)
+      ? Math.min(100, Math.max(0, Math.floor(maxReviewsValue)))
+      : 0;
     await new Dataset(candidate.id).setMetadata({
       source: 'shopee.vn',
-      query: { keyword, maxItems, includeDetails },
+      query: { keyword, maxItems, includeDetails, maxReviewsPerProduct },
       detailProgress: {
         enabled: includeDetails,
         completed: 0,
@@ -604,7 +615,8 @@ app.get('/api/browser-agent/jobs/next', requireAuth, async (req: any, res: any) 
       runId: candidate.id,
       keyword,
       maxItems,
-      includeDetails
+      includeDetails,
+      maxReviewsPerProduct
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });

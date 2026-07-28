@@ -68,4 +68,93 @@
     }, { once: true });
     return originalOpen.call(this, method, url, ...rest);
   };
+
+  window.addEventListener('omnicrawl:request-reviews', async (event) => {
+    const itemId = String(event.detail?.itemId || '');
+    const shopId = String(event.detail?.shopId || '');
+    const requestedLimit = Number(event.detail?.limit || 0);
+    const maxReviews = Number.isFinite(requestedLimit)
+      ? Math.min(100, Math.max(0, Math.floor(requestedLimit)))
+      : 20;
+    if (!itemId || !shopId) {
+      emit({
+        kind: 'reviews',
+        status: 400,
+        payload: { ratings: [], error: 'Missing Shopee product identifiers' }
+      });
+      return;
+    }
+    if (maxReviews === 0) {
+      emit({ kind: 'reviews', status: 200, payload: { ratings: [], total: 0 } });
+      return;
+    }
+
+    const ratings = [];
+    const seen = new Set();
+    let offset = 0;
+    let total = null;
+    try {
+      while (ratings.length < maxReviews) {
+        const pageLimit = Math.min(20, maxReviews - ratings.length);
+        const params = new URLSearchParams({
+          exclude_filter: '1',
+          filter: '0',
+          filter_size: '0',
+          flag: '1',
+          itemid: itemId,
+          limit: String(pageLimit),
+          offset: String(offset),
+          shopid: shopId,
+          type: '0'
+        });
+        const url = `/api/v2/item/get_ratings?${params.toString()}`;
+        const response = await originalFetch.call(window, url, {
+          credentials: 'include',
+          headers: {
+            Accept: 'application/json',
+            'X-Api-Source': 'pc',
+            'X-Requested-With': 'XMLHttpRequest'
+          }
+        });
+        const payload = await response.json();
+        if (!response.ok || (payload?.error && payload.error !== 0)) {
+          throw new Error(payload?.error_msg || `Shopee ratings API returned ${response.status}`);
+        }
+        const pageRatings = payload?.data?.ratings || payload?.ratings || [];
+        total = Number(payload?.data?.item_rating_summary?.rating_total ?? total);
+        if (!Array.isArray(pageRatings) || pageRatings.length === 0) break;
+        for (const rating of pageRatings) {
+          const key = String(
+            rating?.cmtid ??
+            rating?.comment_id ??
+            `${rating?.userid || rating?.author_username || ''}:${rating?.ctime || ''}`
+          );
+          if (seen.has(key)) continue;
+          seen.add(key);
+          ratings.push(rating);
+          if (ratings.length >= maxReviews) break;
+        }
+        offset += pageRatings.length;
+        if (pageRatings.length < pageLimit || (total !== null && offset >= total)) break;
+        await new Promise((resolve) => {
+          setTimeout(resolve, 800 + Math.floor(Math.random() * 700));
+        });
+      }
+      emit({
+        kind: 'reviews',
+        status: 200,
+        payload: { ratings, total }
+      });
+    } catch (error) {
+      emit({
+        kind: 'reviews',
+        status: 502,
+        payload: {
+          ratings,
+          total,
+          error: error instanceof Error ? error.message : 'Unable to collect Shopee reviews'
+        }
+      });
+    }
+  });
 })();

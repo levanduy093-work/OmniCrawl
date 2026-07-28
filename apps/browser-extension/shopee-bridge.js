@@ -5,6 +5,18 @@ window.addEventListener('omnicrawl:shopee-response', (event) => {
   }).catch(() => undefined);
 });
 
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message.type !== 'REQUEST_SHOPEE_REVIEWS') return;
+  window.dispatchEvent(new CustomEvent('omnicrawl:request-reviews', {
+    detail: {
+      itemId: String(message.itemId || ''),
+      shopId: String(message.shopId || ''),
+      limit: Number(message.limit || 0)
+    }
+  }));
+  sendResponse({ ok: true });
+});
+
 function parseProductIds(url) {
   const productMatch = url.match(/\/product\/(\d+)\/(\d+)/);
   if (productMatch) return { shopId: productMatch[1], itemId: productMatch[2] };

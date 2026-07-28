@@ -11,8 +11,9 @@ The extension never reads or exports browser cookies. It captures structured
 Shopee search responses inside the signed-in browser. When
 `Thu thập chi tiết từng sản phẩm` is enabled, it then opens each collected
 product in the same tab, captures description, rating, stock, shop, images,
-attributes and variations, and updates the matching database row. A failure on
-one product is recorded and the remaining products continue.
+attributes, variations and review content, and updates the matching database
+row. Review pagination is limited by `Số đánh giá tối đa mỗi sản phẩm`. A
+failure on one product is recorded and the remaining products continue.
 
 After updating the source, click **Reload** on the extension page and then reload
 the OmniCrawl dashboard tab. The dashboard only enables Shopee jobs when the

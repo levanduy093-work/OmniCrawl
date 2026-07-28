@@ -4,7 +4,7 @@ let pollTimer = null;
 let pageTimer = null;
 
 const SEARCH_TIMEOUT_MS = 30000;
-const DETAIL_TIMEOUT_MS = 45000;
+const DETAIL_TIMEOUT_MS = 90000;
 
 const stateReady = chrome.storage.session.get(['config', 'activeJob']).then((stored) => {
   config = stored.config || null;
@@ -15,6 +15,11 @@ const stateReady = chrome.storage.session.get(['config', 'activeJob']).then((sto
     activeJob.detailIndex = Number(activeJob.detailIndex || 0);
     activeJob.detailCompleted = Number(activeJob.detailCompleted || 0);
     activeJob.detailFailed = Number(activeJob.detailFailed || 0);
+    const restoredMaxReviews = Number(activeJob.maxReviewsPerProduct ?? 20);
+    activeJob.maxReviewsPerProduct = Number.isFinite(restoredMaxReviews)
+      ? Math.min(100, Math.max(0, Math.floor(restoredMaxReviews)))
+      : 20;
+    activeJob.pendingDetailData = activeJob.pendingDetailData || null;
   }
 });
 
@@ -40,7 +45,17 @@ function armPageTimeout(timeoutMs) {
 async function handlePageTimeout() {
   if (!activeJob || !activeJob.pageDeadline || Date.now() < activeJob.pageDeadline) return;
   if (activeJob.phase === 'DETAIL' && activeJob.currentProduct) {
-    await failCurrentDetail('Không nhận được dữ liệu chi tiết từ Shopee sau 45 giây.');
+    if (activeJob.pendingDetailData) {
+      await completeCurrentDetail({
+        ...activeJob.pendingDetailData,
+        reviewsCollected: 0,
+        reviews: [],
+        reviewsStatus: 'FAILED',
+        reviewsError: 'Không nhận được dữ liệu đánh giá từ Shopee sau 90 giây.'
+      });
+      return;
+    }
+    await failCurrentDetail('Không nhận được dữ liệu chi tiết từ Shopee sau 90 giây.');
     return;
   }
   await finishJob(false, 'Không nhận được dữ liệu tìm kiếm từ Shopee sau 30 giây.');
@@ -295,6 +310,51 @@ function mapDetailPayload(payload, expectedProduct) {
   return usefulFields.length ? detail : null;
 }
 
+function mapReview(rating) {
+  const createdAtValue = Number(rating?.ctime ?? rating?.created_at);
+  const createdAt = Number.isFinite(createdAtValue) && createdAtValue > 0
+    ? new Date(createdAtValue * (createdAtValue < 10_000_000_000 ? 1000 : 1)).toISOString()
+    : '';
+  const images = Array.isArray(rating?.images)
+    ? rating.images.map(imageUrl).filter(Boolean)
+    : [];
+  const videos = Array.isArray(rating?.videos)
+    ? rating.videos
+      .map((video) => video?.url || video?.video_url || video)
+      .filter(Boolean)
+      .map(String)
+    : [];
+  const productItem = Array.isArray(rating?.product_items)
+    ? rating.product_items[0]
+    : rating?.product_item;
+  const rawShopReply = rating?.seller_reply || rating?.shop_reply || rating?.reply;
+  return {
+    reviewId: String(rating?.cmtid ?? rating?.comment_id ?? ''),
+    author: String(rating?.author_username || rating?.username || ''),
+    authorId: String(rating?.userid ?? rating?.user_id ?? ''),
+    rating: extractNumber(rating?.rating_star ?? rating?.rating),
+    comment: String(rating?.comment || rating?.content || ''),
+    createdAt,
+    variation: String(
+      productItem?.model_name ||
+      rating?.product_variation ||
+      rating?.model_name ||
+      ''
+    ),
+    likes: extractNumber(rating?.like_count ?? rating?.likes),
+    images,
+    videos,
+    shopReply: typeof rawShopReply === 'object'
+      ? String(rawShopReply?.comment || rawShopReply?.content || rawShopReply?.reply || '')
+      : String(rawShopReply || '')
+  };
+}
+
+function mapReviewsPayload(payload) {
+  const rawRatings = payload?.ratings ?? payload?.data?.ratings ?? [];
+  return Array.isArray(rawRatings) ? rawRatings.map(mapReview) : [];
+}
+
 async function storeItems(items) {
   if (!activeJob || activeJob.phase !== 'SEARCH') return 0;
   const seenSet = new Set(activeJob.seen);
@@ -405,6 +465,8 @@ async function beginDetailPhase() {
   activeJob.detailFailed = 0;
   activeJob.currentProduct = null;
   activeJob.detailHandledFor = null;
+  activeJob.pendingDetailData = null;
+  activeJob.reviewRequestedFor = null;
   await persistActiveJob();
   await logJob(`Starting product detail crawl for ${activeJob.products.length} products.`);
   await navigateNextDetail();
@@ -421,6 +483,8 @@ async function navigateNextDetail() {
   const product = activeJob.products[activeJob.detailIndex];
   activeJob.currentProduct = product;
   activeJob.detailHandledFor = null;
+  activeJob.pendingDetailData = null;
+  activeJob.reviewRequestedFor = null;
   activeJob.navigationScheduled = true;
   const runId = activeJob.runId;
   const productIndex = activeJob.detailIndex;
@@ -466,6 +530,8 @@ async function patchCurrentDetail(detail) {
   activeJob.detailFailed = projected.failed;
   activeJob.detailIndex += 1;
   activeJob.currentProduct = null;
+  activeJob.pendingDetailData = null;
+  activeJob.reviewRequestedFor = null;
   await persistActiveJob();
   await navigateNextDetail();
 }
@@ -491,6 +557,47 @@ async function failCurrentDetail(error) {
     detailStatus: 'FAILED',
     detailError: String(error || 'Không lấy được chi tiết sản phẩm.')
   });
+}
+
+async function requestReviewsForCurrent(detail) {
+  if (!activeJob?.currentProduct || activeJob.phase !== 'DETAIL') return;
+  const key = String(activeJob.currentProduct.itemId);
+  if (activeJob.reviewRequestedFor === key) return;
+  activeJob.pendingDetailData = detail;
+  activeJob.reviewRequestedFor = key;
+  await persistActiveJob();
+
+  const limit = Math.min(
+    100,
+    Math.max(0, Math.floor(Number(activeJob.maxReviewsPerProduct ?? 20)))
+  );
+  if (limit === 0) {
+    await completeCurrentDetail({
+      ...detail,
+      reviewsCollected: 0,
+      reviews: [],
+      reviewsStatus: 'SKIPPED',
+      reviewsError: ''
+    });
+    return;
+  }
+
+  try {
+    await chrome.tabs.sendMessage(activeJob.tabId, {
+      type: 'REQUEST_SHOPEE_REVIEWS',
+      itemId: activeJob.currentProduct.itemId,
+      shopId: activeJob.currentProduct.shopId,
+      limit
+    });
+  } catch (error) {
+    await completeCurrentDetail({
+      ...detail,
+      reviewsCollected: 0,
+      reviews: [],
+      reviewsStatus: 'FAILED',
+      reviewsError: error?.message || 'Không thể yêu cầu dữ liệu đánh giá từ tab Shopee.'
+    });
+  }
 }
 
 async function processSearchResponse(detail, sender) {
@@ -594,7 +701,33 @@ async function processDetailResponse(detail, sender) {
     mapped.itemId &&
     String(mapped.itemId) !== String(activeJob.currentProduct?.itemId || '')
   ) return;
-  await completeCurrentDetail(mapped);
+  await requestReviewsForCurrent(mapped);
+}
+
+async function processReviewsResponse(detail, sender) {
+  if (
+    !activeJob ||
+    activeJob.phase !== 'DETAIL' ||
+    sender.tab?.id !== activeJob.tabId ||
+    detail?.kind !== 'reviews' ||
+    !activeJob.pendingDetailData
+  ) return;
+  const reviews = mapReviewsPayload(detail?.payload);
+  const error = String(detail?.payload?.error || '');
+  const reviewsStatus = error
+    ? (reviews.length ? 'PARTIAL' : 'FAILED')
+    : 'COMPLETED';
+  await logJob(
+    `Captured ${reviews.length} reviews for product ` +
+    `${activeJob.detailIndex + 1}/${activeJob.products.length}.`
+  );
+  await completeCurrentDetail({
+    ...activeJob.pendingDetailData,
+    reviewsCollected: reviews.length,
+    reviews,
+    reviewsStatus,
+    reviewsError: error
+  });
 }
 
 async function processDomItems(items, sender) {
@@ -623,7 +756,7 @@ async function processDomDetail(detail, sender) {
   ) return;
   const currentId = String(activeJob.currentProduct?.itemId || '');
   if (detail.itemId && String(detail.itemId) !== currentId) return;
-  await completeCurrentDetail({
+  await requestReviewsForCurrent({
     ...detail,
     itemId: currentId,
     detailStatus: 'COMPLETED'
@@ -647,6 +780,8 @@ async function poll() {
       detailFailed: 0,
       currentProduct: null,
       detailHandledFor: null,
+      pendingDetailData: null,
+      reviewRequestedFor: null,
       tabId: null,
       unexpectedResponses: 0,
       navigationScheduled: false,
@@ -691,7 +826,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } else if (message.type === 'SHOPEE_RESPONSE') {
       const handler = message.detail?.kind === 'detail'
         ? processDetailResponse
-        : processSearchResponse;
+        : message.detail?.kind === 'reviews'
+          ? processReviewsResponse
+          : processSearchResponse;
       void handler(message.detail, sender).catch((error) => {
         void finishJob(
           false,

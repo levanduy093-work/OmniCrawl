@@ -23,7 +23,7 @@ import Login from './Login'
 import OmniCrawlLogo from './Logo'
 import './App.css'
 
-const REQUIRED_BROWSER_AGENT_VERSION = '0.4.0'
+const REQUIRED_BROWSER_AGENT_VERSION = '0.4.1'
 
 type JsonSchemaProperty = {
   type?: 'string' | 'integer' | 'number' | 'boolean'
@@ -1032,6 +1032,35 @@ function RunDetailModal({
   const renderValue = (value: unknown, column: string) => {
     if (value === null || value === undefined || value === '') {
       return <span className="text-gray-300">—</span>
+    }
+    if (column === 'reviews' && Array.isArray(value)) {
+      if (!value.length) return <span className="text-gray-400">Chưa có đánh giá</span>
+      return (
+        <details className="w-80">
+          <summary className="cursor-pointer text-blue-600 font-medium">
+            Xem {value.length} đánh giá
+          </summary>
+          <div className="mt-2 space-y-2 max-h-72 overflow-auto pr-2">
+            {value.map((review: any, index: number) => (
+              <div key={review.reviewId || index} className="rounded-xl border border-gray-100 bg-gray-50 p-3">
+                <div className="flex items-center justify-between gap-2 text-xs">
+                  <span className="font-medium text-gray-700">{review.author || 'Người mua Shopee'}</span>
+                  <span className="text-amber-600">{review.rating ? `${review.rating} ★` : 'Chưa chấm sao'}</span>
+                </div>
+                {review.variation && <div className="mt-1 text-xs text-gray-400">{review.variation}</div>}
+                <div className="mt-1 text-sm text-gray-700 whitespace-pre-wrap">
+                  {review.comment || 'Người mua không để lại nội dung.'}
+                </div>
+                {review.createdAt && (
+                  <div className="mt-1 text-[11px] text-gray-400">
+                    {new Date(review.createdAt).toLocaleString('vi-VN')}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </details>
+      )
     }
     const text = typeof value === 'object' ? JSON.stringify(value) : String(value)
     if (/^https?:\/\//.test(text)) {

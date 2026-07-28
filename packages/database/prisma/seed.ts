@@ -59,6 +59,14 @@ async function main() {
         description: 'Mở lần lượt từng sản phẩm để lấy mô tả, đánh giá, tồn kho và phân loại.',
         default: true
       },
+      maxReviewsPerProduct: {
+        type: 'integer',
+        title: 'Số đánh giá tối đa mỗi sản phẩm',
+        description: 'Đặt bằng 0 nếu không cần lưu nội dung đánh giá.',
+        minimum: 0,
+        maximum: 100,
+        default: 20
+      },
       allowEmpty: {
         type: 'boolean',
         title: 'Cho phép kết quả rỗng',
@@ -82,6 +90,10 @@ async function main() {
       brand: { type: 'string', title: 'Thương hiệu' },
       rating: { type: 'number', title: 'Điểm đánh giá' },
       ratingCount: { type: 'number', title: 'Lượt đánh giá' },
+      reviewsCollected: { type: 'number', title: 'Số đánh giá đã thu thập' },
+      reviews: { type: 'array', title: 'Nội dung đánh giá' },
+      reviewsStatus: { type: 'string', title: 'Trạng thái lấy đánh giá' },
+      reviewsError: { type: 'string', title: 'Lỗi khi lấy đánh giá' },
       stock: { type: 'number', title: 'Tồn kho' },
       likedCount: { type: 'number', title: 'Lượt thích' },
       shopName: { type: 'string', title: 'Tên cửa hàng' },
