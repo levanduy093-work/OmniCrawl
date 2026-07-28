@@ -1,0 +1,18 @@
+{
+  "name": "@omnicrawl/worker",
+  "version": "0.0.1",
+  "scripts": {
+    "build": "tsc",
+    "dev": "ts-node src/index.ts",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@omnicrawl/queue": "workspace:*",
+    "@omnicrawl/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "ts-node": "^10.9.2",
+    "@types/node": "^20.0.0"
+  }
+}

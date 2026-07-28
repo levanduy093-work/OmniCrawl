@@ -1,0 +1,19 @@
+{
+  "name": "omnicrawl",
+  "version": "0.0.1",
+  "description": "An open-source, self-hosted crawling platform by Synapse.",
+  "private": true,
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm -r dev",
+    "lint": "pnpm -r lint",
+    "test": "pnpm -r test"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  }
+}

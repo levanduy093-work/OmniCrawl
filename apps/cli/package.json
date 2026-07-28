@@ -1,0 +1,19 @@
+{
+  "name": "@omnicrawl/cli",
+  "version": "0.0.1",
+  "bin": {
+    "omnicrawl": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "commander": "^12.0.0",
+    "@omnicrawl/database": "workspace:*",
+    "@omnicrawl/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.0.0"
+  }
+}

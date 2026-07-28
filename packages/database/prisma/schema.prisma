@@ -1,0 +1,69 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  role      String   @default("USER") // USER or ADMIN
+  credits   Int      @default(1000)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  actors    Actor[]
+  runs      Run[]
+}
+
+model Actor {
+  id          String     @id @default(cuid())
+  name        String     @unique
+  description String?
+  version     String     @default("1.0.0")
+  inputSchema String?    // JSON schema cho input
+  userId      String?    // Bổ sung userId (Optional for backward compatibility during dev)
+  user        User?      @relation(fields: [userId], references: [id])
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  runs        Run[]
+  schedules   Schedule[]
+  webhooks    Webhook[]
+}
+
+model Run {
+  id          String    @id @default(cuid())
+  actorId     String
+  userId      String?
+  actor       Actor     @relation(fields: [actorId], references: [id])
+  user        User?     @relation(fields: [userId], references: [id])
+  status      String    @default("PENDING") // PENDING, RUNNING, SUCCESS, FAILED
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+model Schedule {
+  id          String   @id @default(cuid())
+  actorId     String
+  cron        String
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  actor       Actor    @relation(fields: [actorId], references: [id])
+}
+
+model Webhook {
+  id          String   @id @default(cuid())
+  actorId     String
+  url         String
+  events      String   @default("RUN_SUCCESS,RUN_FAILED") // Comma separated events
+  createdAt   DateTime @default(now())
+  
+  actor       Actor    @relation(fields: [actorId], references: [id])
+}

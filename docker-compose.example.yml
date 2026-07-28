@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: omnicrawl_db
+    environment:
+      # Change these credentials in your local docker-compose.yml and .env file
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: your_secure_password_here
+      POSTGRES_DB: omnicrawl
+    ports:
+      - "5432:5432"
+    volumes:
+      - omnicrawl_pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  omnicrawl_pgdata:
