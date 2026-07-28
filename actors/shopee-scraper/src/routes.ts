@@ -1,6 +1,6 @@
-import { createPlaywrightRouter, Dataset } from 'crawlee';
+import { createPlaywrightRouter, Dataset, NonRetryableError } from 'crawlee';
 import { sharedState } from './sharedState.js';
-import { fetchGuestCookies } from './cookieManager.js';
+import { mapApiItem } from './productMapper.js';
 
 export const router = createPlaywrightRouter();
 
@@ -9,23 +9,36 @@ router.addDefaultHandler(async ({ request, page, log, crawler }) => {
 
   log.info(`Processing page ${pageNum} for keyword: ${keyword}. Extracted so far: ${totalExtracted}/${maxItems}`);
 
-  // Check for login block
-  const isBlocked = await page.evaluate(() => {
-    return !!document.querySelector('.shopee-login-required-modal, .shopee-captcha');
+  await page.waitForTimeout(1000);
+
+  const blockReason = await page.evaluate(() => {
+    const bodyText = document.body?.innerText || '';
+    if (
+      document.querySelector('.shopee-login-required-modal, .shopee-captcha') ||
+      /Login Required|Cần đăng nhập/i.test(bodyText)
+    ) {
+      return 'LOGIN_REQUIRED';
+    }
+    if (/captcha|xác minh/i.test(bodyText)) return 'CAPTCHA';
+    return '';
   });
 
-  if (isBlocked) {
-    log.warning(`[ShopeeScraper] Blocked on page ${pageNum}! Attempting to fetch new Guest Cookie and retrying...`);
-    // Fetch new cookies and update global state
-    sharedState.activeCookies = await fetchGuestCookies();
-    // Throw error so Crawlee retries this request automatically
-    throw new Error('Shopee Blocked - Forcing Retry with new Cookie');
+  if (blockReason === 'LOGIN_REQUIRED') {
+    throw new NonRetryableError(
+      'Shopee session is not authenticated or has expired. Provide a fresh full Cookie header.'
+    );
+  }
+  if (blockReason === 'CAPTCHA') {
+    throw new NonRetryableError(
+      'Shopee requested CAPTCHA verification for this session. Refresh the authorized session before retrying.'
+    );
   }
 
-  // Wait for product wrappers to load
-  await page.waitForSelector('li.shopee-search-item-result__item, div[data-sqe="item"]', { timeout: 15000 }).catch(() => {
-    log.warning("Product selector not found quickly. Maybe captcha or no results.");
-  });
+  if (sharedState.apiItems.length === 0) {
+    await page.waitForSelector('li.shopee-search-item-result__item, div[data-sqe="item"]', { timeout: 15000 }).catch(() => {
+      log.warning('No product API response or product cards were found.');
+    });
+  }
 
   // Auto-scroll logic to trigger lazy loading
   await page.evaluate(async () => {
@@ -46,7 +59,7 @@ router.addDefaultHandler(async ({ request, page, log, crawler }) => {
   });
 
   // Extract products
-  const rawItems = await page.evaluate(() => {
+  const domItems = await page.evaluate(() => {
     const results: any[] = [];
     const productCards = document.querySelectorAll('li.shopee-search-item-result__item, div[data-sqe="item"]');
     
@@ -67,14 +80,23 @@ router.addDefaultHandler(async ({ request, page, log, crawler }) => {
     });
     return results;
   });
+  const apiItems = sharedState.apiItems
+    .map(mapApiItem)
+    .filter((item) => item.title && item.price);
+  const rawItems = apiItems.length > 0 ? apiItems : domItems;
+
+  log.info(
+    apiItems.length > 0
+      ? `Using ${apiItems.length} products captured from Shopee search API.`
+      : `Using ${domItems.length} products extracted from the DOM.`
+  );
 
   // Deduplication
   const newUniqueItems = [];
   for (const item of rawItems) {
-    // Generate a unique key for the item (url is best, but sometimes it has tracking params, so title is also good)
-    // We'll use title as the unique key to prevent sponsored duplicates
-    if (!sharedState.seenUrls.has(item.title)) {
-      sharedState.seenUrls.add(item.title);
+    const uniqueKey = String(item.itemId || item.url || item.title);
+    if (!sharedState.seenUrls.has(uniqueKey)) {
+      sharedState.seenUrls.add(uniqueKey);
       newUniqueItems.push(item);
     }
   }

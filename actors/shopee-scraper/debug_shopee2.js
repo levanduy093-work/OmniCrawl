@@ -10,9 +10,8 @@ const { chromium } = require('playwright');
   await page.waitForTimeout(5000);
   
   const html = await page.content();
-  console.log('HTML contains shopee-login-required-modal:', html.includes('shopee-login-required-modal'));
-  console.log('HTML contains Cần đăng nhập:', html.includes('Cần đăng nhập'));
-  console.log('HTML contains Login Required:', html.includes('Login Required'));
+  const match = html.match(/.{0,50}Login Required.{0,50}/i);
+  console.log(match ? match[0] : 'Not found');
   
   await browser.close();
 })();

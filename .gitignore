@@ -7,3 +7,4 @@ docker-compose.yml
 dev.db
 dev.db-journal
 *.log
+storage/browser_profiles/

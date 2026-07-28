@@ -1,0 +1,9 @@
+{
+	"id": "B8U7YZGjKObJy1W",
+	"json": "{\"id\":\"B8U7YZGjKObJy1W\",\"url\":\"https://shopee.vn/search?keyword=m%C3%A1y%20in%203d\",\"loadedUrl\":\"https://shopee.vn/search?keyword=m%C3%A1y%20in%203d\",\"uniqueKey\":\"https://shopee.vn/search?keyword=m%C3%A1y+in+3d\",\"method\":\"GET\",\"noRetry\":false,\"retryCount\":0,\"errorMessages\":[],\"headers\":{},\"userData\":{\"keyword\":\"máy in 3d\",\"maxItems\":50,\"totalExtracted\":0,\"page\":0,\"__crawlee\":{\"state\":4}},\"handledAt\":\"2026-07-28T13:01:03.716Z\"}",
+	"method": "GET",
+	"orderNo": null,
+	"retryCount": 0,
+	"uniqueKey": "https://shopee.vn/search?keyword=m%C3%A1y+in+3d",
+	"url": "https://shopee.vn/search?keyword=m%C3%A1y%20in%203d"
+}

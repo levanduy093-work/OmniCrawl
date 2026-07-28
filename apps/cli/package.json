@@ -10,7 +10,8 @@
   "dependencies": {
     "commander": "^12.0.0",
     "@omnicrawl/database": "workspace:*",
-    "@omnicrawl/sdk": "workspace:*"
+    "@omnicrawl/sdk": "workspace:*",
+    "dotenv": "^17.4.2"
   },
   "devDependencies": {
     "typescript": "^5.4.0",

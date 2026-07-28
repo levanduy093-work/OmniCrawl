@@ -1,6 +1,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
+function getStorageRoot() {
+  return process.env.OMNICRAWL_STORAGE_DIR || path.join(process.cwd(), 'storage');
+}
+
 export class Logger {
   info(message: string, ...meta: any[]) {
     console.log(`[INFO] ${message}`, ...meta);
@@ -19,7 +23,7 @@ export class Dataset {
 
   constructor(runId: string) {
     this.runId = runId;
-    this.datasetPath = path.join(process.cwd(), 'storage', 'datasets', runId);
+    this.datasetPath = path.join(getStorageRoot(), 'datasets', runId);
     if (!fs.existsSync(this.datasetPath)) {
       fs.mkdirSync(this.datasetPath, { recursive: true });
     }
@@ -40,7 +44,7 @@ export class KeyValueStore {
 
   constructor(storeId: string) {
     this.storeId = storeId;
-    this.storePath = path.join(process.cwd(), 'storage', 'kv', storeId);
+    this.storePath = path.join(getStorageRoot(), 'key_value_stores', storeId);
     if (!fs.existsSync(this.storePath)) {
       fs.mkdirSync(this.storePath, { recursive: true });
     }
@@ -77,13 +81,15 @@ export class ActorContext<TInput extends ActorInput = any> {
   public kv: KeyValueStore;
   public proxy: ProxyManager;
   public runId: string;
+  public userId?: string;
 
-  constructor(runId: string, input: TInput) {
+  constructor(runId: string, input: TInput, userId?: string) {
     this.runId = runId;
+    this.userId = userId;
     this.input = input;
     this.log = new Logger();
     this.dataset = new Dataset(runId);
-    this.kv = new KeyValueStore('default');
+    this.kv = new KeyValueStore(runId);
     this.proxy = new ProxyManager();
   }
 }

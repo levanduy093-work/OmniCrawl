@@ -1,0 +1,292 @@
+{
+  "usableSessionsCount": 2,
+  "retiredSessionsCount": 0,
+  "sessions": [
+    {
+      "id": "session_WrU6asCadZ",
+      "cookieJar": {
+        "version": "tough-cookie@6.0.2",
+        "storeType": "MemoryCookieStore",
+        "rejectPublicSuffixes": true,
+        "enableLooseMode": false,
+        "allowSpecialUseDomain": true,
+        "prefixSecurity": "silent",
+        "cookies": []
+      },
+      "userData": {},
+      "maxErrorScore": 3,
+      "errorScoreDecrement": 0.5,
+      "expiresAt": "2026-07-28T14:19:16.209Z",
+      "createdAt": "2026-07-28T13:29:16.209Z",
+      "usageCount": 0,
+      "maxUsageCount": 50,
+      "errorScore": 0
+    },
+    {
+      "id": "session_3QaTDmVah8",
+      "cookieJar": {
+        "version": "tough-cookie@6.0.2",
+        "storeType": "MemoryCookieStore",
+        "rejectPublicSuffixes": true,
+        "enableLooseMode": false,
+        "allowSpecialUseDomain": true,
+        "prefixSecurity": "silent",
+        "cookies": [
+          {
+            "key": "_gcl_au",
+            "value": "1.1.137550605.1785245348",
+            "expires": "2026-10-26T13:29:08.000Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "hostOnly": false,
+            "creation": "2026-07-28T13:29:20.966Z",
+            "lastAccessed": "2026-07-28T13:29:20.966Z"
+          },
+          {
+            "key": "_sapid",
+            "value": "01803058a52e583204ddfc5aa44a93bf58b072daa8192b4b16797494",
+            "expires": "2026-07-28T14:19:20.963Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "hostOnly": true,
+            "creation": "2026-07-28T13:29:20.966Z",
+            "lastAccessed": "2026-07-28T13:29:20.966Z"
+          },
+          {
+            "key": "language",
+            "value": "en",
+            "expires": "2027-09-01T13:29:08.053Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "hostOnly": false,
+            "creation": "2026-07-28T13:29:20.966Z",
+            "lastAccessed": "2026-07-28T13:29:20.966Z"
+          },
+          {
+            "key": "csrftoken",
+            "value": "5sjI6W0LkDaFXdkpTRjbx5HgG7njlj6Z",
+            "expires": "2026-07-28T14:19:20.963Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "hostOnly": false,
+            "creation": "2026-07-28T13:29:20.966Z",
+            "lastAccessed": "2026-07-28T13:29:20.966Z"
+          },
+          {
+            "key": "ssr-tz",
+            "value": "Asia/Saigon",
+            "expires": "2027-09-01T13:29:08.132Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "hostOnly": true,
+            "creation": "2026-07-28T13:29:20.966Z",
+            "lastAccessed": "2026-07-28T13:29:20.966Z"
+          },
+          {
+            "key": "SPC_R_T_ID",
+            "value": "YP0cMBJzdtPMUw723oLjm66dw6LeBDqabnL8v+9H6Z6PeoCB5r3Csgl7l/AFwr5nq7y24T09jTxpPqzbRnOzbBzJytSKAiSowl953XKoCswFn9fAkLcGM3Rrsl4azpchHzlZrVnk6QgxwCpxzIIvnnuR0Sj8tcWzg7n/wV5/J/I=",
+            "expires": "2027-09-01T13:29:20.100Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "secure": true,
+            "hostOnly": false,
+            "creation": "2026-07-28T13:29:20.966Z",
+            "lastAccessed": "2026-07-28T13:29:20.966Z"
+          },
+          {
+            "key": "SPC_R_T_IV",
+            "value": "YmFoTlF0YnRCWHdnTGYwTg==",
+            "expires": "2027-09-01T13:29:20.100Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "secure": true,
+            "hostOnly": false,
+            "creation": "2026-07-28T13:29:20.966Z",
+            "lastAccessed": "2026-07-28T13:29:20.966Z"
+          },
+          {
+            "key": "SPC_T_ID",
+            "value": "YP0cMBJzdtPMUw723oLjm66dw6LeBDqabnL8v+9H6Z6PeoCB5r3Csgl7l/AFwr5nq7y24T09jTxpPqzbRnOzbBzJytSKAiSowl953XKoCswFn9fAkLcGM3Rrsl4azpchHzlZrVnk6QgxwCpxzIIvnnuR0Sj8tcWzg7n/wV5/J/I=",
+            "expires": "2027-09-01T13:29:20.100Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "secure": true,
+            "httpOnly": true,
+            "hostOnly": false,
+            "creation": "2026-07-28T13:29:20.966Z",
+            "lastAccessed": "2026-07-28T13:29:20.966Z"
+          },
+          {
+            "key": "SPC_T_IV",
+            "value": "YmFoTlF0YnRCWHdnTGYwTg==",
+            "expires": "2027-09-01T13:29:20.100Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "secure": true,
+            "httpOnly": true,
+            "hostOnly": false,
+            "creation": "2026-07-28T13:29:20.967Z",
+            "lastAccessed": "2026-07-28T13:29:20.967Z"
+          },
+          {
+            "key": "SPC_F",
+            "value": "2RR52VOFy1aRN2drNFVnnk2aaamwV16r",
+            "expires": "2027-09-01T13:29:09.156Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "secure": true,
+            "hostOnly": false,
+            "creation": "2026-07-28T13:29:20.967Z",
+            "lastAccessed": "2026-07-28T13:29:20.967Z"
+          },
+          {
+            "key": "REC_T_ID",
+            "value": "5042e318-8a88-11f1-bf22-82bb83c58d2b",
+            "expires": "2027-09-01T13:29:09.156Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "secure": true,
+            "httpOnly": true,
+            "hostOnly": false,
+            "creation": "2026-07-28T13:29:20.967Z",
+            "lastAccessed": "2026-07-28T13:29:20.967Z"
+          },
+          {
+            "key": "SPC_SI",
+            "value": "yXYnagAAAABGNVAxanZyYS2yiwMAAAAAbUlqeDRPMXE=",
+            "expires": "2026-07-29T13:29:20.135Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "secure": true,
+            "httpOnly": true,
+            "hostOnly": false,
+            "creation": "2026-07-28T13:29:20.967Z",
+            "lastAccessed": "2026-07-28T13:29:20.967Z"
+          },
+          {
+            "key": "SPC_SEC_SI",
+            "value": "v1-VEUwT25hVHlqMzdXMDdSUrc8XMeLmx5nOmPqPJAwUMSG1MHQhWbteUqLfqtY4A/CEExsnuNw2bqPvVOZVl7ozgi3AWLWC29sTmzxKIIbvsc=",
+            "expires": "2026-07-29T13:34:09.190Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "secure": true,
+            "httpOnly": true,
+            "hostOnly": true,
+            "creation": "2026-07-28T13:29:20.967Z",
+            "lastAccessed": "2026-07-28T13:29:20.967Z"
+          },
+          {
+            "key": "_QPWSDCXHZQA",
+            "value": "a6355e18-ef67-4ae2-af96-cf4b6706503e",
+            "expires": "2027-07-28T13:29:09.000Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "hostOnly": true,
+            "creation": "2026-07-28T13:29:20.967Z",
+            "lastAccessed": "2026-07-28T13:29:20.967Z"
+          },
+          {
+            "key": "REC7iLP4Q",
+            "value": "5ab7d8c1-d203-4ef6-9a35-b41625a52857",
+            "expires": "2027-07-28T13:29:19.000Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "hostOnly": true,
+            "creation": "2026-07-28T13:29:20.967Z",
+            "lastAccessed": "2026-07-28T13:29:20.967Z"
+          },
+          {
+            "key": "_fbp",
+            "value": "fb.1.1785245349961.864536660566486363",
+            "expires": "2026-10-26T13:29:20.000Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "hostOnly": false,
+            "creation": "2026-07-28T13:29:20.967Z",
+            "lastAccessed": "2026-07-28T13:29:20.967Z"
+          },
+          {
+            "key": "_ga",
+            "value": "GA1.1.1228210420.1785245350",
+            "expires": "2027-09-01T13:29:20.798Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "hostOnly": false,
+            "creation": "2026-07-28T13:29:20.967Z",
+            "lastAccessed": "2026-07-28T13:29:20.967Z"
+          },
+          {
+            "key": "shopee_webUnique_ccd",
+            "value": "uzeLWccmPBX75KFGY9QhSw%3D%3D%7CkjJBqtcX4ln4HYI5KdH0MUMyqFFxmDamHC%2Fd3D6AuKpiCx2IZD68EZilAdgvHrJvIaNkUEw2S3a99ChEvgFn%7CgdlDv9yOUvTDUJjv%7C08%7C3",
+            "expires": "2027-07-28T13:29:10.000Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "hostOnly": true,
+            "creation": "2026-07-28T13:29:20.967Z",
+            "lastAccessed": "2026-07-28T13:29:20.967Z"
+          },
+          {
+            "key": "ds",
+            "value": "cf262c5bb860d7a8b2c1058533aa6992",
+            "expires": "2027-07-28T13:29:10.000Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "hostOnly": true,
+            "creation": "2026-07-28T13:29:20.967Z",
+            "lastAccessed": "2026-07-28T13:29:20.967Z"
+          },
+          {
+            "key": "_hjSessionUser_868286",
+            "value": "eyJpZCI6ImNiYWRkZDRmLTEzZDYtNTg4MC1hYzY4LWM4NTIxMjM5MmJkYSIsImNyZWF0ZWQiOjE3ODUyNDUzNTA3NTMsImV4aXN0aW5nIjpmYWxzZX0=",
+            "expires": "2027-07-28T13:29:10.000Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "secure": true,
+            "hostOnly": false,
+            "creation": "2026-07-28T13:29:20.967Z",
+            "lastAccessed": "2026-07-28T13:29:20.967Z"
+          },
+          {
+            "key": "_hjSession_868286",
+            "value": "eyJpZCI6IjE2ZDc5MjM5LTkyMjYtNDIyMC04MWVlLWM0YTBmOGRiYWYxZSIsImMiOjE3ODUyNDUzNTA3NTQsInMiOjAsInIiOjAsInNiIjowLCJzciI6MCwic2UiOjAsImZzIjoxLCJzcCI6MH0=",
+            "expires": "2026-07-28T13:59:10.000Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "secure": true,
+            "hostOnly": false,
+            "creation": "2026-07-28T13:29:20.967Z",
+            "lastAccessed": "2026-07-28T13:29:20.967Z"
+          },
+          {
+            "key": "sense_sa_r",
+            "value": "s",
+            "expires": "2026-07-28T14:19:20.963Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "hostOnly": false,
+            "creation": "2026-07-28T13:29:20.967Z",
+            "lastAccessed": "2026-07-28T13:29:20.967Z"
+          },
+          {
+            "key": "_ga_4GPP1ZXG63",
+            "value": "GS2.1.s1785245350$o1$g1$t1785245360$j50$l0$h50658298",
+            "expires": "2027-09-01T13:29:20.808Z",
+            "domain": "shopee.vn",
+            "path": "/",
+            "hostOnly": false,
+            "creation": "2026-07-28T13:29:20.967Z",
+            "lastAccessed": "2026-07-28T13:29:20.967Z"
+          }
+        ]
+      },
+      "userData": {},
+      "maxErrorScore": 3,
+      "errorScoreDecrement": 0.5,
+      "expiresAt": "2026-07-28T14:19:16.211Z",
+      "createdAt": "2026-07-28T13:29:16.211Z",
+      "usageCount": 1,
+      "maxUsageCount": 50,
+      "errorScore": 0
+    }
+  ]
+}

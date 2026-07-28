@@ -5,6 +5,9 @@ import { prisma } from '@omnicrawl/database';
 import { ActorContext } from '@omnicrawl/sdk';
 import * as path from 'path';
 import * as fs from 'fs';
+import dotenv from 'dotenv';
+
+dotenv.config({ path: path.resolve(__dirname, '..', '..', '..', '.env'), quiet: true });
 
 const program = new Command();
 

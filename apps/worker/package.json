@@ -7,8 +7,10 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
+    "@omnicrawl/database": "workspace:*",
     "@omnicrawl/queue": "workspace:*",
-    "@omnicrawl/sdk": "workspace:*"
+    "@omnicrawl/sdk": "workspace:*",
+    "dotenv": "^17.4.2"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

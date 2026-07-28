@@ -6,13 +6,18 @@
   "scripts": {
     "build": "tsc",
     "db:push": "prisma db push",
-    "db:generate": "prisma generate"
+    "db:generate": "prisma generate",
+    "db:seed": "ts-node prisma/seed.ts"
   },
   "dependencies": {
-    "@prisma/client": "^5.10.2"
+    "@prisma/client": "^5.10.2",
+    "bcryptjs": "^3.0.3",
+    "dotenv": "^17.4.2"
   },
   "devDependencies": {
+    "@types/node": "^20.0.0",
     "prisma": "^5.10.2",
+    "ts-node": "^10.9.2",
     "typescript": "^5.4.0"
   }
 }

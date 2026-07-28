@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { Play, Activity, Clock, Settings, Search, Bot, Package, Download, LogOut, Wallet, Menu } from 'lucide-react'
 import Login from './Login'
 import OmniCrawlLogo from './Logo'
@@ -23,31 +23,21 @@ function App() {
   const [newScheduleCron, setNewScheduleCron] = useState('* * * * *')
   const [isSidebarOpen, setIsSidebarOpen] = useState(true)
   const [runInputs, setRunInputs] = useState<Record<string, any>>({})
+  const [shopeeSession, setShopeeSession] = useState<any>({ status: 'DISCONNECTED' })
+  const [shopeeActionPending, setShopeeActionPending] = useState(false)
   
   // Log Viewer State
   const [logModalOpen, setLogModalOpen] = useState(false)
   const [activeLogRunId, setActiveLogRunId] = useState<string | null>(null)
   const [logs, setLogs] = useState<string>('')
 
-  useEffect(() => {
-    if (token) {
-      fetchData()
-      fetchUser()
-    }
-  }, [token])
+  const handleLogout = useCallback(() => {
+    localStorage.removeItem('token')
+    setToken(null)
+    setUser(null)
+  }, [])
 
-  // Poll data in background every 5 seconds to update statuses
-  useEffect(() => {
-    let interval: any;
-    if (token) {
-      interval = setInterval(() => {
-        fetchData();
-      }, 5000);
-    }
-    return () => clearInterval(interval);
-  }, [token]);
-
-  const fetchUser = async () => {
+  const fetchUser = useCallback(async () => {
     try {
       const res = await fetch('http://localhost:3001/api/auth/me', {
         headers: { 'Authorization': `Bearer ${token}` }
@@ -57,15 +47,16 @@ function App() {
     } catch {
       handleLogout()
     }
-  }
+  }, [handleLogout, token])
 
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     try {
       const headers = { 'Authorization': `Bearer ${token}` }
-      const [actorsRes, runsRes, schedulesRes] = await Promise.all([
+      const [actorsRes, runsRes, schedulesRes, shopeeSessionRes] = await Promise.all([
         fetch('http://localhost:3001/api/actors', { headers }),
         fetch('http://localhost:3001/api/runs', { headers }),
-        fetch('http://localhost:3001/api/schedules', { headers })
+        fetch('http://localhost:3001/api/schedules', { headers }),
+        fetch('http://localhost:3001/api/integrations/shopee/session', { headers })
       ])
       if (actorsRes.status === 401 || runsRes.status === 401) {
         handleLogout()
@@ -74,10 +65,29 @@ function App() {
       setActors(await actorsRes.json())
       setRuns(await runsRes.json())
       if (schedulesRes.ok) setSchedules(await schedulesRes.json())
+      if (shopeeSessionRes.ok) setShopeeSession(await shopeeSessionRes.json())
     } catch (err) {
       console.error('Failed to fetch data', err)
     }
-  }
+  }, [handleLogout, token])
+
+  useEffect(() => {
+    if (token) {
+      fetchData()
+      fetchUser()
+    }
+  }, [fetchData, fetchUser, token])
+
+  // Poll data in background every 5 seconds to update statuses
+  useEffect(() => {
+    let interval: ReturnType<typeof setInterval> | undefined;
+    if (token) {
+      interval = setInterval(fetchData, 5000);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [fetchData, token]);
 
   const triggerRun = async (id: string) => {
     try {
@@ -93,6 +103,46 @@ function App() {
       fetchUser()
     } catch(err: any) {
       alert(`Failed to trigger run: ${err.message}`)
+    }
+  }
+
+  const connectShopee = async () => {
+    setShopeeActionPending(true)
+    try {
+      const res = await fetch('http://localhost:3001/api/integrations/shopee/connect', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      setShopeeSession((current: any) => ({ ...current, status: data.status }))
+      alert('Edge đã được mở. Hãy đăng nhập Shopee và hoàn tất CAPTCHA nếu có.')
+      fetchData()
+    } catch (err: any) {
+      alert(`Không thể mở Shopee: ${err.message}`)
+    } finally {
+      setShopeeActionPending(false)
+    }
+  }
+
+  const disconnectShopee = async () => {
+    const confirmation = shopeeSession.status === 'CONNECTING'
+      ? 'Hủy quá trình chờ đăng nhập Shopee?'
+      : 'Ngắt kết nối và xóa phiên Shopee đã lưu?'
+    if (!confirm(confirmation)) return
+    setShopeeActionPending(true)
+    try {
+      const res = await fetch('http://localhost:3001/api/integrations/shopee/session', {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error)
+      setShopeeSession({ status: 'DISCONNECTED' })
+    } catch (err: any) {
+      alert(`Không thể ngắt kết nối: ${err.message}`)
+    } finally {
+      setShopeeActionPending(false)
     }
   }
 
@@ -190,43 +240,39 @@ function App() {
     }
   }
 
-  const openLogViewer = (id: string) => {
-    setActiveLogRunId(id);
-    setLogModalOpen(true);
-    fetchLogs(id);
-  }
-
-  const fetchLogs = async (id: string) => {
+  const fetchLogs = useCallback(async (id: string) => {
     try {
       const res = await fetch(`http://localhost:3001/api/runs/${id}/logs`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       const data = await res.json();
       setLogs(data.logs || 'No logs available.');
-    } catch (err) {
+    } catch {
       setLogs('Error fetching logs.');
     }
+  }, [token])
+
+  const openLogViewer = (id: string) => {
+    setActiveLogRunId(id);
+    setLogModalOpen(true);
+    fetchLogs(id);
   }
 
   // Poll logs if modal is open
   useEffect(() => {
-    let interval: any;
+    let interval: ReturnType<typeof setInterval> | undefined;
     if (logModalOpen && activeLogRunId) {
       interval = setInterval(() => fetchLogs(activeLogRunId), 2000);
     }
-    return () => clearInterval(interval);
-  }, [logModalOpen, activeLogRunId]);
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [logModalOpen, activeLogRunId, fetchLogs]);
 
   const handleLogin = (newToken: string, newUser: any) => {
     localStorage.setItem('token', newToken)
     setToken(newToken)
     setUser(newUser)
-  }
-
-  const handleLogout = () => {
-    localStorage.removeItem('token')
-    setToken(null)
-    setUser(null)
   }
 
   if (!token) {
@@ -319,19 +365,65 @@ function App() {
                 
                 {actor.name === 'shopee-scraper' && (
                   <div className="mb-4 space-y-3">
+                    <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className={`h-2.5 w-2.5 rounded-full ${
+                              shopeeSession.status === 'CONNECTED'
+                                ? 'bg-emerald-500'
+                                : shopeeSession.status === 'CONNECTING'
+                                  ? 'bg-amber-500 animate-pulse'
+                                  : 'bg-gray-400'
+                            }`} />
+                            <span className="text-sm font-medium text-gray-800">
+                              {shopeeSession.status === 'CONNECTED' && 'Shopee đã kết nối'}
+                              {shopeeSession.status === 'CONNECTING' && 'Đang chờ đăng nhập'}
+                              {shopeeSession.status === 'EXPIRED' && 'Phiên Shopee đã hết hạn'}
+                              {shopeeSession.status === 'ERROR' && 'Kết nối Shopee bị lỗi'}
+                              {(!shopeeSession.status || shopeeSession.status === 'DISCONNECTED') && 'Shopee chưa kết nối'}
+                            </span>
+                          </div>
+                          <p className="mt-1 text-xs text-gray-500">
+                            {shopeeSession.status === 'CONNECTING'
+                              ? 'Hoàn tất đăng nhập trong cửa sổ Edge vừa mở.'
+                              : shopeeSession.status === 'CONNECTED'
+                                ? 'Crawler sẽ tự dùng phiên này, không cần sao chép cookie.'
+                                : shopeeSession.lastError || 'Đăng nhập một lần để hệ thống lưu phiên riêng.'}
+                          </p>
+                        </div>
+                        {shopeeSession.status === 'CONNECTED' || shopeeSession.status === 'CONNECTING' ? (
+                          <button
+                            onClick={disconnectShopee}
+                            disabled={shopeeActionPending}
+                            className="shrink-0 rounded-lg border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-50"
+                          >
+                            {shopeeSession.status === 'CONNECTING' ? 'Hủy' : 'Ngắt'}
+                          </button>
+                        ) : (
+                          <button
+                            onClick={connectShopee}
+                            disabled={shopeeActionPending}
+                            className="shrink-0 rounded-lg bg-orange-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-orange-600 disabled:opacity-50"
+                          >
+                            Kết nối Shopee
+                          </button>
+                        )}
+                      </div>
+                    </div>
                     <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">Search Keyword</label>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Từ khóa tìm kiếm</label>
                       <input 
                         type="text" 
                         value={runInputs[actor.id]?.keyword || ''} 
                         onChange={e => setRunInputs({...runInputs, [actor.id]: {...runInputs[actor.id], keyword: e.target.value}})}
-                        placeholder="e.g. bàn phím cơ" 
+                        placeholder="Ví dụ: bàn phím cơ"
                         className="w-full px-3 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
                       />
                     </div>
                     <input 
                       type="number" 
-                      placeholder="Max items (e.g. 60)" 
+                      placeholder="Số sản phẩm (ví dụ: 60)"
                       className="border rounded px-3 py-1 text-sm bg-white text-gray-700 w-36"
                       value={runInputs[actor.id]?.maxItems || ''}
                       onChange={(e) => setRunInputs(prev => ({
@@ -339,29 +431,14 @@ function App() {
                         [actor.id]: { ...prev[actor.id], maxItems: e.target.value }
                       }))}
                     />
-                    <input 
-                      type="text" 
-                      placeholder="Cookie (Optional)" 
-                      className="border rounded px-3 py-1 text-sm bg-white text-gray-700 w-48"
-                      value={runInputs[actor.id]?.cookie || ''}
-                      onChange={(e) => setRunInputs(prev => ({
-                        ...prev,
-                        [actor.id]: { ...prev[actor.id], cookie: e.target.value }
-                      }))}
-                    />
-                    <button 
-                      onClick={() => triggerRun(actor.id)}
-                      className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1 rounded text-sm font-medium transition-colors whitespace-nowrap"
-                    >
-                      Run
-                    </button>
                   </div>
                 )}
 
                 <div className="flex gap-3 mt-auto">
                   <button 
                     onClick={() => triggerRun(actor.id)}
-                    className="flex-1 flex items-center justify-center gap-2 bg-[#E8F0FE] text-blue-700 font-medium py-2.5 text-sm rounded-full hover:bg-blue-100 transition-colors"
+                    disabled={actor.name === 'shopee-scraper' && shopeeSession.status !== 'CONNECTED'}
+                    className="flex-1 flex items-center justify-center gap-2 bg-[#E8F0FE] text-blue-700 font-medium py-2.5 text-sm rounded-full hover:bg-blue-100 transition-colors disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed"
                   >
                     <Play size={16} fill="currentColor" /> Run (10 Credits)
                   </button>

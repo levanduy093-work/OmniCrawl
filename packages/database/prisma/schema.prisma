@@ -20,6 +20,20 @@ model User {
   actors    Actor[]
   runs      Run[]
   schedules Schedule[]
+  shopeeSession ShopeeSession?
+}
+
+model ShopeeSession {
+  id              String    @id @default(cuid())
+  userId          String    @unique
+  status          String    @default("DISCONNECTED") // DISCONNECTED, CONNECTING, CONNECTED, EXPIRED, ERROR
+  lastConnectedAt DateTime?
+  lastCheckedAt   DateTime?
+  lastError       String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model Actor {
@@ -43,7 +57,7 @@ model Run {
   userId      String?
   actor       Actor     @relation(fields: [actorId], references: [id])
   user        User?     @relation(fields: [userId], references: [id])
-  status      String    @default("PENDING") // PENDING, RUNNING, SUCCESS, FAILED
+  status      String    @default("PENDING") // CREATING, PENDING, RUNNING, STOPPING, STOPPED, SUCCESS, FAILED
   startedAt   DateTime?
   finishedAt  DateTime?
   createdAt   DateTime  @default(now())

@@ -1,7 +1,7 @@
 import { prisma } from '@omnicrawl/database';
 
 export class JobQueue {
-  async pushJob(actorId: string, inputData: any = {}) {
+  async pushJob(actorId: string, _inputData: any = {}) {
     const run = await prisma.run.create({
       data: {
         actorId,
@@ -12,37 +12,44 @@ export class JobQueue {
   }
 
   // Polling mechanism to mimic a real queue for Phase 3 local execution
-  async processJobs(handler: (runId: string, actorName: string) => Promise<void>) {
+  async processJobs(handler: (runId: string, actorName: string, userId: string | null) => Promise<void>) {
     console.log('[Queue] Worker started listening for jobs...');
     
     setInterval(async () => {
-      // Find one pending job
-      const job = await prisma.run.findFirst({
-        where: { status: 'PENDING' },
-        include: { actor: true },
-        orderBy: { createdAt: 'asc' }
-      });
+      try {
+        // Select a candidate, then claim it with a compare-and-set update.
+        // This prevents two workers from executing the same run.
+        const job = await prisma.run.findFirst({
+          where: { status: 'PENDING' },
+          include: { actor: true },
+          orderBy: { createdAt: 'asc' }
+        });
 
-      if (job) {
-        // Lock the job by changing status to RUNNING
-        await prisma.run.update({
-          where: { id: job.id },
+        if (!job) return;
+
+        const claim = await prisma.run.updateMany({
+          where: { id: job.id, status: 'PENDING' },
           data: { status: 'RUNNING', startedAt: new Date() }
         });
-        
+
+        if (claim.count !== 1) return;
+
         try {
-          await handler(job.id, job.actor.name);
-          await prisma.run.update({
-            where: { id: job.id },
+          await handler(job.id, job.actor.name, job.userId);
+          // Preserve STOPPED/STOPPING if a stop request raced with completion.
+          await prisma.run.updateMany({
+            where: { id: job.id, status: 'RUNNING' },
             data: { status: 'SUCCESS', finishedAt: new Date() }
           });
         } catch (err) {
           console.error(`[Queue] Job ${job.id} failed`, err);
-          await prisma.run.update({
-            where: { id: job.id },
+          await prisma.run.updateMany({
+            where: { id: job.id, status: 'RUNNING' },
             data: { status: 'FAILED', finishedAt: new Date() }
           });
         }
+      } catch (err) {
+        console.error('[Queue] Failed to poll or claim a job', err);
       }
     }, 2000); // Poll every 2 seconds
   }

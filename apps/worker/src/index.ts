@@ -3,6 +3,10 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { fork, ChildProcess } from 'child_process';
 import { prisma } from '@omnicrawl/database';
+import dotenv from 'dotenv';
+
+const projectRoot = path.resolve(__dirname, '..', '..', '..');
+dotenv.config({ path: path.join(projectRoot, '.env'), quiet: true });
 
 console.log('Worker Daemon is starting with Process Isolation...');
 
@@ -24,26 +28,26 @@ setInterval(async () => {
     console.log(`[Worker] Kill signal received for Job ${run.id}. Terminating process...`);
     const proc = runningProcesses.get(run.id);
     if (proc) {
-      proc.kill('SIGTERM'); // Send termination signal
-      runningProcesses.delete(run.id);
-      
-      // Update DB to STOPPED
+      // Persist STOPPED first so the close handler cannot turn an intentional
+      // stop into FAILED or SUCCESS.
       await prisma.run.update({
         where: { id: run.id },
         data: { status: 'STOPPED', finishedAt: new Date() }
       });
+      proc.kill('SIGTERM');
+      runningProcesses.delete(run.id);
     }
   }
 }, 3000); // Check every 3 seconds
 
-queue.processJobs(async (runId: string, actorName: string) => {
+queue.processJobs(async (runId: string, actorName: string, userId: string | null) => {
   console.log(`[Worker] Picked up Job ${runId} for Actor ${actorName}`);
   
   return new Promise<void>((resolve, reject) => {
-    const runnerPath = path.join(__dirname, 'runner.ts');
+    const isTypeScriptRuntime = path.extname(__filename) === '.ts';
+    const runnerPath = path.join(__dirname, isTypeScriptRuntime ? 'runner.ts' : 'runner.js');
     
     // Ensure logs directory exists
-    const projectRoot = path.resolve(process.cwd(), '..', '..');
     const logsDir = path.resolve(projectRoot, 'storage', 'logs');
     if (!fs.existsSync(logsDir)) {
       fs.mkdirSync(logsDir, { recursive: true });
@@ -51,13 +55,14 @@ queue.processJobs(async (runId: string, actorName: string) => {
     const logFile = path.join(logsDir, `${runId}.log`);
     const logStream = fs.createWriteStream(logFile, { flags: 'a' });
 
-    // Use ts-node/register to run TypeScript runner file directly in dev
+    let sessionExpired = false;
     const proc = fork(runnerPath, [], {
-      execArgv: ['-r', 'ts-node/register'],
+      execArgv: isTypeScriptRuntime ? ['-r', 'ts-node/register'] : [],
       env: {
         ...process.env,
         ACTOR_NAME: actorName,
-        RUN_ID: runId
+        RUN_ID: runId,
+        USER_ID: userId || ''
       },
       stdio: ['pipe', 'pipe', 'pipe', 'ipc']
     });
@@ -70,6 +75,9 @@ queue.processJobs(async (runId: string, actorName: string) => {
     });
 
     proc.stderr?.on('data', (data) => {
+      if (String(data).includes('SHOPEE_SESSION_EXPIRED')) {
+        sessionExpired = true;
+      }
       process.stderr.write(`[${runId}] ERROR: ${data}`);
       logStream.write(`ERROR: ${data}`);
     });
@@ -88,6 +96,22 @@ queue.processJobs(async (runId: string, actorName: string) => {
         console.log(`[Worker] Job ${runId} finished successfully.`);
         resolve();
       } else {
+        if (sessionExpired && userId) {
+          await prisma.shopeeSession.upsert({
+            where: { userId },
+            create: {
+              userId,
+              status: 'EXPIRED',
+              lastCheckedAt: new Date(),
+              lastError: 'Shopee requested a new login or CAPTCHA.'
+            },
+            update: {
+              status: 'EXPIRED',
+              lastCheckedAt: new Date(),
+              lastError: 'Shopee requested a new login or CAPTCHA.'
+            }
+          });
+        }
         console.error(`[Worker] Job ${runId} exited with code ${code}.`);
         reject(new Error(`Process exited with code ${code}`));
       }
