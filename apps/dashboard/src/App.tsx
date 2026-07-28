@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, Fragment } from 'react'
 import {
   Play,
   Activity,
@@ -23,7 +23,7 @@ import Login from './Login'
 import OmniCrawlLogo from './Logo'
 import './App.css'
 
-const REQUIRED_BROWSER_AGENT_VERSION = '0.3.3'
+const REQUIRED_BROWSER_AGENT_VERSION = '0.4.0'
 
 type JsonSchemaProperty = {
   type?: 'string' | 'integer' | 'number' | 'boolean'
@@ -989,7 +989,9 @@ function RunDetailModal({
   onClose: () => void
 }) {
   const [previewImage, setPreviewImage] = useState<string | null>(null)
+  const [expandedItemIds, setExpandedItemIds] = useState<Record<string, boolean>>({})
   const records = (detail?.items || []).map((item: any) => item.data || {})
+  const detailProgress = detail?.run?.outputMetadata?.detailProgress
   let schemaColumns: string[] = []
   let schemaLabels: Record<string, string> = {}
   try {
@@ -1009,6 +1011,23 @@ function RunDetailModal({
     ...schemaColumns,
     ...records.flatMap((record: Record<string, unknown>) => Object.keys(record))
   ]))
+
+  const isSummaryKey = (col: string) => {
+    const norm = col.toLowerCase()
+    return (
+      norm.includes('image') || norm.includes('hinh') || norm.includes('img') || norm.includes('thumbnail') ||
+      norm.includes('title') || norm.includes('ten') || norm.includes('name') ||
+      norm.includes('price') || norm.includes('gia') ||
+      norm.includes('sold') || norm.includes('da_ban') ||
+      norm.includes('url') || norm.includes('link') || norm.includes('lien_ket')
+    )
+  }
+
+  let summaryColumns = columns.filter(isSummaryKey)
+  if (summaryColumns.length === 0) {
+    summaryColumns = columns.slice(0, 5)
+  }
+  const detailColumns = columns.filter(c => !summaryColumns.includes(c))
 
   const renderValue = (value: unknown, column: string) => {
     if (value === null || value === undefined || value === '') {
@@ -1083,8 +1102,21 @@ function RunDetailModal({
                 <pre className="mt-2 text-xs text-gray-700 whitespace-pre-wrap max-h-24 overflow-auto">{JSON.stringify(detail.run.input, null, 2)}</pre>
               </div>
               <div className="bg-white rounded-2xl p-4">
-                <div className="text-xs uppercase tracking-wide text-gray-400">Metadata</div>
-                <pre className="mt-2 text-xs text-gray-700 whitespace-pre-wrap max-h-24 overflow-auto">{JSON.stringify(detail.run.outputMetadata, null, 2)}</pre>
+                <div className="text-xs uppercase tracking-wide text-gray-400">Chi tiết sản phẩm</div>
+                {detailProgress?.enabled ? (
+                  <>
+                    <div className="mt-1 text-2xl font-semibold">
+                      {(detailProgress.completed || 0) + (detailProgress.failed || 0)}
+                      <span className="text-base font-normal text-gray-400">/{detailProgress.total || 0}</span>
+                    </div>
+                    <div className="text-sm text-gray-500">
+                      {detailProgress.completed || 0} thành công
+                      {detailProgress.failed ? ` · ${detailProgress.failed} lỗi` : ''}
+                    </div>
+                  </>
+                ) : (
+                  <div className="mt-2 text-sm text-gray-500">Không thu thập dữ liệu chi tiết</div>
+                )}
               </div>
               <div className="bg-white rounded-2xl p-4">
                 <div className="text-xs uppercase tracking-wide text-gray-400">Result</div>
@@ -1097,25 +1129,87 @@ function RunDetailModal({
             <div className="flex-1 overflow-auto">
               {records.length > 0 ? (
                 <table className="min-w-full text-left text-sm">
-                  <thead className="sticky top-0 bg-white border-b border-gray-200 text-gray-500">
+                  <thead className="sticky top-0 bg-white border-b border-gray-200 text-gray-700 font-semibold">
                     <tr>
+                      <th className="w-10 px-3 py-3"></th>
                       <th className="px-4 py-3">STT</th>
-                      {columns.map((column) => (
+                      {summaryColumns.map((column) => (
                         <th key={column} className="px-4 py-3 whitespace-nowrap">
                           {schemaLabels[column] || humanizeFieldName(column)}
                         </th>
                       ))}
+                      {detailColumns.length > 0 && <th className="px-4 py-3 text-right">Chi tiết</th>}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {detail.items.map((item: any) => (
-                      <tr key={item.id} className="hover:bg-blue-50/40 align-top">
-                        <td className="px-4 py-3 text-gray-400">{item.position + 1}</td>
-                        {columns.map((column) => (
-                          <td key={column} className="px-4 py-3 text-gray-700">{renderValue(item.data?.[column], column)}</td>
-                        ))}
-                      </tr>
-                    ))}
+                    {detail.items.map((item: any) => {
+                      const isExpanded = Boolean(expandedItemIds[item.id])
+                      return (
+                        <Fragment key={item.id}>
+                          <tr 
+                            onClick={() => setExpandedItemIds(prev => ({ ...prev, [item.id]: !prev[item.id] }))}
+                            className={`hover:bg-blue-50/40 align-middle cursor-pointer transition-colors ${
+                              isExpanded ? 'bg-blue-50/30 font-medium' : ''
+                            }`}
+                          >
+                            <td className="w-10 px-3 py-3 text-gray-400">
+                              <button type="button" className="p-1 rounded hover:bg-gray-100 transition-transform">
+                                <ChevronRight size={16} className={`transition-transform duration-200 ${isExpanded ? 'rotate-90 text-blue-600' : ''}`} />
+                              </button>
+                            </td>
+                            <td className="px-4 py-3 text-gray-400 font-medium">{item.position + 1}</td>
+                            {summaryColumns.map((column) => (
+                              <td key={column} className="px-4 py-3 text-gray-700">{renderValue(item.data?.[column], column)}</td>
+                            ))}
+                            {detailColumns.length > 0 && (
+                              <td className="px-4 py-3 text-right">
+                                <span className={`inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg font-medium transition-colors ${
+                                  isExpanded ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                                }`}>
+                                  {isExpanded ? 'Thu gọn' : 'Xem chi tiết'}
+                                </span>
+                              </td>
+                            )}
+                          </tr>
+
+                          {isExpanded && (
+                            <tr key={`${item.id}-detail`} className="bg-slate-50/80 border-b border-gray-200">
+                              <td colSpan={summaryColumns.length + 3} className="p-4">
+                                <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-200/80 space-y-4">
+                                  <div className="flex items-center justify-between border-b border-gray-100 pb-3">
+                                    <h4 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
+                                      <span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span>
+                                      Thông tin chi tiết thu thập bên trong sản phẩm
+                                    </h4>
+                                    <span className="text-xs text-gray-400 font-mono">Item #{item.position + 1}</span>
+                                  </div>
+
+                                  {detailColumns.length > 0 ? (
+                                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                                      {detailColumns.map((col) => {
+                                        const val = item.data?.[col];
+                                        return (
+                                          <div key={col} className="bg-gray-50/80 p-3.5 rounded-xl border border-gray-100 flex flex-col gap-1">
+                                            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                              {schemaLabels[col] || humanizeFieldName(col)}
+                                            </span>
+                                            <div className="text-xs text-gray-800 font-normal whitespace-pre-wrap break-words">
+                                              {renderValue(val, col)}
+                                            </div>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  ) : (
+                                    <div className="text-xs text-gray-400 py-2">Không có dữ liệu chi tiết nâng cao cho sản phẩm này.</div>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      )
+                    })}
                   </tbody>
                 </table>
               ) : (

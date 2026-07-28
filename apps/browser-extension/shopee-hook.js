@@ -8,21 +8,30 @@
     }));
   };
 
-  const isProductSearchRequest = (url) => {
+  const requestKind = (url) => {
     const value = String(url);
-    if (!value.includes('/api/v4/search/search_items')) return false;
-    try {
-      const parsed = new URL(value, location.origin);
-      return parsed.searchParams.get('limit') !== '0';
-    } catch {
-      return true;
+    if (value.includes('/api/v4/search/search_items')) {
+      try {
+        const parsed = new URL(value, location.origin);
+        return parsed.searchParams.get('limit') !== '0' ? 'search' : null;
+      } catch {
+        return 'search';
+      }
     }
+    if (
+      value.includes('/api/v4/pdp/get_pc') ||
+      value.includes('/api/v4/pdp/get_rw') ||
+      value.includes('/api/v4/item/get')
+    ) return 'detail';
+    return null;
   };
 
   const capture = async (url, response) => {
-    if (!isProductSearchRequest(url)) return;
+    const kind = requestKind(url);
+    if (!kind) return;
     try {
       emit({
+        kind,
         url: String(url),
         status: response.status,
         payload: await response.clone().json()
@@ -44,9 +53,11 @@
   XMLHttpRequest.prototype.open = function (method, url, ...rest) {
     this.__omnicrawlUrl = String(url);
     this.addEventListener('load', () => {
-      if (!isProductSearchRequest(this.__omnicrawlUrl)) return;
+      const kind = requestKind(this.__omnicrawlUrl);
+      if (!kind) return;
       try {
         emit({
+          kind,
           url: this.__omnicrawlUrl,
           status: this.status,
           payload: JSON.parse(this.responseText)

@@ -135,6 +135,67 @@ function outputSchemaColumns(schemaJson: string | null) {
   }
 }
 
+function sanitizeDetailPatch(value: any) {
+  const text = (input: unknown, limit = 5000) => String(input ?? '').slice(0, limit);
+  const number = (input: unknown) => {
+    const parsed = Number(input);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  const stringArray = (input: unknown, limit = 30) => (
+    Array.isArray(input)
+      ? input.slice(0, limit).map((entry) => text(entry, 2000)).filter(Boolean)
+      : []
+  );
+  const objectArray = (input: unknown, limit = 50) => (
+    Array.isArray(input)
+      ? input.slice(0, limit).map((entry) => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return { value: text(entry, 1000) };
+        return Object.fromEntries(
+          Object.entries(entry)
+            .slice(0, 20)
+            .map(([key, fieldValue]) => [
+              text(key, 100),
+              typeof fieldValue === 'number' || typeof fieldValue === 'boolean'
+                ? fieldValue
+                : Array.isArray(fieldValue)
+                  ? fieldValue.slice(0, 50).map((nestedValue) => text(nestedValue, 500))
+                  : fieldValue && typeof fieldValue === 'object'
+                    ? text(JSON.stringify(fieldValue), 2000)
+                    : text(fieldValue, 2000)
+            ])
+        );
+      })
+      : []
+  );
+
+  const status = value?.detailStatus === 'FAILED' ? 'FAILED' : 'COMPLETED';
+  if (status === 'FAILED') {
+    return {
+      detailStatus: status,
+      detailError: text(value?.detailError, 1000),
+      detailCrawledAt: new Date().toISOString()
+    };
+  }
+  return {
+    description: text(value?.description, 50_000),
+    category: text(value?.category, 1000),
+    brand: text(value?.brand, 500),
+    rating: number(value?.rating),
+    ratingCount: number(value?.ratingCount),
+    stock: number(value?.stock),
+    likedCount: number(value?.likedCount),
+    shopName: text(value?.shopName, 1000),
+    shopLocation: text(value?.shopLocation, 1000),
+    images: stringArray(value?.images, 30),
+    attributes: objectArray(value?.attributes, 100),
+    variations: objectArray(value?.variations, 50),
+    models: objectArray(value?.models, 100),
+    detailStatus: status,
+    detailError: '',
+    detailCrawledAt: new Date().toISOString()
+  };
+}
+
 // Auth Middleware
 const requireAuth = async (req: any, res: any, next: any) => {
   const authHeader = req.headers.authorization;
@@ -528,14 +589,22 @@ app.get('/api/browser-agent/jobs/next', requireAuth, async (req: any, res: any) 
       `[INFO] [BrowserAgent] Claimed Shopee job for keyword "${String(input.keyword || 'máy in 3d')}".`
     );
     const keyword = String(input.keyword || 'máy in 3d').trim() || 'máy in 3d';
+    const includeDetails = input.includeDetails !== false;
     await new Dataset(candidate.id).setMetadata({
       source: 'shopee.vn',
-      query: { keyword, maxItems }
+      query: { keyword, maxItems, includeDetails },
+      detailProgress: {
+        enabled: includeDetails,
+        completed: 0,
+        failed: 0,
+        total: 0
+      }
     });
     res.json({
       runId: candidate.id,
       keyword,
-      maxItems
+      maxItems,
+      includeDetails
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -566,13 +635,57 @@ app.post('/api/browser-agent/jobs/:id/items', requireAuth, async (req: any, res:
         price: String(item.price || '').slice(0, 100),
         sold: item.sold ?? 0,
         url: String(item.url || '').slice(0, 2000),
-        image: String(item.image || '').slice(0, 2000)
+        image: String(item.image || '').slice(0, 2000),
+        detailStatus: item.detailStatus === 'PENDING' ? 'PENDING' : 'SKIPPED'
       });
     }
     await new Dataset(run.id).pushData(safeItems);
     const storedCount = safeItems.length;
     appendRunLog(run.id, `[INFO] [BrowserAgent] Stored ${storedCount} products.`);
     res.json({ accepted: storedCount });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch('/api/browser-agent/jobs/:id/items/:itemId', requireAuth, async (req: any, res: any) => {
+  try {
+    const run = await prisma.run.findFirst({
+      where: {
+        id: req.params.id,
+        userId: req.user.id,
+        status: 'BROWSER_RUNNING',
+        actor: { name: 'shopee-scraper' }
+      },
+      select: { id: true }
+    });
+    if (!run) return res.status(404).json({ error: 'Active browser job not found' });
+
+    const dataset = new Dataset(run.id);
+    const detail = sanitizeDetailPatch(req.body?.detail);
+    const updated = await dataset.updateData(String(req.params.itemId), detail);
+    if (!updated) return res.status(404).json({ error: 'Product was not found in this run' });
+
+    const completed = Math.max(0, Math.floor(Number(req.body?.progress?.completed) || 0));
+    const failed = Math.max(0, Math.floor(Number(req.body?.progress?.failed) || 0));
+    const total = Math.max(
+      completed + failed,
+      Math.floor(Number(req.body?.progress?.total) || 0)
+    );
+    await dataset.setMetadata({
+      detailProgress: {
+        enabled: true,
+        completed,
+        failed,
+        total
+      }
+    });
+    appendRunLog(
+      run.id,
+      `[INFO] [BrowserAgent] Product details ${completed + failed}/${total}: ` +
+      `${detail.detailStatus === 'FAILED' ? 'failed' : 'stored'} for item ${String(req.params.itemId).slice(0, 100)}.`
+    );
+    res.json({ success: true, detailStatus: detail.detailStatus });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -620,6 +733,23 @@ app.post('/api/browser-agent/jobs/:id/complete', requireAuth, async (req: any, r
     return res.status(422).json({ error: 'Shopee crawl produced no products' });
   }
 
+  const detailCompleted = Math.max(0, Math.floor(Number(req.body?.details?.completed) || 0));
+  const detailFailed = Math.max(0, Math.floor(Number(req.body?.details?.failed) || 0));
+  const detailTotal = Math.max(
+    detailCompleted + detailFailed,
+    Math.floor(Number(req.body?.details?.total) || 0)
+  );
+  if (req.body?.details) {
+    await dataset.setMetadata({
+      detailProgress: {
+        enabled: Boolean(req.body.details.enabled),
+        completed: detailCompleted,
+        failed: detailFailed,
+        total: detailTotal
+      }
+    });
+  }
+
   const completed = await prisma.run.updateMany({
     where: {
       id: req.params.id,
@@ -630,7 +760,13 @@ app.post('/api/browser-agent/jobs/:id/complete', requireAuth, async (req: any, r
   });
   if (completed.count !== 1) return res.status(409).json({ error: 'Browser job is no longer active' });
   await dataset.finalize('SUCCESS');
-  appendRunLog(req.params.id, `[INFO] [BrowserAgent] Completed with ${storedCount} products.`);
+  appendRunLog(
+    req.params.id,
+    `[INFO] [BrowserAgent] Completed with ${storedCount} products` +
+    (req.body?.details
+      ? `; details: ${detailCompleted} completed, ${detailFailed} failed.`
+      : '.')
+  );
   res.json({ success: true });
 });
 

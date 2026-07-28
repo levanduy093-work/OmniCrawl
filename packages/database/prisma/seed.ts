@@ -53,6 +53,12 @@ async function main() {
         maximum: 500,
         default: 50
       },
+      includeDetails: {
+        type: 'boolean',
+        title: 'Thu thập chi tiết từng sản phẩm',
+        description: 'Mở lần lượt từng sản phẩm để lấy mô tả, đánh giá, tồn kho và phân loại.',
+        default: true
+      },
       allowEmpty: {
         type: 'boolean',
         title: 'Cho phép kết quả rỗng',
@@ -70,7 +76,23 @@ async function main() {
       price: { type: 'string', title: 'Giá bán' },
       sold: { type: ['string', 'number'], title: 'Đã bán' },
       url: { type: 'string', format: 'uri', title: 'Liên kết sản phẩm' },
-      image: { type: 'string', format: 'uri', title: 'Hình ảnh' }
+      image: { type: 'string', format: 'uri', title: 'Hình ảnh' },
+      description: { type: 'string', title: 'Mô tả sản phẩm' },
+      category: { type: 'string', title: 'Danh mục' },
+      brand: { type: 'string', title: 'Thương hiệu' },
+      rating: { type: 'number', title: 'Điểm đánh giá' },
+      ratingCount: { type: 'number', title: 'Lượt đánh giá' },
+      stock: { type: 'number', title: 'Tồn kho' },
+      likedCount: { type: 'number', title: 'Lượt thích' },
+      shopName: { type: 'string', title: 'Tên cửa hàng' },
+      shopLocation: { type: 'string', title: 'Nơi bán' },
+      images: { type: 'array', title: 'Bộ ảnh sản phẩm' },
+      attributes: { type: 'array', title: 'Thuộc tính' },
+      variations: { type: 'array', title: 'Phân loại' },
+      models: { type: 'array', title: 'Các phiên bản' },
+      detailStatus: { type: 'string', title: 'Trạng thái chi tiết' },
+      detailError: { type: 'string', title: 'Lỗi khi lấy chi tiết' },
+      detailCrawledAt: { type: 'string', format: 'date-time', title: 'Thời gian lấy chi tiết' }
     }
   });
 

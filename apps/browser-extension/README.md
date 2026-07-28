@@ -7,8 +7,12 @@
 5. Keep Chrome open and sign in to `https://shopee.vn`.
 6. Open the OmniCrawl dashboard. The Shopee card will show that the Browser Agent is connected.
 
-The extension never reads or exports browser cookies. It only captures structured
-Shopee search responses and sends mapped product fields to the local OmniCrawl API.
+The extension never reads or exports browser cookies. It captures structured
+Shopee search responses inside the signed-in browser. When
+`Thu thập chi tiết từng sản phẩm` is enabled, it then opens each collected
+product in the same tab, captures description, rating, stock, shop, images,
+attributes and variations, and updates the matching database row. A failure on
+one product is recorded and the remaining products continue.
 
 After updating the source, click **Reload** on the extension page and then reload
 the OmniCrawl dashboard tab. The dashboard only enables Shopee jobs when the

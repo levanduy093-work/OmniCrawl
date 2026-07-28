@@ -77,15 +77,18 @@ model Run {
 }
 
 model DatasetItem {
-  id        String   @id @default(cuid())
-  runId     String
-  position  Int
-  data      Json
-  createdAt DateTime @default(now())
+  id          String   @id @default(cuid())
+  runId       String
+  position    Int
+  externalKey String?
+  data        Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
 
   run       Run      @relation(fields: [runId], references: [id], onDelete: Cascade)
 
   @@unique([runId, position])
+  @@unique([runId, externalKey])
   @@index([runId, position])
 }
 

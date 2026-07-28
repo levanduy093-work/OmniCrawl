@@ -67,6 +67,51 @@ const domCaptureTimer = setInterval(() => {
   if (domAttempts >= 15) clearInterval(domCaptureTimer);
 }, 2000);
 
+function scrapeRenderedProductDetail() {
+  const ids = parseProductIds(location.href);
+  if (!ids) return null;
+
+  const title = document.querySelector('h1')?.textContent?.trim() || '';
+  const bodyText = document.body?.innerText || '';
+  const descriptionHeading = [...document.querySelectorAll('div, section')]
+    .find((element) => (
+      element.children.length < 12 &&
+      /^(mô tả sản phẩm|product description)$/i.test(element.firstElementChild?.textContent?.trim() || '')
+    ));
+  const description = descriptionHeading?.innerText
+    ?.replace(/^(mô tả sản phẩm|product description)\s*/i, '')
+    .trim()
+    .slice(0, 50000) || '';
+  const ratingMatch = bodyText.slice(0, 12000).match(/(\d(?:[.,]\d)?)\s*(?:\/\s*5|đánh giá|rating)/i);
+  const soldMatch = bodyText.slice(0, 12000).match(/(\d+(?:[.,]\d+)?k?)\+?\s*(?:đã bán|sold)/i);
+  const images = [...document.querySelectorAll('img')]
+    .map((image) => image.currentSrc || image.src)
+    .filter((url) => /(?:shopee|susercontent)\.(?:com|vn)|susercontent\.com/i.test(url))
+    .filter((url, index, all) => url && all.indexOf(url) === index)
+    .slice(0, 30);
+
+  if (!title || (!description && !images.length)) return null;
+  return {
+    ...ids,
+    title,
+    description,
+    rating: ratingMatch ? Number(ratingMatch[1].replace(',', '.')) : null,
+    sold: soldMatch?.[1] || 0,
+    images
+  };
+}
+
+if (parseProductIds(location.href)) {
+  setTimeout(() => {
+    const detail = scrapeRenderedProductDetail();
+    if (!detail) return;
+    chrome.runtime.sendMessage({
+      type: 'SHOPEE_DOM_DETAIL',
+      detail
+    }).catch(() => undefined);
+  }, 8000);
+}
+
 function reportBlockedPage() {
   if (
     location.pathname.includes('/verify/') ||

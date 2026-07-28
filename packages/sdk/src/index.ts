@@ -89,6 +89,15 @@ function actorReference(actor: { id: string; name: string; version: string }): A
   return { id: actor.id, name: actor.name, version: actor.version };
 }
 
+function itemExternalKey(value: Prisma.InputJsonValue) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, Prisma.JsonValue>;
+  const candidate = record.itemId ?? record.id ?? record.url;
+  return candidate === null || candidate === undefined || candidate === ''
+    ? null
+    : String(candidate).slice(0, 2000);
+}
+
 export async function writeRunInput<TInput>(
   runId: string,
   _actor: ActorReference,
@@ -211,6 +220,7 @@ export class Dataset<TItem = unknown> {
               data: items.map((item, index) => ({
                 runId: this.runId,
                 position: run.itemCount + index,
+                externalKey: itemExternalKey(item),
                 data: item
               }))
             });
@@ -242,6 +252,29 @@ export class Dataset<TItem = unknown> {
           ...metadata
         })
       }
+    });
+  }
+
+  async updateData(externalKey: string, patch: Record<string, unknown>) {
+    return this.locked(async () => {
+      const item = await prisma.datasetItem.findFirst({
+        where: {
+          runId: this.runId,
+          externalKey: String(externalKey)
+        },
+        select: { id: true, data: true }
+      });
+      if (!item) return false;
+      await prisma.datasetItem.update({
+        where: { id: item.id },
+        data: {
+          data: toJsonValue({
+            ...asRecord(item.data),
+            ...patch
+          })
+        }
+      });
+      return true;
     });
   }
 

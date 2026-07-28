@@ -2,25 +2,48 @@ let config = null;
 let activeJob = null;
 let pollTimer = null;
 let pageTimer = null;
+
+const SEARCH_TIMEOUT_MS = 30000;
+const DETAIL_TIMEOUT_MS = 45000;
+
 const stateReady = chrome.storage.session.get(['config', 'activeJob']).then((stored) => {
   config = stored.config || null;
   activeJob = stored.activeJob || null;
+  if (activeJob) {
+    activeJob.phase = activeJob.phase || 'SEARCH';
+    activeJob.products = Array.isArray(activeJob.products) ? activeJob.products : [];
+    activeJob.detailIndex = Number(activeJob.detailIndex || 0);
+    activeJob.detailCompleted = Number(activeJob.detailCompleted || 0);
+    activeJob.detailFailed = Number(activeJob.detailFailed || 0);
+  }
 });
 
 function persistActiveJob() {
   return chrome.storage.session.set({ activeJob });
 }
 
-function armPageTimeout() {
+function clearPageTimeout() {
+  clearTimeout(pageTimer);
+  if (activeJob) activeJob.pageDeadline = null;
+}
+
+function armPageTimeout(timeoutMs) {
   clearTimeout(pageTimer);
   if (!activeJob) return;
-  activeJob.pageDeadline = Date.now() + 30000;
+  activeJob.pageDeadline = Date.now() + timeoutMs;
   void persistActiveJob();
   pageTimer = setTimeout(() => {
-    if (activeJob && Date.now() >= activeJob.pageDeadline) {
-      void finishJob(false, 'Không nhận được dữ liệu tìm kiếm từ Shopee sau 30 giây.');
-    }
-  }, 30000);
+    void handlePageTimeout();
+  }, timeoutMs);
+}
+
+async function handlePageTimeout() {
+  if (!activeJob || !activeJob.pageDeadline || Date.now() < activeJob.pageDeadline) return;
+  if (activeJob.phase === 'DETAIL' && activeJob.currentProduct) {
+    await failCurrentDetail('Không nhận được dữ liệu chi tiết từ Shopee sau 45 giây.');
+    return;
+  }
+  await finishJob(false, 'Không nhận được dữ liệu tìm kiếm từ Shopee sau 30 giây.');
 }
 
 function authHeaders(json = false) {
@@ -73,12 +96,25 @@ function findItemObject(entry) {
   )) || {};
 }
 
+function extractNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (Array.isArray(value)) {
+    return value.reduce((sum, entry) => sum + (extractNumber(entry) || 0), 0);
+  }
+  if (typeof value === 'object') {
+    for (const candidate of Object.values(value)) {
+      const numeric = extractNumber(candidate);
+      if (numeric !== null) return numeric;
+    }
+    return null;
+  }
+  const numeric = Number(String(value).replace(/[^\d.-]/g, ''));
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
 function extractPrice(value) {
   if (value === null || value === undefined) return null;
-  if (typeof value === 'number' || typeof value === 'string') {
-    const numeric = Number(String(value).replace(/[^\d.-]/g, ''));
-    return Number.isFinite(numeric) ? numeric : null;
-  }
+  if (typeof value === 'number' || typeof value === 'string') return extractNumber(value);
   if (typeof value !== 'object') return null;
   const candidates = [
     value.current_price,
@@ -94,6 +130,16 @@ function extractPrice(value) {
     if (numeric !== null) return numeric;
   }
   return null;
+}
+
+function imageUrl(value) {
+  const image = typeof value === 'object'
+    ? value?.image_id || value?.image || value?.url
+    : value;
+  if (!image) return '';
+  const text = String(image);
+  if (/^https?:\/\//i.test(text)) return text;
+  return `https://down-vn.img.susercontent.com/file/${text}`;
 }
 
 function mapItem(entry) {
@@ -116,8 +162,8 @@ function mapItem(entry) {
     item?.images?.[0]
   );
   return {
-    itemId,
-    shopId,
+    itemId: itemId === undefined || itemId === null ? '' : String(itemId),
+    shopId: shopId === undefined || shopId === null ? '' : String(shopId),
     title: String(
       item?.name ||
       item?.title ||
@@ -130,21 +176,148 @@ function mapItem(entry) {
       : '',
     sold: item?.historical_sold ?? item?.sold ?? item?.sold_count ?? 0,
     url: itemId && shopId ? `https://shopee.vn/product/${shopId}/${itemId}` : '',
-    image: typeof imageId === 'string' && imageId
-      ? `https://down-vn.img.susercontent.com/file/${imageId}`
-      : ''
+    image: imageUrl(imageId)
   };
 }
 
+function readableAttributeValue(attribute) {
+  const value = (
+    attribute?.value ??
+    attribute?.display_value ??
+    attribute?.values ??
+    attribute?.value_list
+  );
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => (
+        typeof entry === 'object'
+          ? entry?.display_value || entry?.value || entry?.name
+          : entry
+      ))
+      .filter(Boolean)
+      .join(', ');
+  }
+  return value === null || value === undefined ? '' : String(value);
+}
+
+function extendedDescription(item) {
+  if (typeof item?.description === 'string') return item.description;
+  const fields = item?.description_info?.extended_description?.field_list;
+  if (!Array.isArray(fields)) return '';
+  return fields
+    .map((field) => field?.text || field?.value || '')
+    .filter(Boolean)
+    .join('\n');
+}
+
+function mapDetailPayload(payload, expectedProduct) {
+  const root = payload?.data ?? payload ?? {};
+  const item = root?.item ?? root?.item_basic ?? root?.product ?? root;
+  const shop = root?.shop_detailed ?? root?.shop ?? item?.shop_detailed ?? {};
+  const categories = item?.categories ?? root?.categories ?? [];
+  const attributes = Array.isArray(item?.attributes)
+    ? item.attributes.map((attribute) => ({
+      name: String(attribute?.name || attribute?.display_name || ''),
+      value: readableAttributeValue(attribute)
+    })).filter((attribute) => attribute.name || attribute.value)
+    : [];
+  const brandAttribute = attributes.find((attribute) => /brand|thương hiệu/i.test(attribute.name));
+  const rating = item?.item_rating ?? item?.rating ?? {};
+  const ratingCount = extractNumber(
+    rating?.rating_count ??
+    rating?.count ??
+    item?.rating_count ??
+    item?.cmt_count
+  );
+  const images = [
+    ...(Array.isArray(item?.images) ? item.images : []),
+    ...(Array.isArray(root?.images) ? root.images : [])
+  ].map(imageUrl).filter(Boolean);
+  const variations = Array.isArray(item?.tier_variations)
+    ? item.tier_variations.map((variation) => ({
+      name: String(variation?.name || ''),
+      options: Array.isArray(variation?.options)
+        ? variation.options.map((option) => String(option))
+        : []
+    }))
+    : [];
+  const models = Array.isArray(item?.models)
+    ? item.models.map((model) => ({
+      modelId: String(model?.modelid ?? model?.model_id ?? ''),
+      name: String(model?.name || ''),
+      sku: String(model?.sku || model?.model_sku || ''),
+      price: extractPrice(model?.price),
+      stock: extractNumber(model?.stock)
+    }))
+    : [];
+  const itemId = String(
+    item?.itemid ??
+    item?.item_id ??
+    expectedProduct?.itemId ??
+    ''
+  );
+  const detail = {
+    itemId,
+    description: extendedDescription(item),
+    category: Array.isArray(categories)
+      ? categories
+        .map((category) => category?.display_name || category?.name || category)
+        .filter(Boolean)
+        .join(' > ')
+      : String(categories || ''),
+    brand: String(item?.brand || item?.brand_name || brandAttribute?.value || ''),
+    rating: extractNumber(rating?.rating_star ?? rating?.rating ?? item?.rating_star),
+    ratingCount,
+    stock: extractNumber(item?.stock ?? root?.stock),
+    likedCount: extractNumber(item?.liked_count ?? item?.likedCount),
+    shopName: String(shop?.name || shop?.shop_name || item?.shop_name || ''),
+    shopLocation: String(
+      item?.shop_location ||
+      shop?.shop_location ||
+      shop?.place ||
+      ''
+    ),
+    images: [...new Set(images)].slice(0, 30),
+    attributes,
+    variations,
+    models,
+    detailStatus: 'COMPLETED'
+  };
+  const usefulFields = [
+    detail.description,
+    detail.category,
+    detail.rating,
+    detail.stock,
+    detail.images.length,
+    detail.attributes.length,
+    detail.models.length
+  ].filter((value) => value !== '' && value !== null && value !== 0);
+  return usefulFields.length ? detail : null;
+}
+
 async function storeItems(items) {
-  if (!activeJob) return 0;
+  if (!activeJob || activeJob.phase !== 'SEARCH') return 0;
   const seenSet = new Set(activeJob.seen);
   const freshItems = [];
-  for (const item of items) {
+  for (const original of items) {
+    const item = {
+      ...original,
+      itemId: String(original.itemId || ''),
+      shopId: String(original.shopId || ''),
+      detailStatus: activeJob.includeDetails ? 'PENDING' : 'SKIPPED'
+    };
     const key = String(item.itemId || item.url || item.title);
     if (!item.title || !item.price || seenSet.has(key)) continue;
     seenSet.add(key);
     activeJob.seen.push(key);
+    if (activeJob.includeDetails && item.itemId && item.url) {
+      activeJob.products.push({
+        itemId: item.itemId,
+        shopId: item.shopId,
+        url: item.url,
+        title: item.title
+      });
+    }
     freshItems.push(item);
     if (activeJob.seen.length >= activeJob.maxItems) break;
   }
@@ -158,7 +331,8 @@ async function storeItems(items) {
 }
 
 async function scheduleNextPage() {
-  if (!activeJob || activeJob.navigationScheduled) return;
+  if (!activeJob || activeJob.phase !== 'SEARCH' || activeJob.navigationScheduled) return;
+  clearPageTimeout();
   activeJob.navigationScheduled = true;
   activeJob.page += 1;
   const runId = activeJob.runId;
@@ -169,11 +343,13 @@ async function scheduleNextPage() {
     `Waiting ${Math.ceil(delay / 1000)} seconds before loading Shopee page ${activeJob.page}.`
   );
   setTimeout(() => {
-    if (!activeJob || activeJob.runId !== runId) return;
+    if (!activeJob || activeJob.runId !== runId || activeJob.phase !== 'SEARCH') return;
     activeJob.navigationScheduled = false;
     void persistActiveJob();
-    armPageTimeout();
-    chrome.tabs.update(activeJob.tabId, { url: nextUrl });
+    armPageTimeout(SEARCH_TIMEOUT_MS);
+    chrome.tabs.update(activeJob.tabId, { url: nextUrl }).catch((error) => {
+      void finishJob(false, error?.message || 'Không thể mở trang tìm kiếm Shopee.');
+    });
   }, delay);
 }
 
@@ -185,6 +361,15 @@ async function logJob(message) {
   }).catch(() => undefined);
 }
 
+function detailProgress(job = activeJob) {
+  return {
+    enabled: Boolean(job?.includeDetails),
+    completed: Number(job?.detailCompleted || 0),
+    failed: Number(job?.detailFailed || 0),
+    total: Array.isArray(job?.products) ? job.products.length : 0
+  };
+}
+
 async function finishJob(success, error) {
   if (!activeJob) return;
   const job = activeJob;
@@ -194,7 +379,9 @@ async function finishJob(success, error) {
   try {
     await api(`/api/browser-agent/jobs/${job.runId}/${success ? 'complete' : 'fail'}`, {
       method: 'POST',
-      body: JSON.stringify(success ? { count: job.seen.length } : { error })
+      body: JSON.stringify(success
+        ? { count: job.seen.length, details: detailProgress(job) }
+        : { error })
     });
   } catch {
     // The dashboard can still stop or delete a run if the local API disappears.
@@ -204,8 +391,114 @@ async function finishJob(success, error) {
   }
 }
 
+async function beginDetailPhase() {
+  if (!activeJob || activeJob.phase === 'DETAIL') return;
+  if (!activeJob.includeDetails || !activeJob.products.length) {
+    await finishJob(true);
+    return;
+  }
+  clearPageTimeout();
+  activeJob.phase = 'DETAIL';
+  activeJob.navigationScheduled = false;
+  activeJob.detailIndex = 0;
+  activeJob.detailCompleted = 0;
+  activeJob.detailFailed = 0;
+  activeJob.currentProduct = null;
+  activeJob.detailHandledFor = null;
+  await persistActiveJob();
+  await logJob(`Starting product detail crawl for ${activeJob.products.length} products.`);
+  await navigateNextDetail();
+}
+
+async function navigateNextDetail() {
+  if (!activeJob || activeJob.phase !== 'DETAIL' || activeJob.navigationScheduled) return;
+  if (activeJob.detailIndex >= activeJob.products.length) {
+    await finishJob(true);
+    return;
+  }
+
+  clearPageTimeout();
+  const product = activeJob.products[activeJob.detailIndex];
+  activeJob.currentProduct = product;
+  activeJob.detailHandledFor = null;
+  activeJob.navigationScheduled = true;
+  const runId = activeJob.runId;
+  const productIndex = activeJob.detailIndex;
+  const delay = 3000 + Math.floor(Math.random() * 3000);
+  await persistActiveJob();
+  await logJob(
+    `Waiting ${Math.ceil(delay / 1000)} seconds before product detail ` +
+    `${productIndex + 1}/${activeJob.products.length}.`
+  );
+  setTimeout(() => {
+    if (
+      !activeJob ||
+      activeJob.runId !== runId ||
+      activeJob.phase !== 'DETAIL' ||
+      activeJob.detailIndex !== productIndex
+    ) return;
+    activeJob.navigationScheduled = false;
+    void persistActiveJob();
+    chrome.tabs.update(activeJob.tabId, { url: product.url }).then(() => {
+      armPageTimeout(DETAIL_TIMEOUT_MS);
+    }).catch((error) => {
+      void failCurrentDetail(error?.message || 'Không thể mở trang sản phẩm.');
+    });
+  }, delay);
+}
+
+async function patchCurrentDetail(detail) {
+  if (!activeJob?.currentProduct) return;
+  const projected = {
+    completed: activeJob.detailCompleted + (detail.detailStatus === 'FAILED' ? 0 : 1),
+    failed: activeJob.detailFailed + (detail.detailStatus === 'FAILED' ? 1 : 0),
+    total: activeJob.products.length
+  };
+  await api(
+    `/api/browser-agent/jobs/${activeJob.runId}/items/` +
+    `${encodeURIComponent(activeJob.currentProduct.itemId)}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ detail, progress: projected })
+    }
+  );
+  activeJob.detailCompleted = projected.completed;
+  activeJob.detailFailed = projected.failed;
+  activeJob.detailIndex += 1;
+  activeJob.currentProduct = null;
+  await persistActiveJob();
+  await navigateNextDetail();
+}
+
+async function completeCurrentDetail(detail) {
+  if (!activeJob?.currentProduct || activeJob.phase !== 'DETAIL') return;
+  const key = String(activeJob.currentProduct.itemId);
+  if (activeJob.detailHandledFor === key) return;
+  activeJob.detailHandledFor = key;
+  clearPageTimeout();
+  await persistActiveJob();
+  await patchCurrentDetail({ ...detail, detailStatus: 'COMPLETED' });
+}
+
+async function failCurrentDetail(error) {
+  if (!activeJob?.currentProduct || activeJob.phase !== 'DETAIL') return;
+  const key = String(activeJob.currentProduct.itemId);
+  if (activeJob.detailHandledFor === key) return;
+  activeJob.detailHandledFor = key;
+  clearPageTimeout();
+  await persistActiveJob();
+  await patchCurrentDetail({
+    detailStatus: 'FAILED',
+    detailError: String(error || 'Không lấy được chi tiết sản phẩm.')
+  });
+}
+
 async function processSearchResponse(detail, sender) {
-  if (!activeJob || sender.tab?.id !== activeJob.tabId) return;
+  if (
+    !activeJob ||
+    activeJob.phase !== 'SEARCH' ||
+    sender.tab?.id !== activeJob.tabId
+  ) return;
   const payload = detail?.payload;
   if (
     detail?.status === 401 ||
@@ -258,7 +551,7 @@ async function processSearchResponse(detail, sender) {
   }
 
   if (activeJob.seen.length >= activeJob.maxItems) {
-    await finishJob(true);
+    await beginDetailPhase();
     return;
   }
 
@@ -272,16 +565,69 @@ async function processSearchResponse(detail, sender) {
   await scheduleNextPage();
 }
 
+async function processDetailResponse(detail, sender) {
+  if (
+    !activeJob ||
+    activeJob.phase !== 'DETAIL' ||
+    sender.tab?.id !== activeJob.tabId ||
+    detail?.kind !== 'detail'
+  ) return;
+  const payload = detail?.payload;
+  if (
+    detail?.status === 401 ||
+    detail?.status === 403 ||
+    payload?.error === 90309999 ||
+    payload?.error_msg === 'Login Required'
+  ) {
+    await finishJob(false, 'Shopee yêu cầu đăng nhập lại trong Chrome.');
+    return;
+  }
+  if (detail?.status >= 400 || (payload?.error && payload.error !== 0)) {
+    await failCurrentDetail(
+      `Shopee detail API returned ${String(payload?.error || detail?.status)}.`
+    );
+    return;
+  }
+  const mapped = mapDetailPayload(payload, activeJob.currentProduct);
+  if (!mapped) return;
+  if (
+    mapped.itemId &&
+    String(mapped.itemId) !== String(activeJob.currentProduct?.itemId || '')
+  ) return;
+  await completeCurrentDetail(mapped);
+}
+
 async function processDomItems(items, sender) {
-  if (!activeJob || sender.tab?.id !== activeJob.tabId || !Array.isArray(items)) return;
+  if (
+    !activeJob ||
+    activeJob.phase !== 'SEARCH' ||
+    sender.tab?.id !== activeJob.tabId ||
+    !Array.isArray(items)
+  ) return;
   const storedCount = await storeItems(items);
   if (!storedCount) return;
   await logJob(`Captured ${storedCount} products from rendered Shopee cards.`);
   if (activeJob.seen.length >= activeJob.maxItems) {
-    await finishJob(true);
+    await beginDetailPhase();
     return;
   }
   await scheduleNextPage();
+}
+
+async function processDomDetail(detail, sender) {
+  if (
+    !activeJob ||
+    activeJob.phase !== 'DETAIL' ||
+    sender.tab?.id !== activeJob.tabId ||
+    !detail
+  ) return;
+  const currentId = String(activeJob.currentProduct?.itemId || '');
+  if (detail.itemId && String(detail.itemId) !== currentId) return;
+  await completeCurrentDetail({
+    ...detail,
+    itemId: currentId,
+    detailStatus: 'COMPLETED'
+  });
 }
 
 async function poll() {
@@ -292,12 +638,19 @@ async function poll() {
     const job = await response.json();
     activeJob = {
       ...job,
+      phase: 'SEARCH',
       page: 0,
       seen: [],
+      products: [],
+      detailIndex: 0,
+      detailCompleted: 0,
+      detailFailed: 0,
+      currentProduct: null,
+      detailHandledFor: null,
       tabId: null,
       unexpectedResponses: 0,
       navigationScheduled: false,
-      pageDeadline: Date.now() + 30000
+      pageDeadline: Date.now() + SEARCH_TIMEOUT_MS
     };
     await persistActiveJob();
     const tab = await chrome.tabs.create({
@@ -309,7 +662,7 @@ async function poll() {
     await chrome.tabs.update(tab.id, {
       url: searchUrl(job.keyword, 0)
     });
-    armPageTimeout();
+    armPageTimeout(SEARCH_TIMEOUT_MS);
   } catch (error) {
     if (activeJob) {
       await finishJob(false, error instanceof Error ? error.message : 'Không thể mở tab Shopee.');
@@ -336,7 +689,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } else if (message.type === 'POLL_NOW') {
       void poll();
     } else if (message.type === 'SHOPEE_RESPONSE') {
-      void processSearchResponse(message.detail, sender).catch((error) => {
+      const handler = message.detail?.kind === 'detail'
+        ? processDetailResponse
+        : processSearchResponse;
+      void handler(message.detail, sender).catch((error) => {
         void finishJob(
           false,
           error instanceof Error ? error.message : 'Không thể xử lý dữ liệu Shopee.'
@@ -347,6 +703,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         void finishJob(
           false,
           error instanceof Error ? error.message : 'Không thể xử lý card sản phẩm Shopee.'
+        ).catch(() => undefined);
+      });
+    } else if (message.type === 'SHOPEE_DOM_DETAIL') {
+      void processDomDetail(message.detail, sender).catch((error) => {
+        void finishJob(
+          false,
+          error instanceof Error ? error.message : 'Không thể lưu chi tiết sản phẩm Shopee.'
         ).catch(() => undefined);
       });
     } else if (
@@ -377,19 +740,27 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== 'omnicrawl-poll') return;
-  if (activeJob && activeJob.pageDeadline && Date.now() >= activeJob.pageDeadline) {
-    void finishJob(false, 'Không nhận được dữ liệu tìm kiếm từ Shopee sau 30 giây.')
-      .catch(() => undefined);
+  if (activeJob?.pageDeadline && Date.now() >= activeJob.pageDeadline) {
+    void handlePageTimeout().catch(() => undefined);
     return;
   }
   void poll();
 });
 
-stateReady.then(() => {
+stateReady.then(async () => {
   if (activeJob) {
-    armPageTimeout();
+    if (activeJob.navigationScheduled) {
+      activeJob.navigationScheduled = false;
+      if (activeJob.phase === 'SEARCH') activeJob.page = Math.max(0, activeJob.page - 1);
+      await persistActiveJob();
+      if (activeJob.phase === 'DETAIL') await navigateNextDetail();
+      else await scheduleNextPage();
+    } else if (activeJob.pageDeadline) {
+      const remaining = Math.max(1, activeJob.pageDeadline - Date.now());
+      pageTimer = setTimeout(() => void handlePageTimeout(), remaining);
+    } else if (activeJob.phase === 'DETAIL') {
+      await navigateNextDetail();
+    }
   }
-  if (config) {
-    schedulePoll(0);
-  }
+  if (config) schedulePoll(0);
 });
