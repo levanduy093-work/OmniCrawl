@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { Bot, Mail, Lock, ArrowRight } from 'lucide-react';
+import { Mail, Lock, ArrowRight } from 'lucide-react';
+import OmniCrawlLogo from './Logo';
 
 export default function Login({ onLogin }: { onLogin: (token: string, user: any) => void }) {
   const [isRegister, setIsRegister] = useState(false);
@@ -31,8 +32,8 @@ export default function Login({ onLogin }: { onLogin: (token: string, user: any)
   return (
     <div className="flex h-screen bg-[#F8F9FA] items-center justify-center font-sans">
       <div className="w-full max-w-md bg-white p-10 rounded-3xl shadow-sm border border-gray-100 text-center">
-        <div className="w-16 h-16 bg-blue-600 rounded-2xl flex items-center justify-center text-white mx-auto mb-6">
-          <Bot size={32} />
+        <div className="flex justify-center mb-6">
+          <OmniCrawlLogo size="lg" showText={true} />
         </div>
         <h1 className="text-2xl font-semibold text-gray-900 mb-2">
           {isRegister ? 'Create an Account' : 'Welcome to OmniCrawl'}

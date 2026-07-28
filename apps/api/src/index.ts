@@ -7,6 +7,9 @@ import * as path from 'path';
 import { exec } from 'child_process';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
+import dotenv from 'dotenv';
+
+dotenv.config({ path: path.resolve(__dirname, '..', '..', '..', '.env') });
 
 const app = express();
 app.use(cors());
@@ -128,6 +131,65 @@ app.get('/api/runs', requireAuth, async (req: any, res) => {
     include: { actor: true }
   });
   res.json(runs);
+});
+
+// List schedules
+app.get('/api/schedules', requireAuth, async (req: any, res) => {
+  const schedules = await prisma.schedule.findMany({
+    where: { userId: req.user.id },
+    include: { actor: true },
+    orderBy: { createdAt: 'desc' }
+  });
+  res.json(schedules);
+});
+
+// Create a schedule
+app.post('/api/schedules', requireAuth, async (req: any, res: any) => {
+  const { actorId, cron } = req.body;
+  if (!actorId || !cron) {
+    return res.status(400).json({ error: 'actorId and cron are required' });
+  }
+
+  // Verify actor exists and belongs to user or is public
+  const actor = await prisma.actor.findUnique({ where: { id: actorId } });
+  if (!actor) return res.status(404).json({ error: 'Actor not found' });
+  
+  if (actor.userId && actor.userId !== req.user.id) {
+    return res.status(403).json({ error: 'Unauthorized to use this actor' });
+  }
+
+  const schedule = await prisma.schedule.create({
+    data: {
+      actorId,
+      userId: req.user.id,
+      cron,
+      enabled: true
+    }
+  });
+  res.json(schedule);
+});
+
+// Delete a schedule
+app.delete('/api/schedules/:id', requireAuth, async (req: any, res: any) => {
+  const schedule = await prisma.schedule.findUnique({ where: { id: req.params.id } });
+  if (!schedule) return res.status(404).json({ error: 'Not found' });
+  if (schedule.userId !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
+
+  await prisma.schedule.delete({ where: { id: req.params.id } });
+  res.json({ success: true });
+});
+
+// Toggle a schedule
+app.patch('/api/schedules/:id', requireAuth, async (req: any, res: any) => {
+  const schedule = await prisma.schedule.findUnique({ where: { id: req.params.id } });
+  if (!schedule) return res.status(404).json({ error: 'Not found' });
+  if (schedule.userId !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
+
+  const updated = await prisma.schedule.update({
+    where: { id: req.params.id },
+    data: { enabled: !schedule.enabled }
+  });
+  res.json(updated);
 });
 
 // Get run details
