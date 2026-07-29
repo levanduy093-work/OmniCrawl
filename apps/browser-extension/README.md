@@ -19,12 +19,15 @@ When the Shopee option
 collected product in sequence and captures description, rating, stock, shop,
 images, attributes, and variations. It stores the product's average rating and
 total rating count, but never requests, paginates, or stores customer comments.
+Product galleries are accepted only from image lists scoped to the current
+Shopee `itemId`. The rendered-page fallback stays inside the product header and
+rejects links to other product IDs, so recommendation images are not mixed in.
 A failure on one product is recorded and the remaining products continue.
 If Shopee expires the authenticated session, the run pauses without discarding
 its queue, opens a focused login popup, and resumes the same tabs after login.
 Shopee search-page and product-page navigations use a single action scheduler.
 Only one Shopee tab is used, and external navigations are separated by a random
-1.5–2.5 second delay without a long cooldown. Search pages scroll downward in
+2.5–3.5 second delay without a long cooldown. Search pages scroll downward in
 small viewport-sized steps so lazy-loaded cards and images can stabilize before
 the crawler advances.
 Shopee login challenges and `/verify/traffic/error` are handled separately.

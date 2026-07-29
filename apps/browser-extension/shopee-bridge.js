@@ -606,9 +606,69 @@ function scrapeRenderedProductDetail() {
     .slice(0, 50000) || '';
   const ratingMatch = bodyText.slice(0, 12000).match(/(\d(?:[.,]\d)?)\s*(?:\/\s*5|đánh giá|rating)/i);
   const sold = renderedSoldValue(bodyText.slice(0, 12000));
-  const images = [...document.querySelectorAll('img')]
-    .map((image) => image.currentSrc || image.src)
-    .filter((url) => /(?:shopee|susercontent)\.(?:com|vn)|susercontent\.com/i.test(url))
+  const metaImage = document.querySelector('meta[property="og:image"]')?.content ||
+                    document.querySelector('meta[name="twitter:image"]')?.content;
+
+  const galleryNodeUrls = (root) => [
+    ...root.querySelectorAll(
+      'img, source[srcset], source[data-srcset], [style*="background-image"]'
+    )
+  ].filter((element) => {
+    const productAnchor = element.closest('a[href]');
+    if (!productAnchor) return true;
+    const linkedProduct = parseProductIds(productAnchor.href);
+    return !linkedProduct || String(linkedProduct.itemId) === String(ids.itemId);
+  }).flatMap((element) => {
+    if (element.tagName.toLowerCase() === 'img') {
+      const image = element;
+      const source = (
+        image.currentSrc ||
+        image.getAttribute('src') ||
+        image.getAttribute('data-src') ||
+        image.getAttribute('data-lazy-src') ||
+        ''
+      );
+      const srcset = (
+        image.getAttribute('srcset') ||
+        image.getAttribute('data-srcset') ||
+        ''
+      ).split(',').map((entry) => entry.trim().split(/\s+/)[0]).filter(Boolean);
+      return [source, ...srcset];
+    }
+    if (element.tagName.toLowerCase() === 'source') {
+      return (
+        element.getAttribute('srcset') ||
+        element.getAttribute('data-srcset') ||
+        ''
+      ).split(',').map((entry) => entry.trim().split(/\s+/)[0]).filter(Boolean);
+    }
+    const background = (
+      element.style?.backgroundImage ||
+      element.getAttribute('style') ||
+      ''
+    );
+    const match = background.match(/url\(['"]?(.*?)['"]?\)/);
+    return match?.[1] ? [match[1]] : [];
+  });
+
+  const titleNode = document.querySelector('h1');
+  let galleryRoot = null;
+  let ancestor = titleNode?.parentElement || null;
+  for (let depth = 0; ancestor && depth < 10; depth += 1) {
+    const urls = galleryNodeUrls(ancestor).filter(Boolean);
+    if (urls.length >= 2) {
+      galleryRoot = ancestor;
+      break;
+    }
+    if (ancestor === document.body || ancestor.tagName === 'MAIN') break;
+    ancestor = ancestor.parentElement;
+  }
+
+  const galleryUrls = galleryRoot ? galleryNodeUrls(galleryRoot) : [];
+  const images = [metaImage, ...galleryUrls]
+    .filter((url) => url && /(?:shopee|susercontent)\.(?:com|vn)|susercontent\.com\/file\//i.test(url))
+    .filter((url) => !/(?:badge|icon|avatar|logo)/i.test(url))
+    .map((url) => url.replace(/_tn(?=$|[?#])/, ''))
     .filter((url, index, all) => url && all.indexOf(url) === index)
     .slice(0, 30);
 
@@ -619,7 +679,8 @@ function scrapeRenderedProductDetail() {
     description,
     rating: ratingMatch ? Number(ratingMatch[1].replace(',', '.')) : null,
     sold: sold || null,
-    images
+    images,
+    _galleryComplete: false
   };
 }
 

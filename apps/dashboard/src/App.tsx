@@ -22,7 +22,7 @@ import Login from './Login'
 import OmniCrawlLogo from './Logo'
 import './App.css'
 
-const REQUIRED_BROWSER_AGENT_VERSION = '0.11.9'
+const REQUIRED_BROWSER_AGENT_VERSION = '0.11.10'
 
 function isVersionAtLeast(current: string | null, required: string) {
   if (!current) return false
@@ -1157,11 +1157,20 @@ function RunDetailModal({
   try {
     const schema = JSON.parse(detail?.run?.actor?.outputSchema || '{}')
     schemaColumns = Object.keys(schema?.properties || {})
+
+    const shortLabels: Record<string, string> = {
+      'Điểm đánh giá trung bình của sản phẩm': 'Điểm đánh giá',
+      'Tổng số lượt đánh giá sản phẩm': 'Lượt đánh giá',
+      'Liên kết sản phẩm': 'Liên kết',
+      'Tên cửa hàng': 'Cửa hàng',
+      'Bộ ảnh sản phẩm': 'Bộ ảnh'
+    }
+
     schemaLabels = Object.fromEntries(
-      Object.entries(schema?.properties || {}).map(([key, property]: [string, any]) => [
-        key,
-        typeof property?.title === 'string' ? property.title : humanizeFieldName(key)
-      ])
+      Object.entries(schema?.properties || {}).map(([key, property]: [string, any]) => {
+        const title = typeof property?.title === 'string' ? property.title : humanizeFieldName(key)
+        return [key, shortLabels[title] || title]
+      })
     )
   } catch {
     schemaColumns = []
@@ -1192,6 +1201,9 @@ function RunDetailModal({
   const renderValue = (value: unknown, column: string, recordKey = '') => {
     if (value === null || value === undefined || value === '') {
       return <span className="text-gray-300">—</span>
+    }
+    if (column === 'rating' && typeof value === 'number') {
+      return <span>{value.toFixed(1)}</span>
     }
     if (column === 'sold') {
       return <span>{displaySoldValue(value)}</span>
@@ -1308,7 +1320,7 @@ function RunDetailModal({
     if (column === 'images' && Array.isArray(value)) {
       if (!value.length) return <span className="text-gray-400">Chưa có ảnh</span>
       return (
-        <div className="flex items-center gap-1.5 min-w-48">
+        <div className="flex items-center gap-1.5 min-w-[16rem]">
           {value.slice(0, 4).map((imageUrl: unknown, index: number) => (
             <button
               key={`${String(imageUrl)}-${index}`}
@@ -1324,7 +1336,7 @@ function RunDetailModal({
                 alt=""
                 referrerPolicy="no-referrer"
                 loading="lazy"
-                className="w-11 h-11 rounded-lg object-cover bg-gray-100 border border-gray-200 hover:opacity-80"
+                className="w-14 h-14 rounded-lg object-cover bg-gray-100 border border-gray-200 hover:opacity-80"
               />
             </button>
           ))}
@@ -1396,7 +1408,7 @@ function RunDetailModal({
         )
       }
       return (
-        <a href={text} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline block max-w-xs truncate">
+        <a href={text} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline block max-w-[14rem] truncate text-left">
           {text}
         </a>
       )
@@ -1479,17 +1491,16 @@ function RunDetailModal({
 
             <div className="flex-1 overflow-auto">
               {records.length > 0 ? (
-                <table className="min-w-full text-left text-sm">
+                <table className="min-w-full text-center text-sm">
                   <thead className="sticky top-0 bg-white border-b border-gray-200 text-gray-700 font-semibold">
                     <tr>
-                      <th className="w-10 px-3 py-3"></th>
-                      <th className="px-4 py-3">STT</th>
+                      <th className="w-10 px-2 py-2.5"></th>
+                      <th className="px-3 py-2.5">STT</th>
                       {summaryColumns.map((column) => (
-                        <th key={column} className="px-4 py-3 whitespace-nowrap">
+                        <th key={column} className={`px-3 py-2.5 whitespace-nowrap ${column === 'title' ? 'text-left' : ''}`}>
                           {schemaLabels[column] || humanizeFieldName(column)}
                         </th>
                       ))}
-                      {detailColumns.length > 0 && <th className="px-4 py-3 text-right">Chi tiết</th>}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
@@ -1503,31 +1514,22 @@ function RunDetailModal({
                               isExpanded ? 'bg-blue-50/30 font-medium' : ''
                             }`}
                           >
-                            <td className="w-10 px-3 py-3 text-gray-400">
+                            <td className="w-10 px-2 py-2 text-gray-400">
                               <button type="button" className="p-1 rounded hover:bg-gray-100 transition-transform">
                                 <ChevronRight size={16} className={`transition-transform duration-200 ${isExpanded ? 'rotate-90 text-blue-600' : ''}`} />
                               </button>
                             </td>
-                            <td className="px-4 py-3 text-gray-400 font-medium">{item.position + 1}</td>
+                            <td className="px-3 py-2 text-gray-400 font-medium">{item.position + 1}</td>
                             {summaryColumns.map((column) => (
-                              <td key={column} className="px-4 py-3 text-gray-700">
+                              <td key={column} className={`px-3 py-2 text-gray-700 ${column === 'title' ? 'text-left' : ''}`}>
                                 {renderValue(item.data?.[column], column, String(item.data?.itemId || item.id))}
                               </td>
                             ))}
-                            {detailColumns.length > 0 && (
-                              <td className="px-4 py-3 text-right">
-                                <span className={`inline-flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg font-medium transition-colors ${
-                                  isExpanded ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-                                }`}>
-                                  {isExpanded ? 'Thu gọn' : 'Xem chi tiết'}
-                                </span>
-                              </td>
-                            )}
                           </tr>
 
                           {isExpanded && (
                             <tr key={`${item.id}-detail`} className="bg-slate-50/80 border-b border-gray-200">
-                              <td colSpan={summaryColumns.length + 3} className="p-4">
+                              <td colSpan={summaryColumns.length + 2} className="p-4">
                                 <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-200/80 space-y-4">
                                   <div className="flex items-center justify-between border-b border-gray-100 pb-3">
                                     <h4 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
