@@ -81,6 +81,87 @@ function scrapeRenderedShopeeReviews() {
   return reviews;
 }
 
+function findShopeeNextReviewButton() {
+  const pageControllers = document.querySelectorAll(
+    '.shopee-page-controller, [class*="page-controller"], [class*="pagination"]'
+  );
+
+  for (const controller of pageControllers) {
+    const buttons = [...controller.querySelectorAll('button')];
+    if (!buttons.length) continue;
+
+    const numericButtons = buttons.filter((b) => /^\d+$/.test((b.textContent || '').trim()));
+
+    if (numericButtons.length > 0) {
+      const activeNumBtn = numericButtons.find((b) => (
+        b.classList.contains('shopee-button-solid--primary') ||
+        b.classList.contains('shopee-button-no-outline--active') ||
+        b.className.includes('active') ||
+        b.className.includes('primary') ||
+        b.getAttribute('aria-current') === 'page'
+      ));
+
+      if (activeNumBtn) {
+        const currentNum = parseInt((activeNumBtn.textContent || '').trim(), 10);
+        if (!isNaN(currentNum)) {
+          const targetNumStr = String(currentNum + 1);
+          const targetBtn = buttons.find((b) => (b.textContent || '').trim() === targetNumStr);
+          if (targetBtn && !targetBtn.disabled && targetBtn.getAttribute('aria-disabled') !== 'true') {
+            return targetBtn;
+          }
+        }
+      }
+
+      const activeIndex = numericButtons.findIndex((b) => (
+        b.classList.contains('shopee-button-solid--primary') ||
+        b.className.includes('active') ||
+        b.className.includes('primary')
+      ));
+      if (activeIndex !== -1 && activeIndex + 1 < numericButtons.length) {
+        const nextNumBtn = numericButtons[activeIndex + 1];
+        if (nextNumBtn && !nextNumBtn.disabled && nextNumBtn.getAttribute('aria-disabled') !== 'true') {
+          return nextNumBtn;
+        }
+      }
+    }
+
+    const nextArrowBtn = controller.querySelector([
+      '.shopee-icon-button--right',
+      '[class*="icon-button--right"]',
+      'button[aria-label*="next" i]',
+      'button[aria-label*="tiếp" i]',
+      'button[class*="right"]',
+      'button[class*="next"]'
+    ].join(','));
+
+    if (
+      nextArrowBtn &&
+      !nextArrowBtn.disabled &&
+      nextArrowBtn.getAttribute('aria-disabled') !== 'true' &&
+      !nextArrowBtn.classList.contains('shopee-icon-button--disabled')
+    ) {
+      return nextArrowBtn;
+    }
+  }
+
+  const allPageBtns = [...document.querySelectorAll('.shopee-page-controller button, [class*="page-controller"] button')];
+  const activePageBtn = allPageBtns.find((b) => /^\d+$/.test((b.textContent || '').trim()) && (
+    b.classList.contains('shopee-button-solid--primary') ||
+    b.className.includes('active') ||
+    b.className.includes('primary')
+  ));
+  if (activePageBtn) {
+    const currentNum = parseInt((activePageBtn.textContent || '').trim(), 10);
+    if (!isNaN(currentNum)) {
+      const targetStr = String(currentNum + 1);
+      const target = allPageBtns.find((b) => (b.textContent || '').trim() === targetStr);
+      if (target && !target.disabled && target.getAttribute('aria-disabled') !== 'true') return target;
+    }
+  }
+
+  return null;
+}
+
 async function collectRenderedShopeeReviews(limit) {
   const maxReviews = Math.min(100, Math.max(0, Math.floor(limit || 20)));
   const reviewHeading = [...document.querySelectorAll('h2, h3, div, span')]
@@ -91,11 +172,11 @@ async function collectRenderedShopeeReviews(limit) {
       )
   ));
   reviewHeading?.scrollIntoView({ block: 'start', behavior: 'auto' });
-  await new Promise((resolve) => setTimeout(resolve, 1400));
+  await new Promise((resolve) => setTimeout(resolve, 300));
 
   const accumulated = new Map();
   let noGrowthRounds = 0;
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  for (let attempt = 0; attempt < 25; attempt += 1) {
     const before = accumulated.size;
     for (const review of scrapeRenderedShopeeReviews()) {
       accumulated.set(review.reviewId, review);
@@ -111,26 +192,15 @@ async function collectRenderedShopeeReviews(limit) {
       block: 'end',
       behavior: 'auto'
     });
-    const nextButton = document.querySelector([
-      '.shopee-page-controller .shopee-icon-button--right',
-      '.shopee-product-rating__page-controller .shopee-icon-button--right',
-      'button[aria-label*="next" i]',
-      'button[aria-label*="tiếp" i]',
-      '[class*="Review"] button[class*="right"]'
-    ].join(','));
-    const disabled = (
-      !nextButton ||
-      nextButton.disabled ||
-      nextButton.getAttribute('aria-disabled') === 'true' ||
-      nextButton.classList.contains('shopee-icon-button--disabled')
-    );
-    if (!disabled) {
+
+    const nextButton = findShopeeNextReviewButton();
+    if (nextButton) {
       nextButton.click();
-      await new Promise((resolve) => setTimeout(resolve, 1700));
+      await new Promise((resolve) => setTimeout(resolve, 450));
       continue;
     }
     if (noGrowthRounds >= 3) break;
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await new Promise((resolve) => setTimeout(resolve, 300));
   }
   const reviews = [...accumulated.values()].slice(0, maxReviews);
   if (reviews.length) {

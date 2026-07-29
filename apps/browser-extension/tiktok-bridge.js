@@ -181,7 +181,7 @@ async function loadMoreTikTokResults() {
     scroller.scrollTop = scroller.scrollHeight;
     window.scrollTo(0, scroller.scrollHeight);
     captureRenderedItems();
-    await new Promise((resolve) => setTimeout(resolve, 1400));
+    await new Promise((resolve) => setTimeout(resolve, 500));
 
     const currentHeight = scroller.scrollHeight;
     const currentCount = countResults();
@@ -373,11 +373,11 @@ async function initializeTikTokCapture() {
   const parsedPage = parseTikTokUrl(location.href);
   let shopTabFound = false;
   if (!parsedPage && isProductSearchPage()) {
-    await new Promise((resolve) => setTimeout(resolve, 2500));
+    await new Promise((resolve) => setTimeout(resolve, 800));
     const shopTab = findShopTab();
     shopTabFound = Boolean(shopTab);
     shopTab?.click();
-    if (shopTab) await new Promise((resolve) => setTimeout(resolve, 2500));
+    if (shopTab) await new Promise((resolve) => setTimeout(resolve, 800));
   }
   chrome.runtime.sendMessage({
     type: 'TIKTOK_PAGE_STATUS',
@@ -389,7 +389,7 @@ async function initializeTikTokCapture() {
     title: document.title
   }).catch(() => undefined);
   startDomCapture();
-  setTimeout(sendHydrationPayloads, 3000);
+  setTimeout(sendHydrationPayloads, 800);
 }
 
 if (document.readyState === 'loading') {

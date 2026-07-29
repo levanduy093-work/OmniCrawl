@@ -99,7 +99,7 @@
     let total = null;
     try {
       while (ratings.length < maxReviews) {
-        const pageLimit = Math.min(20, maxReviews - ratings.length);
+        const pageLimit = Math.min(6, Math.max(1, maxReviews - ratings.length));
         const params = new URLSearchParams({
           exclude_filter: '1',
           filter: '0',
@@ -111,19 +111,31 @@
           shopid: shopId,
           type: '0'
         });
-        const url = `/api/v2/item/get_ratings?${params.toString()}`;
-        const response = await originalFetch.call(window, url, {
+        let url = `/api/v2/item/get_ratings?${params.toString()}`;
+        let response = await originalFetch.call(window, url, {
           credentials: 'include',
           headers: {
             Accept: 'application/json',
             'X-Api-Source': 'pc',
             'X-Requested-With': 'XMLHttpRequest'
           }
-        });
-        const payload = await response.json();
-        if (!response.ok || (payload?.error && payload.error !== 0)) {
-          throw new Error(payload?.error_msg || `Shopee ratings API returned ${response.status}`);
+        }).catch(() => null);
+
+        if (!response || !response.ok) {
+          url = `/api/v4/item/get_ratings?${params.toString()}`;
+          response = await originalFetch.call(window, url, {
+            credentials: 'include',
+            headers: {
+              Accept: 'application/json',
+              'X-Api-Source': 'pc',
+              'X-Requested-With': 'XMLHttpRequest'
+            }
+          }).catch(() => null);
         }
+
+        if (!response || !response.ok) break;
+        const payload = await response.json().catch(() => null);
+        if (!payload || (payload.error && payload.error !== 0)) break;
         const pageRatings = payload?.data?.ratings || payload?.ratings || [];
         total = Number(payload?.data?.item_rating_summary?.rating_total ?? total);
         if (!Array.isArray(pageRatings) || pageRatings.length === 0) break;
@@ -141,7 +153,7 @@
         offset += pageRatings.length;
         if (pageRatings.length < pageLimit || (total !== null && offset >= total)) break;
         await new Promise((resolve) => {
-          setTimeout(resolve, 800 + Math.floor(Math.random() * 700));
+          setTimeout(resolve, 150 + Math.floor(Math.random() * 200));
         });
       }
       emit({

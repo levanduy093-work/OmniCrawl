@@ -1098,10 +1098,10 @@ async function scheduleNextPage() {
   const runId = activeJob.runId;
   const nextPage = activeJob.scheduledPage;
   const nextUrl = searchUrlForJob(activeJob, nextPage);
-  const delay = 9000 + Math.floor(Math.random() * 6000);
+  const delay = 1000 + Math.floor(Math.random() * 1000);
   await persistActiveJob();
   await logJob(
-    `Waiting ${Math.ceil(delay / 1000)} seconds before loading ` +
+    `Waiting ${(delay / 1000).toFixed(1)} seconds before loading ` +
     `${platformLabel(activeJob)} page ${nextPage}.`
   );
   setTimeout(() => {
@@ -1232,10 +1232,10 @@ async function navigateNextDetail() {
   activeJob.navigationScheduled = true;
   const runId = activeJob.runId;
   const productIndex = activeJob.detailIndex;
-  const delay = 3000 + Math.floor(Math.random() * 3000);
+  const delay = 400 + Math.floor(Math.random() * 400);
   await persistActiveJob();
   await logJob(
-    `Waiting ${Math.ceil(delay / 1000)} seconds before ${platformLabel(activeJob)} detail ` +
+    `Waiting ${(delay / 1000).toFixed(1)} seconds before ${platformLabel(activeJob)} detail ` +
     `${productIndex + 1}/${activeJob.products.length}.`
   );
   setTimeout(() => {
