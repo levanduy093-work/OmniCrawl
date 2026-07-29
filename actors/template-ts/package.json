@@ -1,15 +1,19 @@
 {
   "name": "template-ts",
   "version": "1.0.0",
+  "description": "Standard OmniCrawl TypeScript Scraper Template",
   "main": "dist/main.js",
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "test": "tsc --noEmit"
   },
   "dependencies": {
-    "@omnicrawl/sdk": "workspace:*"
+    "@omnicrawl/sdk": "workspace:^",
+    "crawlee": "^3.17.0",
+    "playwright": "^1.62.0"
   },
   "devDependencies": {
-    "typescript": "^5.4.0",
-    "@types/node": "^20.0.0"
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
   }
 }

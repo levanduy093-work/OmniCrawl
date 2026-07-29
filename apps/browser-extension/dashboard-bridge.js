@@ -56,6 +56,13 @@ window.addEventListener('message', (event) => {
     sendToBackground({ type: 'POLL_NOW' }).catch(() => undefined);
   }
 
+  if (message.type === 'STOP_JOB') {
+    sendToBackground({
+      type: 'STOP_JOB',
+      runId: String(message.runId || '')
+    }).catch(() => undefined);
+  }
+
   if (message.type === 'OPEN_TAB') {
     sendToBackground({ type: 'OPEN_TAB', url: message.url }).catch(() => undefined);
   }

@@ -2,6 +2,8 @@ let config = null;
 let activeJob = null;
 let pollTimer = null;
 let pageTimer = null;
+let searchMessageQueue = Promise.resolve();
+let reviewMessageQueue = Promise.resolve();
 
 const SEARCH_TIMEOUT_MS = 30000;
 const TIKTOK_SEARCH_TIMEOUT_MS = 45000;
@@ -30,6 +32,8 @@ const stateReady = chrome.storage.session.get(['config', 'activeJob']).then((sto
     activeJob.reviewSeen = Array.isArray(activeJob.reviewSeen)
       ? activeJob.reviewSeen
       : [];
+    activeJob.reviewApiPending = Boolean(activeJob.reviewApiPending);
+    activeJob.reviewDomFinal = Boolean(activeJob.reviewDomFinal);
     activeJob.windowId = activeJob.windowId == null ? null : Number(activeJob.windowId);
     activeJob.scheduledPage = activeJob.scheduledPage == null
       ? null
@@ -38,11 +42,40 @@ const stateReady = chrome.storage.session.get(['config', 'activeJob']).then((sto
     activeJob.lastNoNewPage = activeJob.lastNoNewPage == null
       ? null
       : Number(activeJob.lastNoNewPage);
+    activeJob.pageNewItemCounts = (
+      activeJob.pageNewItemCounts &&
+      typeof activeJob.pageNewItemCounts === 'object'
+    ) ? activeJob.pageNewItemCounts : {};
   }
 });
 
 function persistActiveJob() {
   return chrome.storage.session.set({ activeJob });
+}
+
+function enqueueSearchMessage(handler, fallbackError) {
+  const task = searchMessageQueue
+    .catch(() => undefined)
+    .then(handler);
+  searchMessageQueue = task.catch(() => undefined);
+  void task.catch((error) => {
+    void finishJob(
+      false,
+      error instanceof Error ? error.message : fallbackError
+    ).catch(() => undefined);
+  });
+}
+
+function enqueueReviewMessage(handler, fallbackError) {
+  const task = reviewMessageQueue
+    .catch(() => undefined)
+    .then(handler);
+  reviewMessageQueue = task.catch(() => undefined);
+  void task.catch((error) => {
+    void failCurrentDetail(
+      error instanceof Error ? error.message : fallbackError
+    );
+  });
 }
 
 function clearPageTimeout() {
@@ -195,6 +228,9 @@ async function createCrawlerWindow(job) {
   if (!tab?.id || !crawlerWindow.id) {
     throw new Error('Không thể tạo cửa sổ Browser Agent riêng.');
   }
+  job.tabId = tab.id;
+  job.windowId = crawlerWindow.id;
+  await persistActiveJob();
   await chrome.tabs.update(tab.id, {
     active: true,
     url: searchUrlForJob(job, 0)
@@ -1038,6 +1074,40 @@ async function storeItems(items) {
   return freshItems.length;
 }
 
+async function recordPageItems(page, count) {
+  if (!activeJob || !count) return;
+  const key = String(page);
+  activeJob.pageNewItemCounts = activeJob.pageNewItemCounts || {};
+  activeJob.pageNewItemCounts[key] =
+    Number(activeJob.pageNewItemCounts[key] || 0) + Number(count);
+  await persistActiveJob();
+}
+
+function shopeeSearchPageFromUrl(value, fallbackPage) {
+  try {
+    const url = new URL(String(value || ''), 'https://shopee.vn');
+    const explicitPageValue = url.searchParams.get('page');
+    const explicitPage = Number(explicitPageValue);
+    if (
+      explicitPageValue !== null &&
+      explicitPageValue !== '' &&
+      Number.isInteger(explicitPage) &&
+      explicitPage >= 0
+    ) return explicitPage;
+    const newest = Number(url.searchParams.get('newest'));
+    const limit = Number(url.searchParams.get('limit'));
+    if (
+      Number.isFinite(newest) &&
+      newest >= 0 &&
+      Number.isFinite(limit) &&
+      limit > 0
+    ) return Math.floor(newest / limit);
+  } catch {
+    // Fall back to the active page for legacy Shopee response URLs.
+  }
+  return Number(fallbackPage || 0);
+}
+
 async function activateAndScrollTikTok(runId, tabId, page, fallbackUrl) {
   let returnTabId = null;
   try {
@@ -1205,6 +1275,8 @@ async function beginDetailPhase() {
   activeJob.reviewsApiError = '';
   activeJob.reviewBuffer = [];
   activeJob.reviewSeen = [];
+  activeJob.reviewApiPending = false;
+  activeJob.reviewDomFinal = false;
   await persistActiveJob();
   await logJob(
     `Starting ${platformLabel(activeJob)} detail and review crawl for ` +
@@ -1229,6 +1301,8 @@ async function navigateNextDetail() {
   activeJob.reviewsApiError = '';
   activeJob.reviewBuffer = [];
   activeJob.reviewSeen = [];
+  activeJob.reviewApiPending = false;
+  activeJob.reviewDomFinal = false;
   activeJob.navigationScheduled = true;
   const runId = activeJob.runId;
   const productIndex = activeJob.detailIndex;
@@ -1279,6 +1353,8 @@ async function patchCurrentDetail(detail) {
   activeJob.reviewsApiError = '';
   activeJob.reviewBuffer = [];
   activeJob.reviewSeen = [];
+  activeJob.reviewApiPending = false;
+  activeJob.reviewDomFinal = false;
   await persistActiveJob();
   await navigateNextDetail();
 }
@@ -1312,6 +1388,8 @@ async function requestReviewsForCurrent(detail) {
   if (activeJob.reviewRequestedFor === key) return;
   activeJob.pendingDetailData = detail;
   activeJob.reviewRequestedFor = key;
+  activeJob.reviewApiPending = activeJob.platform === 'shopee';
+  activeJob.reviewDomFinal = false;
   await persistActiveJob();
 
   const limit = maxReviewsForJob(activeJob);
@@ -1384,6 +1462,8 @@ async function processSearchResponse(detail, sender) {
     activeJob.phase !== 'SEARCH' ||
     sender.tab?.id !== activeJob.tabId
   ) return;
+  const responsePage = shopeeSearchPageFromUrl(detail?.url, activeJob.page);
+  if (responsePage !== activeJob.page) return;
   const payload = detail?.payload;
   if (
     detail?.status === 401 ||
@@ -1413,10 +1493,11 @@ async function processSearchResponse(detail, sender) {
 
   const mappedItems = rawItems.map((entry, index) => mapItem(entry, {
     keyword: activeJob.keyword,
-    page: activeJob.page,
+    page: responsePage,
     position: index + 1
   }));
   const storedCount = await storeItems(mappedItems);
+  await recordPageItems(responsePage, storedCount);
 
   if (!rawItems.length && activeJob.seen.length === 0) {
     await logJob('Received an empty initial item list; waiting for the populated search response.');
@@ -1453,7 +1534,10 @@ async function processSearchResponse(detail, sender) {
     return;
   }
 
-  await scheduleNextPage();
+  await logJob(
+    `Captured ${storedCount} products from the Shopee API on page ${responsePage}; ` +
+    'waiting for the rendered-page scan to finish.'
+  );
 }
 
 async function processTikTokSearchResponse(detail, sender) {
@@ -1555,8 +1639,27 @@ async function processReviewsResponse(detail, sender) {
     detail?.kind !== 'reviews' ||
     !activeJob.pendingDetailData
   ) return;
-  const reviews = mapReviewsPayload(detail?.payload);
-  const error = String(detail?.payload?.error || '');
+  const payload = detail?.payload;
+  let responseItemId = String(payload?.omnicrawlItemId || '');
+  if (!responseItemId) {
+    try {
+      responseItemId = String(
+        new URL(String(detail?.url || ''), 'https://shopee.vn')
+          .searchParams.get('itemid') || ''
+      );
+    } catch {
+      responseItemId = '';
+    }
+  }
+  const currentItemId = String(activeJob.currentProduct?.itemId || '');
+  if (responseItemId && responseItemId !== currentItemId) return;
+  const isRequestedFinal = Boolean(payload?.omnicrawlFinal);
+  if (isRequestedFinal) {
+    activeJob.reviewApiPending = false;
+    await persistActiveJob();
+  }
+  const reviews = mapReviewsPayload(payload);
+  const error = String(payload?.error || '');
   const bufferedReviews = await mergeReviewBuffer(reviews);
   if (error && reviews.length === 0) {
     activeJob.reviewsApiError = error;
@@ -1564,11 +1667,20 @@ async function processReviewsResponse(detail, sender) {
     await logJob(
       `Shopee review API was unavailable (${error}); waiting for rendered reviews.`
     );
+    if (isRequestedFinal && activeJob.reviewDomFinal) {
+      await completeCurrentDetail({
+        ...activeJob.pendingDetailData,
+        reviewsCollected: bufferedReviews.length,
+        reviews: bufferedReviews,
+        reviewsStatus: bufferedReviews.length ? 'PARTIAL' : 'FAILED',
+        reviewsError: error
+      });
+    }
     return;
   }
   const totalValue = Number(
-    detail?.payload?.total ??
-    detail?.payload?.data?.item_rating_summary?.rating_total
+    payload?.total ??
+    payload?.data?.item_rating_summary?.rating_total
   );
   const total = Number.isFinite(totalValue) && totalValue >= 0 ? totalValue : null;
   const target = total === null
@@ -1579,6 +1691,15 @@ async function processReviewsResponse(detail, sender) {
       `Captured ${bufferedReviews.length}/${target} Shopee reviews; ` +
       'continuing review pagination.'
     );
+    if (isRequestedFinal && activeJob.reviewDomFinal) {
+      await completeCurrentDetail({
+        ...activeJob.pendingDetailData,
+        reviewsCollected: bufferedReviews.length,
+        reviews: bufferedReviews,
+        reviewsStatus: 'PARTIAL',
+        reviewsError: activeJob.reviewsApiError || ''
+      });
+    }
     return;
   }
   const reviewsStatus = error
@@ -1659,7 +1780,9 @@ async function processTikTokReviewsResponse(detail, sender) {
   });
 }
 
-async function processDomReviews(reviews, sender, platform, isFinal = false) {
+async function processDomReviews(message, sender, platform) {
+  const reviews = message?.reviews;
+  const isFinal = Boolean(message?.isFinal);
   if (
     !activeJob ||
     activeJob.platform !== platform ||
@@ -1668,6 +1791,15 @@ async function processDomReviews(reviews, sender, platform, isFinal = false) {
     !activeJob.pendingDetailData ||
     !Array.isArray(reviews)
   ) return;
+  if (
+    platform === 'shopee' &&
+    message?.itemId &&
+    String(message.itemId) !== String(activeJob.currentProduct?.itemId || '')
+  ) return;
+  if (platform === 'shopee' && isFinal) {
+    activeJob.reviewDomFinal = true;
+    await persistActiveJob();
+  }
   const mapped = reviews
     .slice(0, activeJob.maxReviewsPerProduct)
     .map((review) => ({
@@ -1684,7 +1816,32 @@ async function processDomReviews(reviews, sender, platform, isFinal = false) {
       shopReply: String(review?.shopReply || '')
     }))
     .filter((review) => review.reviewId || review.comment);
-  if (!mapped.length && !(activeJob.reviewBuffer || []).length) return;
+  if (!mapped.length && !(activeJob.reviewBuffer || []).length) {
+    if (
+      platform === 'shopee' &&
+      isFinal &&
+      activeJob.reviewApiPending
+    ) {
+      await logJob('Rendered reviews finished; waiting for Shopee API pagination.');
+      return;
+    }
+    if (platform === 'shopee' && isFinal) {
+      const expected = expectedReviewTarget(
+        activeJob.pendingDetailData?.ratingCount,
+        activeJob
+      );
+      await completeCurrentDetail({
+        ...activeJob.pendingDetailData,
+        reviewsCollected: 0,
+        reviews: [],
+        reviewsStatus: expected === 0 ? 'COMPLETED' : 'FAILED',
+        reviewsError: activeJob.reviewsApiError || (
+          expected === 0 ? '' : 'Shopee returned no reviews for this product.'
+        )
+      });
+    }
+    return;
+  }
   const bufferedReviews = await mergeReviewBuffer(mapped);
   const expectedValue = (
     platform === 'tiktok'
@@ -1694,10 +1851,21 @@ async function processDomReviews(reviews, sender, platform, isFinal = false) {
   const expected = expectedReviewTarget(expectedValue, activeJob);
   const reachedRequestedCount = bufferedReviews.length >= expected;
 
-  if (!reachedRequestedCount && !isFinal) {
+  if (
+    !reachedRequestedCount &&
+    (
+      !isFinal ||
+      (platform === 'shopee' && activeJob.reviewApiPending)
+    )
+  ) {
     await logJob(
       `Captured ${bufferedReviews.length}/${expected} rendered ${platformLabel(activeJob)} ` +
-      `${platform === 'tiktok' ? 'comments/reviews' : 'reviews'}; continuing review pagination.`
+      `${platform === 'tiktok' ? 'comments/reviews' : 'reviews'}; ` +
+      (
+        platform === 'shopee' && isFinal
+          ? 'waiting for Shopee API pagination.'
+          : 'continuing review pagination.'
+      )
     );
     return;
   }
@@ -1718,23 +1886,50 @@ async function processDomReviews(reviews, sender, platform, isFinal = false) {
   });
 }
 
-async function processDomItems(items, sender) {
+async function processDomItems(message, sender) {
+  const items = message?.items;
   if (
     !activeJob ||
     activeJob.phase !== 'SEARCH' ||
     sender.tab?.id !== activeJob.tabId ||
     !Array.isArray(items)
   ) return;
+  const messagePage = Number(message?.page ?? activeJob.page);
+  if (
+    activeJob.platform === 'shopee' &&
+    (!Number.isInteger(messagePage) || messagePage !== activeJob.page)
+  ) return;
   const storedCount = await storeItems(items);
-  if (!storedCount) return;
-  await logJob(
-    `Captured ${storedCount} items from rendered ${platformLabel(activeJob)} cards.`
-  );
+  await recordPageItems(messagePage, storedCount);
+  if (storedCount) {
+    await logJob(
+      `Captured ${storedCount} items from rendered ${platformLabel(activeJob)} cards.`
+    );
+  }
   if (activeJob.seen.length >= activeJob.maxItems) {
     await beginDetailPhase();
     return;
   }
-  await scheduleNextPage();
+  if (activeJob.platform !== 'shopee' || !message?.isFinal) {
+    if (activeJob.platform !== 'shopee' && storedCount) await scheduleNextPage();
+    return;
+  }
+  const pageNewCount = Number(
+    activeJob.pageNewItemCounts?.[String(messagePage)] || 0
+  );
+  if (pageNewCount > 0) {
+    await logJob(
+      `Finished Shopee page ${messagePage} with ${pageNewCount} new products.`
+    );
+    await scheduleNextPage();
+    return;
+  }
+  if (activeJob.seen.length > 0) {
+    await continueAfterNoNewSearchData(
+      `Finished Shopee page ${messagePage} without new products; continuing with ` +
+      `${activeJob.seen.length} products already collected.`
+    );
+  }
 }
 
 async function processDomDetail(detail, sender) {
@@ -1753,8 +1948,37 @@ async function processDomDetail(detail, sender) {
   });
 }
 
+async function closeActiveBrowserJob(runId) {
+  if (!activeJob || String(activeJob.runId) !== String(runId || '')) return false;
+  const job = activeJob;
+  activeJob = null;
+  clearTimeout(pageTimer);
+  await persistActiveJob();
+  if (job.windowId) {
+    await chrome.windows.remove(job.windowId).catch(() => undefined);
+  } else if (job.tabId) {
+    await chrome.tabs.remove(job.tabId).catch(() => undefined);
+  }
+  schedulePoll(1000);
+  return true;
+}
+
+async function syncActiveBrowserJobStatus() {
+  if (!activeJob) return;
+  const runId = activeJob.runId;
+  const response = await api(`/api/runs/${encodeURIComponent(runId)}`);
+  const run = await response.json();
+  if (['STOPPED', 'SUCCESS', 'FAILED'].includes(String(run?.status || ''))) {
+    await closeActiveBrowserJob(runId);
+  }
+}
+
 async function poll() {
-  if (!config?.token || activeJob) return;
+  if (!config?.token) return;
+  if (activeJob) {
+    await syncActiveBrowserJobStatus().catch(() => undefined);
+    return;
+  }
   try {
     const response = await api('/api/browser-agent/jobs/next');
     if (response.status === 204) return;
@@ -1777,6 +2001,8 @@ async function poll() {
       reviewsApiError: '',
       reviewBuffer: [],
       reviewSeen: [],
+      reviewApiPending: false,
+      reviewDomFinal: false,
       tabId: null,
       windowId: null,
       unexpectedResponses: 0,
@@ -1784,6 +2010,7 @@ async function poll() {
       scheduledPage: null,
       consecutiveNoNewPages: 0,
       lastNoNewPage: null,
+      pageNewItemCounts: {},
       pageDeadline: Date.now() + searchTimeoutForJob(job)
     };
     await persistActiveJob();
@@ -1831,6 +2058,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       schedulePoll(0);
     } else if (message.type === 'POLL_NOW') {
       void poll();
+    } else if (message.type === 'STOP_JOB') {
+      await closeActiveBrowserJob(String(message.runId || ''));
     } else if (message.type === 'TIKTOK_RESPONSE') {
       const handler = message.detail?.kind === 'reviews'
         ? processTikTokReviewsResponse
@@ -1865,27 +2094,36 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         : message.detail?.kind === 'reviews'
           ? processReviewsResponse
           : processSearchResponse;
-      void handler(message.detail, sender).catch((error) => {
-        void finishJob(
-          false,
-          error instanceof Error ? error.message : 'Không thể xử lý dữ liệu.'
-        ).catch(() => undefined);
-      });
-    } else if (message.type === 'SHOPEE_DOM_ITEMS' || message.type === 'TIKTOK_DOM_ITEMS') {
-      void processDomItems(message.items, sender).catch((error) => {
-        void finishJob(
-          false,
-          error instanceof Error ? error.message : 'Không thể xử lý card sản phẩm.'
-        ).catch(() => undefined);
-      });
-    } else if (message.type === 'SHOPEE_DOM_REVIEWS') {
-      void processDomReviews(message.reviews, sender, 'shopee', Boolean(message.isFinal)).catch((error) => {
-        void failCurrentDetail(
-          error instanceof Error ? error.message : 'Không thể lưu đánh giá Shopee.'
+      if (handler === processSearchResponse) {
+        enqueueSearchMessage(
+          () => handler(message.detail, sender),
+          'Không thể xử lý dữ liệu tìm kiếm Shopee.'
         );
-      });
+      } else if (handler === processReviewsResponse) {
+        enqueueReviewMessage(
+          () => handler(message.detail, sender),
+          'Không thể xử lý dữ liệu đánh giá Shopee.'
+        );
+      } else {
+        void handler(message.detail, sender).catch((error) => {
+          void finishJob(
+            false,
+            error instanceof Error ? error.message : 'Không thể xử lý dữ liệu.'
+          ).catch(() => undefined);
+        });
+      }
+    } else if (message.type === 'SHOPEE_DOM_ITEMS' || message.type === 'TIKTOK_DOM_ITEMS') {
+      enqueueSearchMessage(
+        () => processDomItems(message, sender),
+        'Không thể xử lý card sản phẩm.'
+      );
+    } else if (message.type === 'SHOPEE_DOM_REVIEWS') {
+      enqueueReviewMessage(
+        () => processDomReviews(message, sender, 'shopee'),
+        'Không thể lưu đánh giá Shopee.'
+      );
     } else if (message.type === 'TIKTOK_DOM_REVIEWS') {
-      void processDomReviews(message.reviews, sender, 'tiktok', Boolean(message.isFinal)).catch((error) => {
+      void processDomReviews(message, sender, 'tiktok').catch((error) => {
         void failCurrentDetail(
           error instanceof Error ? error.message : 'Không thể lưu bình luận TikTok.'
         );

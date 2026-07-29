@@ -10,7 +10,6 @@ import {
   Download,
   LogOut,
   Wallet,
-  Menu,
   Eye,
   Users,
   FileJson,
@@ -348,10 +347,19 @@ function App() {
 
   const handleStopRun = async (id: string) => {
     try {
-      await fetch(`http://localhost:3001/api/runs/${id}/stop`, {
+      const response = await fetch(`http://localhost:3001/api/runs/${id}/stop`, {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}` }
       });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.error || `Unable to stop run (${response.status})`);
+      }
+      window.postMessage({
+        source: 'OMNICRAWL_DASHBOARD',
+        type: 'STOP_JOB',
+        runId: id
+      }, window.location.origin);
       fetchData();
     } catch (err: any) {
       alert(`Error: ${err.message}`);
@@ -496,12 +504,32 @@ function App() {
     <div className="flex h-screen bg-[#F8F9FA] font-sans text-gray-800">
       
       {/* Sidebar - Material Design 3 Navigation Drawer style */}
-      <aside className={`${isSidebarOpen ? 'w-64' : 'w-20'} transition-all duration-300 bg-[#F0F4F8] p-3 flex flex-col gap-1 rounded-r-[32px] my-2 overflow-hidden`}>
-        <div className="px-4 py-5 flex items-center justify-between">
-          {isSidebarOpen && <OmniCrawlLogo size="md" />}
-          <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="p-2 hover:bg-gray-200 rounded-full text-gray-500 mx-auto">
-            <Menu size={20} />
-          </button>
+      <aside className={`${isSidebarOpen ? 'w-64' : 'w-20'} transition-all duration-300 bg-[#F0F4F8] p-3 flex flex-col gap-1 rounded-r-[32px] my-2 overflow-hidden shrink-0`}>
+        {/* Sidebar Header */}
+        <div className={`py-2.5 mb-2 flex items-center justify-between border-b border-gray-200/60 ${isSidebarOpen ? 'px-2' : 'flex-col gap-2 px-0'}`}>
+          {isSidebarOpen ? (
+            <>
+              <OmniCrawlLogo size="sm" />
+              <button 
+                onClick={() => setIsSidebarOpen(false)}
+                className="p-1.5 hover:bg-gray-200/80 rounded-lg text-gray-500 hover:text-gray-800 transition-colors shrink-0"
+                title="Thu gọn thanh bên"
+              >
+                <ChevronLeft size={18} strokeWidth={2} />
+              </button>
+            </>
+          ) : (
+            <>
+              <OmniCrawlLogo size="sm" showText={false} />
+              <button 
+                onClick={() => setIsSidebarOpen(true)}
+                className="p-1.5 hover:bg-gray-200/80 rounded-lg text-gray-500 hover:text-gray-800 transition-colors"
+                title="Mở rộng thanh bên"
+              >
+                <ChevronRight size={18} strokeWidth={2} />
+              </button>
+            </>
+          )}
         </div>
 
         {user && isSidebarOpen && (

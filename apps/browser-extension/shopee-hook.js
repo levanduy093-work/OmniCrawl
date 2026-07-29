@@ -84,12 +84,26 @@
       emit({
         kind: 'reviews',
         status: 400,
-        payload: { ratings: [], error: 'Missing Shopee product identifiers' }
+        payload: {
+          ratings: [],
+          error: 'Missing Shopee product identifiers',
+          omnicrawlItemId: itemId,
+          omnicrawlFinal: true
+        }
       });
       return;
     }
     if (maxReviews === 0) {
-      emit({ kind: 'reviews', status: 200, payload: { ratings: [], total: 0 } });
+      emit({
+        kind: 'reviews',
+        status: 200,
+        payload: {
+          ratings: [],
+          total: 0,
+          omnicrawlItemId: itemId,
+          omnicrawlFinal: true
+        }
+      });
       return;
     }
 
@@ -137,7 +151,17 @@
         const payload = await response.json().catch(() => null);
         if (!payload || (payload.error && payload.error !== 0)) break;
         const pageRatings = payload?.data?.ratings || payload?.ratings || [];
-        total = Number(payload?.data?.item_rating_summary?.rating_total ?? total);
+        const totalCandidate = payload?.data?.item_rating_summary?.rating_total;
+        if (
+          totalCandidate !== null &&
+          totalCandidate !== undefined &&
+          totalCandidate !== ''
+        ) {
+          const parsedTotal = Number(totalCandidate);
+          if (Number.isFinite(parsedTotal) && parsedTotal >= 0) {
+            total = parsedTotal;
+          }
+        }
         if (!Array.isArray(pageRatings) || pageRatings.length === 0) break;
         for (const rating of pageRatings) {
           const key = String(
@@ -159,7 +183,12 @@
       emit({
         kind: 'reviews',
         status: 200,
-        payload: { ratings, total }
+        payload: {
+          ratings,
+          total,
+          omnicrawlItemId: itemId,
+          omnicrawlFinal: true
+        }
       });
     } catch (error) {
       emit({
@@ -168,7 +197,9 @@
         payload: {
           ratings,
           total,
-          error: error instanceof Error ? error.message : 'Unable to collect Shopee reviews'
+          error: error instanceof Error ? error.message : 'Unable to collect Shopee reviews',
+          omnicrawlItemId: itemId,
+          omnicrawlFinal: true
         }
       });
     }
