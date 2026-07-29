@@ -56,7 +56,7 @@ async function main() {
       includeDetails: {
         type: 'boolean',
         title: 'Thu thập chi tiết từng sản phẩm',
-        description: 'Mở lần lượt từng sản phẩm để lấy mô tả, đánh giá, tồn kho và phân loại.',
+        description: 'Mở các tab độc lập để lấy mô tả, đánh giá, tồn kho và phân loại.',
         default: true
       },
       maxReviewsPerProduct: {
@@ -66,6 +66,14 @@ async function main() {
         minimum: 0,
         maximum: 100000,
         default: 20
+      },
+      detailConcurrency: {
+        type: 'integer',
+        title: 'Số tác nhân lấy chi tiết cùng lúc',
+        description: 'Mỗi tác nhân dùng một cửa sổ riêng, nhận sản phẩm không trùng và tự lấy chi tiết cùng đánh giá. Có thể chạy tối đa 6 tác nhân.',
+        minimum: 1,
+        maximum: 6,
+        default: 1
       },
       allowEmpty: {
         type: 'boolean',
@@ -103,10 +111,12 @@ async function main() {
       description: { type: 'string', title: 'Mô tả sản phẩm' },
       category: { type: 'string', title: 'Danh mục' },
       brand: { type: 'string', title: 'Thương hiệu' },
-      rating: { type: 'number', title: 'Điểm đánh giá' },
-      ratingCount: { type: 'number', title: 'Lượt đánh giá' },
+      rating: { type: 'number', title: 'Điểm đánh giá trung bình của sản phẩm' },
+      ratingCount: { type: 'number', title: 'Tổng số lượt đánh giá sản phẩm' },
       ratingBreakdown: { type: 'array', title: 'Phân bố số sao' },
       reviewsCollected: { type: 'number', title: 'Số đánh giá đã thu thập' },
+      reviewsRatingAverage: { type: 'number', title: 'Điểm trung bình của các đánh giá đã thu thập' },
+      reviewsWithRating: { type: 'number', title: 'Số đánh giá thu thập có số sao' },
       reviews: { type: 'array', title: 'Nội dung đánh giá' },
       reviewsStatus: { type: 'string', title: 'Trạng thái lấy đánh giá' },
       reviewsError: { type: 'string', title: 'Lỗi khi lấy đánh giá' },
@@ -206,6 +216,14 @@ async function main() {
         minimum: 0,
         maximum: 100000,
         default: 20
+      },
+      detailConcurrency: {
+        type: 'integer',
+        title: 'Số tab lấy chi tiết cùng lúc',
+        description: 'TikTok hiện xử lý tuần tự; tùy chọn này được dành cho luồng nhiều tab.',
+        minimum: 1,
+        maximum: 6,
+        default: 1
       }
     }
   });

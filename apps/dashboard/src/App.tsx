@@ -22,7 +22,41 @@ import Login from './Login'
 import OmniCrawlLogo from './Logo'
 import './App.css'
 
-const REQUIRED_BROWSER_AGENT_VERSION = '0.7.3'
+const REQUIRED_BROWSER_AGENT_VERSION = '0.11.0'
+
+function isVersionAtLeast(current: string | null, required: string) {
+  if (!current) return false
+  const currentParts = current.split('.').map(Number)
+  const requiredParts = required.split('.').map(Number)
+  if (
+    currentParts.some((part) => !Number.isInteger(part) || part < 0) ||
+    requiredParts.some((part) => !Number.isInteger(part) || part < 0)
+  ) return false
+
+  const length = Math.max(currentParts.length, requiredParts.length)
+  for (let index = 0; index < length; index += 1) {
+    const currentPart = currentParts[index] || 0
+    const requiredPart = requiredParts[index] || 0
+    if (currentPart > requiredPart) return true
+    if (currentPart < requiredPart) return false
+  }
+  return true
+}
+
+function displaySoldValue(value: unknown) {
+  const candidate = value && typeof value === 'object' && !Array.isArray(value)
+    ? (
+      (value as Record<string, unknown>).value ??
+      (value as Record<string, unknown>).count ??
+      (value as Record<string, unknown>).text ??
+      (value as Record<string, unknown>).display_text
+    )
+    : value
+  const match = String(candidate ?? '').match(
+    /(\d+(?:[.,]\d+)?\s*(?:k|nghìn|tr|triệu)?\+?)(?:\s*(?:đã bán|sold))?/i
+  )
+  return match ? match[1].replace(/\s+/g, '') : '—'
+}
 
 type JsonSchemaProperty = {
   type?: 'string' | 'integer' | 'number' | 'boolean'
@@ -215,7 +249,8 @@ function App() {
         setBrowserAgentDetected(true)
         setBrowserAgentVersion(version)
         setBrowserAgentConnected(
-          Boolean(event.data.connected) && version === REQUIRED_BROWSER_AGENT_VERSION
+          Boolean(event.data.connected) &&
+          isVersionAtLeast(version, REQUIRED_BROWSER_AGENT_VERSION)
         )
         if (event.data.authStatus) {
           setBrowserAuthStatus(event.data.authStatus)
@@ -1113,6 +1148,7 @@ function RunDetailModal({
 }) {
   const [previewImage, setPreviewImage] = useState<string | null>(null)
   const [expandedItemIds, setExpandedItemIds] = useState<Record<string, boolean>>({})
+  const [reviewPages, setReviewPages] = useState<Record<string, number>>({})
   const records = (detail?.items || []).map((item: any) => item.data || {})
   const detailProgress = detail?.run?.outputMetadata?.detailProgress
   let schemaColumns: string[] = []
@@ -1135,26 +1171,48 @@ function RunDetailModal({
     ...records.flatMap((record: Record<string, unknown>) => Object.keys(record))
   ]))
 
-  const preferredSummaryColumns = ['title', 'price', 'sold', 'url', 'image', 'shopName', 'images']
+  const preferredSummaryColumns = [
+    'title',
+    'price',
+    'rating',
+    'ratingCount',
+    'reviewsCollected',
+    'sold',
+    'url',
+    'image',
+    'shopName',
+    'images'
+  ]
   let summaryColumns = preferredSummaryColumns.filter((column) => columns.includes(column))
   if (summaryColumns.length === 0) {
     summaryColumns = columns.slice(0, 5)
   }
   const detailColumns = columns.filter(c => !summaryColumns.includes(c))
 
-  const renderValue = (value: unknown, column: string) => {
+  const renderValue = (value: unknown, column: string, recordKey = '') => {
     if (value === null || value === undefined || value === '') {
       return <span className="text-gray-300">—</span>
     }
+    if (column === 'sold') {
+      return <span>{displaySoldValue(value)}</span>
+    }
     if (column === 'reviews' && Array.isArray(value)) {
       if (!value.length) return <span className="text-gray-400">Chưa có đánh giá</span>
+      const reviewPageSize = 20
+      const reviewPageKey = recordKey || 'reviews'
+      const reviewPageCount = Math.max(1, Math.ceil(value.length / reviewPageSize))
+      const reviewPage = Math.min(reviewPageCount, Math.max(1, reviewPages[reviewPageKey] || 1))
+      const visibleReviews = value.slice(
+        (reviewPage - 1) * reviewPageSize,
+        reviewPage * reviewPageSize
+      )
       return (
         <details className="w-80">
           <summary className="cursor-pointer text-blue-600 font-medium">
             Xem {value.length} đánh giá
           </summary>
           <div className="mt-2 space-y-2 max-h-72 overflow-auto pr-2">
-            {value.map((review: any, index: number) => (
+            {visibleReviews.map((review: any, index: number) => (
               <div key={review.reviewId || index} className="rounded-xl border border-gray-100 bg-gray-50 p-3">
                 <div className="flex items-center justify-between gap-2 text-xs">
                   <span className="font-medium text-gray-700">{review.author || 'Người dùng'}</span>
@@ -1164,6 +1222,51 @@ function RunDetailModal({
                 <div className="mt-1 text-sm text-gray-700 whitespace-pre-wrap">
                   {review.comment || 'Người mua không để lại nội dung.'}
                 </div>
+                {Array.isArray(review.images) && review.images.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {review.images.slice(0, 6).map((imageUrl: unknown, imageIndex: number) => (
+                      <button
+                        key={`${review.reviewId || index}-image-${imageIndex}`}
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          setPreviewImage(String(imageUrl))
+                        }}
+                        title="Bấm để xem ảnh đánh giá"
+                      >
+                        <img
+                          src={String(imageUrl)}
+                          alt={`Ảnh đánh giá ${imageIndex + 1}`}
+                          referrerPolicy="no-referrer"
+                          loading="lazy"
+                          className="h-14 w-14 rounded-lg border border-gray-200 bg-white object-cover hover:opacity-80"
+                        />
+                      </button>
+                    ))}
+                    {review.images.length > 6 && (
+                      <span className="flex h-14 min-w-14 items-center justify-center rounded-lg border border-gray-200 bg-white px-2 text-xs text-gray-500">
+                        +{review.images.length - 6}
+                      </span>
+                    )}
+                  </div>
+                )}
+                {Array.isArray(review.videos) && review.videos.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                    {review.videos.slice(0, 3).map((videoUrl: unknown, videoIndex: number) => (
+                      <a
+                        key={`${review.reviewId || index}-video-${videoIndex}`}
+                        href={String(videoUrl)}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(event) => event.stopPropagation()}
+                        className="inline-flex items-center gap-1 rounded-lg border border-gray-200 bg-white px-2 py-1 text-blue-600 hover:bg-blue-50"
+                      >
+                        Video {videoIndex + 1}
+                        <ExternalLink size={11} />
+                      </a>
+                    ))}
+                  </div>
+                )}
                 {review.createdAt && (
                   <div className="mt-1 text-[11px] text-gray-400">
                     {new Date(review.createdAt).toLocaleString('vi-VN')}
@@ -1172,6 +1275,33 @@ function RunDetailModal({
               </div>
             ))}
           </div>
+          {reviewPageCount > 1 && (
+            <div className="mt-2 flex items-center justify-between gap-2 text-xs">
+              <button
+                type="button"
+                disabled={reviewPage <= 1}
+                onClick={() => setReviewPages((current) => ({
+                  ...current,
+                  [reviewPageKey]: Math.max(1, reviewPage - 1)
+                }))}
+                className="rounded-lg border border-gray-200 px-2 py-1 disabled:opacity-40"
+              >
+                Trang trước
+              </button>
+              <span>{reviewPage}/{reviewPageCount}</span>
+              <button
+                type="button"
+                disabled={reviewPage >= reviewPageCount}
+                onClick={() => setReviewPages((current) => ({
+                  ...current,
+                  [reviewPageKey]: Math.min(reviewPageCount, reviewPage + 1)
+                }))}
+                className="rounded-lg border border-gray-200 px-2 py-1 disabled:opacity-40"
+              >
+                Trang sau
+              </button>
+            </div>
+          )}
         </details>
       )
     }
@@ -1192,6 +1322,8 @@ function RunDetailModal({
               <img
                 src={String(imageUrl)}
                 alt=""
+                referrerPolicy="no-referrer"
+                loading="lazy"
                 className="w-11 h-11 rounded-lg object-cover bg-gray-100 border border-gray-200 hover:opacity-80"
               />
             </button>
@@ -1256,6 +1388,8 @@ function RunDetailModal({
             <img 
               src={text} 
               alt="" 
+              referrerPolicy="no-referrer"
+              loading="lazy"
               className="w-14 h-14 rounded-xl object-cover bg-gray-100 border border-gray-200 shadow-sm group-hover:opacity-85 group-hover:scale-105 transition-all" 
             />
           </button>
@@ -1368,7 +1502,9 @@ function RunDetailModal({
                             </td>
                             <td className="px-4 py-3 text-gray-400 font-medium">{item.position + 1}</td>
                             {summaryColumns.map((column) => (
-                              <td key={column} className="px-4 py-3 text-gray-700">{renderValue(item.data?.[column], column)}</td>
+                              <td key={column} className="px-4 py-3 text-gray-700">
+                                {renderValue(item.data?.[column], column, String(item.data?.itemId || item.id))}
+                              </td>
                             ))}
                             {detailColumns.length > 0 && (
                               <td className="px-4 py-3 text-right">
@@ -1403,7 +1539,7 @@ function RunDetailModal({
                                               {schemaLabels[col] || humanizeFieldName(col)}
                                             </span>
                                             <div className="text-xs text-gray-800 font-normal whitespace-pre-wrap break-words">
-                                              {renderValue(val, col)}
+                                              {renderValue(val, col, String(item.data?.itemId || item.id))}
                                             </div>
                                           </div>
                                         );

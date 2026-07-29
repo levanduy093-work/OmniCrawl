@@ -278,6 +278,56 @@ export class Dataset<TItem = unknown> {
     });
   }
 
+  async appendReviews(
+    externalKey: string,
+    reviews: Array<Record<string, unknown>>,
+    maximum = 100_000
+  ) {
+    return this.locked(async () => {
+      const item = await prisma.datasetItem.findFirst({
+        where: {
+          runId: this.runId,
+          externalKey: String(externalKey)
+        },
+        select: { id: true, data: true }
+      });
+      if (!item) return null;
+
+      const data = asRecord(item.data);
+      const current = Array.isArray(data.reviews)
+        ? data.reviews.filter((entry): entry is Prisma.JsonObject => (
+          Boolean(entry) && typeof entry === 'object' && !Array.isArray(entry)
+        ))
+        : [];
+      const seen = new Set(current.map((review) => String(
+        review.reviewId ||
+        `${review.author || ''}:${review.createdAt || ''}:${review.comment || ''}`
+      )));
+      for (const review of reviews) {
+        if (current.length >= maximum) break;
+        const key = String(
+          review.reviewId ||
+          `${review.author || ''}:${review.createdAt || ''}:${review.comment || ''}`
+        );
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        current.push(toJsonValue(review) as Prisma.JsonObject);
+      }
+
+      await prisma.datasetItem.update({
+        where: { id: item.id },
+        data: {
+          data: toJsonValue({
+            ...data,
+            reviews: current,
+            reviewsCollected: current.length
+          })
+        }
+      });
+      return current.length;
+    });
+  }
+
   async getData() {
     const output = await readRunOutput<TItem>(this.runId);
     if (!output) throw new Error(`Run ${this.runId} not found`);

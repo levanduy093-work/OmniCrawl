@@ -1,26 +1,112 @@
+const pendingReviewFallbacks = new Map();
+let renderedReviewCollectionQueue = Promise.resolve();
+
+function enqueueRenderedReviewCollection(limit, itemId) {
+  const task = renderedReviewCollectionQueue
+    .catch(() => undefined)
+    .then(() => collectRenderedShopeeReviews(limit, itemId));
+  renderedReviewCollectionQueue = task.catch(() => undefined);
+  return task;
+}
+
+async function prepareShopeeReviewSurface(itemId) {
+  const currentIds = parseProductIds(location.href);
+  if (
+    itemId &&
+    currentIds?.itemId &&
+    String(currentIds.itemId) !== String(itemId)
+  ) return;
+  const surface = renderedReviewSurface();
+  const target = surface.overview || surface.heading;
+  if (!target || surface.reviewCard) return;
+  target.scrollIntoView({ block: 'center', behavior: 'auto' });
+  const allFilter = [...document.querySelectorAll('button, [role="button"]')]
+    .find((element) => /^(?:tất cả|all)\b/i.test(
+      (element.textContent || '').replace(/\s+/g, ' ').trim()
+    ));
+  if (isEnabledPaginationControl(allFilter)) allFilter.click();
+  await waitForReviewSurfaceMutation(700);
+}
+
 window.addEventListener('omnicrawl:shopee-response', (event) => {
+  const detail = event.detail;
   chrome.runtime.sendMessage({
     type: 'SHOPEE_RESPONSE',
-    detail: event.detail
+    detail
   }).catch(() => undefined);
+
+  const payload = detail?.payload;
+  if (detail?.kind !== 'reviews' || !payload?.omnicrawlFinal) return;
+  const itemId = String(payload.omnicrawlItemId || '');
+  const pending = pendingReviewFallbacks.get(itemId);
+  if (!pending) return;
+
+  if (payload.error || payload.omnicrawlIncomplete) {
+    if (pending.fallbackStarted) return;
+    pending.fallbackStarted = true;
+    void enqueueRenderedReviewCollection(pending.limit, itemId)
+      .catch(() => {
+        sendShopeeDomReviews([], true, itemId);
+      })
+      .finally(() => {
+        pendingReviewFallbacks.delete(itemId);
+      });
+    return;
+  }
+  pendingReviewFallbacks.delete(itemId);
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message.type === 'REQUEST_SHOPEE_SEARCH_RESCAN') {
+    void rescanRenderedShopeeProducts(Number(message.round || 0))
+      .then((count) => sendResponse({ ok: true, count }))
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error?.message || String(error)
+      }));
+    return true;
+  }
+  if (message.type === 'REQUEST_SHOPEE_DETAIL_RECHECK') {
+    const detail = scrapeRenderedProductDetail();
+    if (detail) {
+      chrome.runtime.sendMessage({
+        type: 'SHOPEE_DOM_DETAIL',
+        detail,
+        recheck: true
+      }).catch(() => undefined);
+    }
+    sendResponse({ ok: true, detail });
+    return;
+  }
+  if (message.type === 'REQUEST_SHOPEE_RENDERED_REVIEWS') {
+    void enqueueRenderedReviewCollection(
+      Number(message.limit || 20),
+      String(message.itemId || '')
+    ).then((reviews) => {
+      sendResponse({ ok: true, renderedCount: reviews.length });
+    }).catch((error) => {
+      sendResponse({ ok: false, error: error?.message || String(error) });
+    });
+    return true;
+  }
   if (message.type !== 'REQUEST_SHOPEE_REVIEWS') return;
   const itemId = String(message.itemId || '');
-  window.dispatchEvent(new CustomEvent('omnicrawl:request-reviews', {
-    detail: {
-      itemId,
-      shopId: String(message.shopId || ''),
-      limit: Number(message.limit || 0)
-    }
-  }));
-  void collectRenderedShopeeReviews(Number(message.limit || 20), itemId)
-    .then((reviews) => sendResponse({ ok: true, renderedCount: reviews.length }))
-    .catch((error) => sendResponse({
-      ok: false,
-      error: error?.message || String(error)
-    }));
+  pendingReviewFallbacks.set(itemId, {
+    limit: Number(message.limit || 20),
+    fallbackStarted: false
+  });
+  void prepareShopeeReviewSurface(itemId)
+    .catch(() => undefined)
+    .then(() => {
+      window.dispatchEvent(new CustomEvent('omnicrawl:request-reviews', {
+        detail: {
+          itemId,
+          shopId: String(message.shopId || ''),
+          limit: Number(message.limit || 0)
+        }
+      }));
+      sendResponse({ ok: true });
+    });
   return true;
 });
 
@@ -82,48 +168,38 @@ function scrapeRenderedShopeeReviews() {
   return reviews;
 }
 
+function isEnabledPaginationControl(control) {
+  return Boolean(
+    control &&
+    !control.disabled &&
+    control.getAttribute('aria-disabled') !== 'true' &&
+    !control.classList.contains('shopee-icon-button--disabled') &&
+    !control.className.includes('disabled')
+  );
+}
+
 function findShopeeNextReviewButton() {
   const pageControllers = document.querySelectorAll(
     '.shopee-page-controller, [class*="page-controller"], [class*="pagination"]'
   );
-
   for (const controller of pageControllers) {
     const buttons = [...controller.querySelectorAll('button')];
     if (!buttons.length) continue;
 
     const numericButtons = buttons.filter((b) => /^\d+$/.test((b.textContent || '').trim()));
-
-    if (numericButtons.length > 0) {
-      const activeNumBtn = numericButtons.find((b) => (
-        b.classList.contains('shopee-button-solid--primary') ||
-        b.classList.contains('shopee-button-no-outline--active') ||
-        b.className.includes('active') ||
-        b.className.includes('primary') ||
-        b.getAttribute('aria-current') === 'page'
+    const activeButton = numericButtons.find((button) => (
+      button.classList.contains('shopee-button-solid--primary') ||
+      button.classList.contains('shopee-button-no-outline--active') ||
+      button.className.includes('active') ||
+      button.className.includes('primary') ||
+      button.getAttribute('aria-current') === 'page'
+    ));
+    if (activeButton) {
+      const currentPage = Number((activeButton.textContent || '').trim());
+      const nextPage = numericButtons.find((button) => (
+        Number((button.textContent || '').trim()) === currentPage + 1
       ));
-
-      if (activeNumBtn) {
-        const currentNum = parseInt((activeNumBtn.textContent || '').trim(), 10);
-        if (!isNaN(currentNum)) {
-          const targetNumStr = String(currentNum + 1);
-          const targetBtn = buttons.find((b) => (b.textContent || '').trim() === targetNumStr);
-          if (targetBtn && !targetBtn.disabled && targetBtn.getAttribute('aria-disabled') !== 'true') {
-            return targetBtn;
-          }
-        }
-      }
-
-      const activeIndex = numericButtons.findIndex((b) => (
-        b.classList.contains('shopee-button-solid--primary') ||
-        b.className.includes('active') ||
-        b.className.includes('primary')
-      ));
-      if (activeIndex !== -1 && activeIndex + 1 < numericButtons.length) {
-        const nextNumBtn = numericButtons[activeIndex + 1];
-        if (nextNumBtn && !nextNumBtn.disabled && nextNumBtn.getAttribute('aria-disabled') !== 'true') {
-          return nextNumBtn;
-        }
-      }
+      if (isEnabledPaginationControl(nextPage)) return nextPage;
     }
 
     const nextArrowBtn = controller.querySelector([
@@ -135,32 +211,61 @@ function findShopeeNextReviewButton() {
       'button[class*="next"]'
     ].join(','));
 
-    if (
-      nextArrowBtn &&
-      !nextArrowBtn.disabled &&
-      nextArrowBtn.getAttribute('aria-disabled') !== 'true' &&
-      !nextArrowBtn.classList.contains('shopee-icon-button--disabled')
-    ) {
+    if (isEnabledPaginationControl(nextArrowBtn)) {
       return nextArrowBtn;
     }
   }
-
-  const allPageBtns = [...document.querySelectorAll('.shopee-page-controller button, [class*="page-controller"] button')];
-  const activePageBtn = allPageBtns.find((b) => /^\d+$/.test((b.textContent || '').trim()) && (
-    b.classList.contains('shopee-button-solid--primary') ||
-    b.className.includes('active') ||
-    b.className.includes('primary')
-  ));
-  if (activePageBtn) {
-    const currentNum = parseInt((activePageBtn.textContent || '').trim(), 10);
-    if (!isNaN(currentNum)) {
-      const targetStr = String(currentNum + 1);
-      const target = allPageBtns.find((b) => (b.textContent || '').trim() === targetStr);
-      if (target && !target.disabled && target.getAttribute('aria-disabled') !== 'true') return target;
-    }
-  }
-
   return null;
+}
+
+function compactReviewCount(value) {
+  const normalized = String(value || '').replace(/\s+/g, '').replace(',', '.');
+  const match = normalized.match(/(\d+(?:\.\d+)?)(k|nghìn)?/i);
+  if (!match) return null;
+  const number = Number(match[1]);
+  if (!Number.isFinite(number)) return null;
+  return Math.round(number * (/k|nghìn/i.test(match[2] || '') ? 1000 : 1));
+}
+
+function scrapeRenderedRatingSummary() {
+  const surface = renderedReviewSurface();
+  const root = surface.overview || surface.heading?.parentElement || document.body;
+  const text = (root?.innerText || root?.textContent || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 6000);
+  const scoreElement = root?.querySelector([
+    '.product-rating-overview__rating-score',
+    '[class*="rating-score"]',
+    '[class*="rating-average"]'
+  ].join(','));
+  const scoreText = (scoreElement?.textContent || text).replace(',', '.');
+  const ratingMatch = scoreText.match(
+    /(\d(?:\.\d+)?)\s*(?:trên\s*5|out\s*of\s*5|\/\s*5)/i
+  ) || scoreText.match(/^(\d(?:\.\d+)?)$/);
+  const candidates = [...(root?.querySelectorAll('button, [role="button"], span, div') || [])]
+    .map((element) => (element.textContent || '').replace(/\s+/g, ' ').trim())
+    .filter((entry) => entry && entry.length < 100);
+  const allLabel = candidates.find((entry) => /^(?:tất cả|all)\b/i.test(entry));
+  const totalMatch = allLabel?.match(
+    /(?:tất cả|all)\s*(?:\(|:)?\s*([\d.,]+\s*(?:k|nghìn)?)/i
+  ) || text.match(/([\d.,]+\s*(?:k|nghìn)?)\s*(?:đánh giá|ratings?)/i);
+  const rating = ratingMatch ? Number(ratingMatch[1]) : null;
+  const ratingCount = totalMatch ? compactReviewCount(totalMatch[1]) : null;
+  return {
+    ...(Number.isFinite(rating) ? { rating } : {}),
+    ...(ratingCount !== null ? { ratingCount } : {})
+  };
+}
+
+function sendShopeeDomReviews(reviews, isFinal, itemId) {
+  chrome.runtime.sendMessage({
+    type: 'SHOPEE_DOM_REVIEWS',
+    reviews,
+    isFinal,
+    itemId,
+    ratingSummary: scrapeRenderedRatingSummary()
+  }).catch(() => undefined);
 }
 
 function renderedReviewSignature() {
@@ -169,49 +274,110 @@ function renderedReviewSignature() {
     .join(',');
 }
 
-async function waitForRenderedReviewPageChange(previousSignature) {
-  for (let attempt = 0; attempt < 12; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 400));
+async function waitForRenderedReviewChange(previousSignature) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
     const signature = renderedReviewSignature();
     if (signature && signature !== previousSignature) return true;
   }
   return false;
 }
 
-function sendShopeeDomReviews(reviews, isFinal, itemId) {
-  chrome.runtime.sendMessage({
-    type: 'SHOPEE_DOM_REVIEWS',
-    reviews,
-    isFinal,
-    itemId
-  }).catch(() => undefined);
+function renderedReviewSurface() {
+  const reviewCard = document.querySelector([
+    '.shopee-product-rating',
+    '[class*="product-rating__main"]',
+    '[class*="ProductRating"]',
+    '[data-sqe*="review-item"]'
+  ].join(','));
+  const pagination = document.querySelector(
+    '.shopee-page-controller, [class*="page-controller"], [class*="pagination"]'
+  );
+  const overview = document.querySelector([
+    '.product-rating-overview',
+    '[class*="product-rating-overview"]',
+    '[class*="ProductRatingOverview"]',
+    '[class*="product-ratings"]'
+  ].join(','));
+  const heading = [...document.querySelectorAll('h2, h3, div, span')]
+    .find((element) => (
+      element.children.length < 8 &&
+      /(?:đánh giá sản phẩm|product ratings?|customer reviews?)/i.test(
+        (element.textContent || '').replace(/\s+/g, ' ').trim()
+      )
+    ));
+  return { reviewCard, pagination, overview, heading };
+}
+
+function waitForReviewSurfaceMutation(waitMs = 1000) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      observer.disconnect();
+      clearTimeout(timer);
+      resolve();
+    };
+    const observer = new MutationObserver(() => {
+      const surface = renderedReviewSurface();
+      if (surface.reviewCard || surface.pagination) finish();
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    const timer = setTimeout(finish, waitMs);
+  });
+}
+
+async function waitForRenderedReviewSurface(expectedItemId = '') {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const currentIds = parseProductIds(location.href);
+    if (
+      expectedItemId &&
+      currentIds?.itemId &&
+      String(currentIds.itemId) !== String(expectedItemId)
+    ) return false;
+
+    const surface = renderedReviewSurface();
+    if (surface.reviewCard || surface.pagination) return true;
+    const target = surface.overview || surface.heading;
+    if (target) {
+      target.scrollIntoView({ block: 'center', behavior: 'auto' });
+      const allFilter = [...document.querySelectorAll('button, [role="button"]')]
+        .find((element) => /^(?:tất cả|all)\b/i.test(
+          (element.textContent || '').replace(/\s+/g, ' ').trim()
+        ));
+      if (isEnabledPaginationControl(allFilter)) allFilter.click();
+    } else {
+      const pageHeight = Math.max(document.body.scrollHeight, 4000);
+      const targetY = Math.min(
+        pageHeight - window.innerHeight,
+        1800 + attempt * 700
+      );
+      window.scrollTo({ top: Math.max(0, targetY), behavior: 'auto' });
+    }
+    await waitForReviewSurfaceMutation(1000);
+  }
+  const surface = renderedReviewSurface();
+  return Boolean(surface.reviewCard || surface.pagination);
 }
 
 async function collectRenderedShopeeReviews(limit, expectedItemId = '') {
   const maxReviews = Math.min(100000, Math.max(0, Math.floor(limit || 20)));
 
-  window.scrollTo({ top: 2200, behavior: 'smooth' });
-  await new Promise((resolve) => setTimeout(resolve, 1000));
-
-  const reviewHeading = [...document.querySelectorAll('h2, h3, div, span')]
-    .find((element) => (
-      element.children.length < 5 &&
-      /^(đánh giá sản phẩm|product ratings?|reviews?)$/i.test(
-        (element.textContent || '').replace(/\s+/g, ' ').trim()
-      )
-  ));
-  if (reviewHeading) {
-    reviewHeading.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  } else {
-    window.scrollTo({ top: Math.max(2500, document.body.scrollHeight - 1000), behavior: 'smooth' });
+  const surfaceReady = await waitForRenderedReviewSurface(expectedItemId);
+  if (!surfaceReady) {
+    sendShopeeDomReviews([], true, expectedItemId);
+    return [];
   }
-  await new Promise((resolve) => setTimeout(resolve, 1000));
 
   const accumulated = new Map();
   let noGrowthRounds = 0;
-  for (let attempt = 0; attempt < 25; attempt += 1) {
+  const maximumAttempts = Math.min(2000, Math.max(25, Math.ceil(maxReviews / 6) + 12));
+  for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
     const before = accumulated.size;
+    const freshReviews = [];
     for (const review of scrapeRenderedShopeeReviews()) {
+      if (!accumulated.has(review.reviewId)) freshReviews.push(review);
       accumulated.set(review.reviewId, review);
       if (accumulated.size >= maxReviews) break;
     }
@@ -219,7 +385,7 @@ async function collectRenderedShopeeReviews(limit, expectedItemId = '') {
 
     if (accumulated.size > before && accumulated.size < maxReviews) {
       sendShopeeDomReviews(
-        [...accumulated.values()],
+        freshReviews,
         false,
         expectedItemId
       );
@@ -238,26 +404,25 @@ async function collectRenderedShopeeReviews(limit, expectedItemId = '') {
     }
 
     let nextButton = findShopeeNextReviewButton();
-    if (!nextButton && attempt < 4) {
+    if (!nextButton && noGrowthRounds < 3) {
       window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
-      await new Promise((resolve) => setTimeout(resolve, 800));
+      await new Promise((resolve) => setTimeout(resolve, 300));
       nextButton = findShopeeNextReviewButton();
     }
 
     if (nextButton) {
       const previousSignature = renderedReviewSignature();
-      nextButton.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      nextButton.scrollIntoView({ block: 'center', behavior: 'auto' });
       nextButton.click();
-      const changed = await waitForRenderedReviewPageChange(previousSignature);
+      const changed = await waitForRenderedReviewChange(previousSignature);
       if (!changed) noGrowthRounds += 1;
       continue;
     }
     if (noGrowthRounds >= 3) break;
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await new Promise((resolve) => setTimeout(resolve, 300));
   }
   const reviews = [...accumulated.values()].slice(0, maxReviews);
-  sendShopeeDomReviews(reviews, true, expectedItemId);
+  sendShopeeDomReviews([], true, expectedItemId);
   return reviews;
 }
 
@@ -267,6 +432,19 @@ function parseProductIds(url) {
   const slugMatch = url.match(/-i\.(\d+)\.(\d+)/);
   if (slugMatch) return { shopId: slugMatch[1], itemId: slugMatch[2] };
   return null;
+}
+
+function renderedSoldValue(text) {
+  const normalized = String(text || '').replace(/\s+/g, ' ');
+  const valueAfterLabel = normalized.match(
+    /(?:đã bán|sold)\s*:?\s*(\d+(?:[.,]\d+)?\s*(?:k|nghìn|tr|triệu)?)/i
+  );
+  const valueBeforeLabel = normalized.match(
+    /(\d+(?:[.,]\d+)?\s*(?:k|nghìn|tr|triệu)?)\+?\s*(?:đã bán|sold)/i
+  );
+  return (valueAfterLabel?.[1] || valueBeforeLabel?.[1] || '')
+    .replace(/\s+/g, '')
+    .trim();
 }
 
 function scrapeRenderedProducts() {
@@ -292,16 +470,66 @@ function scrapeRenderedProducts() {
       .sort((left, right) => right.length - left.length)[0];
     if (!title) continue;
 
-    const soldMatch = text.match(/(\d+(?:[.,]\d+)?k?)\+?\s*(?:đã bán|sold)/i);
-    const image = anchor.querySelector('img');
+    const sold = renderedSoldValue(text);
+
+    let imageUrl = '';
+    const imgTags = anchor.querySelectorAll('img');
+    for (const img of imgTags) {
+      const srcset = (
+        img.getAttribute('srcset') ||
+        img.getAttribute('data-srcset') ||
+        ''
+      ).split(',')[0]?.trim().split(/\s+/)[0] || '';
+      const src = (
+        img.currentSrc ||
+        img.getAttribute('src') ||
+        img.getAttribute('data-src') ||
+        img.getAttribute('data-lazy-src') ||
+        img.getAttribute('data-original') ||
+        img.getAttribute('data-cfsrc') ||
+        srcset
+      );
+      if (src && !src.startsWith('data:image')) {
+        imageUrl = new URL(src, location.origin).href;
+        break;
+      }
+    }
+    if (!imageUrl) {
+      for (const el of [anchor, ...anchor.querySelectorAll('[style]')]) {
+        const background = (
+          el.style?.backgroundImage ||
+          getComputedStyle(el).backgroundImage ||
+          el.getAttribute('style') ||
+          ''
+        );
+        const match = background.match(/url\(['"]?(.*?)['"]?\)/);
+        if (match && match[1] && !match[1].startsWith('data:image')) {
+          imageUrl = new URL(match[1], location.origin).href;
+          break;
+        }
+      }
+    }
+    if (!imageUrl) {
+      const source = anchor.querySelector('picture source[srcset], source[data-srcset]');
+      const sourceUrl = (
+        source?.getAttribute('srcset') ||
+        source?.getAttribute('data-srcset') ||
+        ''
+      ).split(',')[0]?.trim().split(/\s+/)[0];
+      if (sourceUrl) imageUrl = new URL(sourceUrl, location.origin).href;
+    }
+    if (!imageUrl && imgTags.length > 0) {
+      imageUrl = imgTags[0].currentSrc || imgTags[0].src || '';
+    }
+
     seen.add(ids.itemId);
     products.push({
       ...ids,
       title,
       price: `${priceMatch[1]}₫`,
-      sold: soldMatch?.[1] || 0,
+      sold: sold || 0,
       url,
-      image: image?.currentSrc || image?.src || ''
+      image: imageUrl
     });
   }
   return products.slice(0, 100);
@@ -309,6 +537,12 @@ function scrapeRenderedProducts() {
 
 let lastDomSignature = '';
 let domAttempts = 0;
+
+function renderedProductSignature(items) {
+  return items
+    .map((item) => `${item.itemId}:${item.image || ''}:${item.sold || ''}`)
+    .join(',');
+}
 
 function currentShopeeSearchPage() {
   const page = Number(new URLSearchParams(location.search).get('page') || 0);
@@ -325,20 +559,57 @@ function sendShopeeDomItems(items, page, isFinal = false) {
   }).catch(() => undefined);
 }
 
+async function rescanRenderedShopeeProducts(round = 0) {
+  if (!location.pathname.includes('/search')) return 0;
+  const height = Math.max(document.body.scrollHeight, 4000);
+  const positions = [0.15, 0.35, 0.55, 0.75, 0.95, 0.5];
+  const ratio = positions[Math.abs(Math.floor(round)) % positions.length];
+  window.scrollTo({
+    top: Math.max(0, Math.floor(height * ratio) - Math.floor(innerHeight / 2)),
+    behavior: 'auto'
+  });
+  await new Promise((resolve) => setTimeout(resolve, 350));
+  const items = scrapeRenderedProducts();
+  const signature = renderedProductSignature(items);
+  if (items.length && signature !== lastDomSignature) {
+    lastDomSignature = signature;
+    sendShopeeDomItems(items, currentShopeeSearchPage());
+  }
+  return items.length;
+}
+
 async function autoScrollShopeeSearchPage() {
   if (!location.pathname.includes('/search')) return;
   const page = currentShopeeSearchPage();
+  const minimumStableItems = 20;
   let stableRounds = 0;
   let previousSignature = '';
 
-  for (let i = 0; i < 12; i += 1) {
+  const waitForProductChange = (signature, waitMs = 1000) => new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      observer.disconnect();
+      clearTimeout(timer);
+      resolve();
+    };
+    const observer = new MutationObserver(() => {
+      const current = renderedProductSignature(scrapeRenderedProducts());
+      if (current && current !== signature) finish();
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    const timer = setTimeout(finish, waitMs);
+  });
+
+  for (let i = 0; i < 25; i += 1) {
     const totalHeight = Math.max(document.body.scrollHeight, 4000);
     const targetY = Math.floor((totalHeight / 4) * Math.min(i + 1, 4));
-    window.scrollTo({ top: targetY, behavior: 'smooth' });
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    window.scrollTo({ top: targetY, behavior: 'auto' });
+    await waitForProductChange(previousSignature);
 
     const items = scrapeRenderedProducts();
-    const signature = items.map((item) => item.itemId).join(',');
+    const signature = renderedProductSignature(items);
     stableRounds = signature && signature === previousSignature
       ? stableRounds + 1
       : 0;
@@ -347,23 +618,26 @@ async function autoScrollShopeeSearchPage() {
       lastDomSignature = signature;
       sendShopeeDomItems(items, page);
     }
-    if (i >= 3 && stableRounds >= 2) break;
+    if (items.length >= minimumStableItems && stableRounds >= 1) break;
+    if (items.length < minimumStableItems && stableRounds >= 5) break;
   }
-  clearInterval(domCaptureTimer);
-  domAttempts = 15;
   sendShopeeDomItems([], page, true);
 }
 
 if (location.pathname.includes('/search')) {
-  setTimeout(() => {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+      void autoScrollShopeeSearchPage();
+    }, { once: true });
+  } else {
     void autoScrollShopeeSearchPage();
-  }, 300);
+  }
 }
 
 const domCaptureTimer = setInterval(() => {
   domAttempts += 1;
   const items = scrapeRenderedProducts();
-  const signature = items.map((item) => item.itemId).join(',');
+  const signature = renderedProductSignature(items);
   if (items.length && signature !== lastDomSignature) {
     lastDomSignature = signature;
     sendShopeeDomItems(items, currentShopeeSearchPage());
@@ -387,7 +661,7 @@ function scrapeRenderedProductDetail() {
     .trim()
     .slice(0, 50000) || '';
   const ratingMatch = bodyText.slice(0, 12000).match(/(\d(?:[.,]\d)?)\s*(?:\/\s*5|đánh giá|rating)/i);
-  const soldMatch = bodyText.slice(0, 12000).match(/(\d+(?:[.,]\d+)?k?)\+?\s*(?:đã bán|sold)/i);
+  const sold = renderedSoldValue(bodyText.slice(0, 12000));
   const images = [...document.querySelectorAll('img')]
     .map((image) => image.currentSrc || image.src)
     .filter((url) => /(?:shopee|susercontent)\.(?:com|vn)|susercontent\.com/i.test(url))
@@ -400,20 +674,54 @@ function scrapeRenderedProductDetail() {
     title,
     description,
     rating: ratingMatch ? Number(ratingMatch[1].replace(',', '.')) : null,
-    sold: soldMatch?.[1] || 0,
+    sold: sold || null,
     images
   };
 }
 
 if (parseProductIds(location.href)) {
-  setTimeout(() => {
+  let lastDetailSignature = '';
+  let detailStableRounds = 0;
+  let detailObserver = null;
+  const captureDetailWhenReady = () => {
     const detail = scrapeRenderedProductDetail();
-    if (!detail) return;
-    chrome.runtime.sendMessage({
-      type: 'SHOPEE_DOM_DETAIL',
-      detail
-    }).catch(() => undefined);
-  }, 8000);
+    if (!detail) return false;
+    const signature = JSON.stringify([
+      detail.itemId,
+      detail.title,
+      detail.description?.length || 0,
+      detail.images?.length || 0,
+      detail.rating
+    ]);
+    if (signature === lastDetailSignature) {
+      detailStableRounds += 1;
+    } else {
+      lastDetailSignature = signature;
+      detailStableRounds = 0;
+      chrome.runtime.sendMessage({
+        type: 'SHOPEE_DOM_DETAIL',
+        detail
+      }).catch(() => undefined);
+    }
+    return detailStableRounds >= 1;
+  };
+  const startDetailObserver = () => {
+    if (captureDetailWhenReady()) return;
+    detailObserver = new MutationObserver(() => {
+      if (!captureDetailWhenReady()) return;
+      detailObserver?.disconnect();
+    });
+    detailObserver.observe(document.body, { childList: true, subtree: true });
+    setTimeout(() => {
+      detailObserver?.disconnect();
+      captureDetailWhenReady();
+    }, 10000);
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', startDetailObserver, { once: true });
+  } else {
+    startDetailObserver();
+  }
 }
 
 function reportBlockedPage() {

@@ -143,6 +143,26 @@ function sanitizeDetailPatch(value: any) {
     const parsed = Number(input);
     return Number.isFinite(parsed) ? parsed : null;
   };
+  const soldValue = (input: unknown): string | number | null => {
+    if (input === null || input === undefined || input === '') return null;
+    if (typeof input === 'number') return Number.isFinite(input) ? input : null;
+    if (typeof input === 'object') {
+      const candidate = (
+        (input as any)?.value ??
+        (input as any)?.count ??
+        (input as any)?.total ??
+        (input as any)?.text ??
+        (input as any)?.display_text ??
+        (input as any)?.label
+      );
+      return candidate === input ? null : soldValue(candidate);
+    }
+    const normalized = text(input, 100).replace(/\s+/g, ' ').trim();
+    const match = normalized.match(
+      /(\d+(?:[.,]\d+)?\s*(?:k|nghìn|tr|triệu)?\+?)(?:\s*(?:đã bán|sold))?/i
+    );
+    return match ? match[1].replace(/\s+/g, '') : null;
+  };
   const stringArray = (input: unknown, limit = 30) => (
     Array.isArray(input)
       ? input.slice(0, limit).map((entry) => text(entry, 2000)).filter(Boolean)
@@ -178,7 +198,7 @@ function sanitizeDetailPatch(value: any) {
       detailCrawledAt: new Date().toISOString()
     };
   }
-  const detail = {
+  const detail: Record<string, unknown> = {
     description: text(value?.description, 50_000),
     category: text(value?.category, 1000),
     brand: text(value?.brand, 500),
@@ -192,11 +212,13 @@ function sanitizeDetailPatch(value: any) {
     ratingCount: number(value?.ratingCount),
     ratingBreakdown: objectArray(value?.ratingBreakdown, 10),
     reviewsCollected: number(value?.reviewsCollected),
-    reviews: objectArray(value?.reviews, 100),
+    reviewsRatingAverage: number(value?.reviewsRatingAverage),
+    reviewsWithRating: number(value?.reviewsWithRating),
     reviewsStatus: ['COMPLETED', 'PARTIAL', 'FAILED', 'SKIPPED'].includes(value?.reviewsStatus)
       ? value.reviewsStatus
       : 'SKIPPED',
     reviewsError: text(value?.reviewsError, 1000),
+    sold: soldValue(value?.sold ?? value?.totalSold),
     totalSold: number(value?.totalSold),
     salesLast30Days: number(value?.salesLast30Days),
     stock: number(value?.stock),
@@ -233,6 +255,13 @@ function sanitizeDetailPatch(value: any) {
     detailError: '',
     detailCrawledAt: new Date().toISOString()
   };
+  if (Object.prototype.hasOwnProperty.call(value || {}, 'reviews')) {
+    detail.reviews = objectArray(value?.reviews, 100_000);
+  }
+  const detailImages = detail.images as string[];
+  if (detailImages.length) {
+    detail.image = text(value?.image || detailImages[0], 2000);
+  }
   return Object.fromEntries(
     Object.entries(detail).filter(([key, fieldValue]) => (
       fieldValue !== null &&
@@ -244,6 +273,33 @@ function sanitizeDetailPatch(value: any) {
       )
     ))
   );
+}
+
+function sanitizeReviews(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  const text = (input: unknown, limit = 5000) => String(input ?? '').slice(0, limit);
+  const number = (input: unknown) => {
+    if (input === null || input === undefined || input === '') return null;
+    const parsed = Number(input);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
+  return value.slice(0, 100).map((review: any) => ({
+    reviewId: text(review?.reviewId, 200),
+    author: text(review?.author, 1000),
+    authorId: text(review?.authorId, 200),
+    rating: number(review?.rating),
+    comment: text(review?.comment, 20_000),
+    createdAt: text(review?.createdAt, 100),
+    variation: text(review?.variation, 1000),
+    likes: number(review?.likes),
+    images: Array.isArray(review?.images)
+      ? review.images.slice(0, 20).map((entry: unknown) => text(entry, 2000)).filter(Boolean)
+      : [],
+    videos: Array.isArray(review?.videos)
+      ? review.videos.slice(0, 10).map((entry: unknown) => text(entry, 2000)).filter(Boolean)
+      : [],
+    shopReply: text(review?.shopReply, 20_000)
+  })).filter((review) => review.reviewId || review.comment);
 }
 
 // Auth Middleware
@@ -705,11 +761,23 @@ app.get('/api/browser-agent/jobs/next', requireAuth, async (req: any, res: any) 
     const maxReviewsPerProduct = includeDetails && Number.isFinite(maxReviewsValue)
       ? Math.min(100000, Math.max(0, Math.floor(maxReviewsValue)))
       : 0;
+    const detailConcurrencyValue = Number(input.detailConcurrency ?? 1);
+    const detailConcurrency = platform === 'shopee' && includeDetails &&
+      Number.isFinite(detailConcurrencyValue)
+      ? Math.min(6, Math.max(1, Math.floor(detailConcurrencyValue)))
+      : 1;
     await new Dataset(candidate.id).setMetadata({
       source: platform === 'tiktok' ? 'tiktok.com' : 'shopee.vn',
       platform,
       mode,
-      query: { keyword, mode, maxItems, includeDetails, maxReviewsPerProduct },
+      query: {
+        keyword,
+        mode,
+        maxItems,
+        includeDetails,
+        maxReviewsPerProduct,
+        detailConcurrency
+      },
       detailProgress: {
         enabled: includeDetails,
         completed: 0,
@@ -725,7 +793,8 @@ app.get('/api/browser-agent/jobs/next', requireAuth, async (req: any, res: any) 
       keyword,
       maxItems,
       includeDetails,
-      maxReviewsPerProduct
+      maxReviewsPerProduct,
+      detailConcurrency
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -810,6 +879,60 @@ app.post('/api/browser-agent/jobs/:id/items', requireAuth, async (req: any, res:
   }
 });
 
+app.post('/api/browser-agent/jobs/:id/items/enrich', requireAuth, async (req: any, res: any) => {
+  try {
+    const run = await prisma.run.findFirst({
+      where: {
+        id: req.params.id,
+        userId: req.user.id,
+        status: 'BROWSER_RUNNING',
+        actor: { name: { in: BROWSER_ACTOR_NAMES } }
+      },
+      select: { id: true }
+    });
+    if (!run) return res.status(404).json({ error: 'Active browser job not found' });
+
+    const items = Array.isArray(req.body?.items) ? req.body.items.slice(0, 100) : [];
+    const dataset = new Dataset(run.id);
+    let updated = 0;
+    for (const item of items) {
+      const itemId = String(item?.itemId || '').slice(0, 200);
+      const image = String(item?.image || '').slice(0, 2000);
+      const rawSold = item?.sold;
+      const numeric = (value: unknown) => {
+        if (value === null || value === undefined || value === '') return null;
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : null;
+      };
+      const sold = (() => {
+        if (typeof rawSold === 'number') {
+          return Number.isFinite(rawSold) && rawSold > 0 ? rawSold : null;
+        }
+        const candidate = rawSold && typeof rawSold === 'object'
+          ? rawSold.value ?? rawSold.count ?? rawSold.text ?? rawSold.display_text
+          : rawSold;
+        const match = String(candidate ?? '').match(
+          /(\d+(?:[.,]\d+)?\s*(?:k|nghìn|tr|triệu)?\+?)(?:\s*(?:đã bán|sold))?/i
+        );
+        return match ? match[1].replace(/\s+/g, '') : null;
+      })();
+      if (!itemId) continue;
+      const patch: Record<string, unknown> = {};
+      if (/^https?:\/\//i.test(image)) patch.image = image;
+      if (sold !== null && sold !== '' && sold !== '0') patch.sold = sold;
+      const rating = numeric(item?.rating);
+      const ratingCount = numeric(item?.ratingCount);
+      if (rating !== null) patch.rating = rating;
+      if (ratingCount !== null) patch.ratingCount = ratingCount;
+      if (!Object.keys(patch).length) continue;
+      if (await dataset.updateData(itemId, patch)) updated += 1;
+    }
+    res.json({ updated });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.patch('/api/browser-agent/jobs/:id/items/:itemId', requireAuth, async (req: any, res: any) => {
   try {
     const run = await prisma.run.findFirst({
@@ -849,6 +972,49 @@ app.patch('/api/browser-agent/jobs/:id/items/:itemId', requireAuth, async (req: 
       `${detail.detailStatus === 'FAILED' ? 'failed' : 'stored'} for item ${String(req.params.itemId).slice(0, 100)}.`
     );
     res.json({ success: true, detailStatus: detail.detailStatus });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/browser-agent/jobs/:id/items/:itemId/reviews', requireAuth, async (req: any, res: any) => {
+  try {
+    const run = await prisma.run.findFirst({
+      where: {
+        id: req.params.id,
+        userId: req.user.id,
+        status: 'BROWSER_RUNNING',
+        actor: { name: { in: BROWSER_ACTOR_NAMES } }
+      },
+      select: { id: true }
+    });
+    if (!run) return res.status(404).json({ error: 'Active browser job not found' });
+
+    const reviews = sanitizeReviews(req.body?.reviews);
+    if (!reviews.length) return res.json({ accepted: 0, total: 0 });
+    const dataset = new Dataset(run.id);
+    const total = await dataset.appendReviews(
+      String(req.params.itemId),
+      reviews,
+      100_000
+    );
+    if (total === null) {
+      return res.status(404).json({ error: 'Product was not found in this run' });
+    }
+    const summary = req.body?.summary;
+    const numeric = (value: unknown) => {
+      if (value === null || value === undefined || value === '') return null;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+    const rating = numeric(summary?.rating);
+    const ratingCount = numeric(summary?.ratingCount);
+    await dataset.updateData(String(req.params.itemId), {
+      reviewsCollected: total,
+      ...(rating === null ? {} : { rating }),
+      ...(ratingCount === null ? {} : { ratingCount })
+    });
+    res.json({ accepted: reviews.length, total });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

@@ -4,14 +4,33 @@ let pollTimer = null;
 let pageTimer = null;
 let searchMessageQueue = Promise.resolve();
 let reviewMessageQueue = Promise.resolve();
+let detailMessageQueue = Promise.resolve();
+let searchImageReadyTimer = null;
+const detailWorkerTimers = new Map();
 
 const SEARCH_TIMEOUT_MS = 30000;
 const TIKTOK_SEARCH_TIMEOUT_MS = 45000;
 const DETAIL_TIMEOUT_MS = 90000;
+const MIN_SHOPEE_ITEMS_PER_PAGE = 20;
+const FAST_SHOPEE_PAGE_ITEMS = 50;
+const MAX_SHOPEE_PAGE_RETRIES = 2;
+const MAX_SHOPEE_DOM_REVIEW_RETRIES = 3;
+const MAX_SHOPEE_ZERO_REVIEW_RETRIES = 1;
+const MAX_REVIEWS_PER_PRODUCT = 100000;
+const MAX_DETAIL_CONCURRENCY = 6;
+const SPARSE_DETAIL_RECHECK_MS = 1000;
+const MAX_DETAIL_READY_PROBES = 12;
+const DETAIL_DEADLINE_ALARM_PREFIX = 'omnicrawl-detail-deadline:';
+const DETAIL_READY_ALARM_PREFIX = 'omnicrawl-detail-ready:';
+const SHOPEE_IMAGE_READY_ALARM = 'omnicrawl-shopee-image-ready';
+const MAX_SHOPEE_IMAGE_READY_ROUNDS = 15;
 
-const stateReady = chrome.storage.session.get(['config', 'activeJob']).then((stored) => {
+const stateReady = Promise.all([
+  chrome.storage.session.get(['config', 'activeJob']),
+  chrome.storage.local.get(['activeJobRecovery'])
+]).then(([stored, durable]) => {
   config = stored.config || null;
-  activeJob = stored.activeJob || null;
+  activeJob = stored.activeJob || durable.activeJobRecovery || null;
   if (activeJob) {
     activeJob.platform = activeJob.platform || 'shopee';
     activeJob.mode = activeJob.mode || 'products';
@@ -22,18 +41,28 @@ const stateReady = chrome.storage.session.get(['config', 'activeJob']).then((sto
     activeJob.detailFailed = Number(activeJob.detailFailed || 0);
     const restoredMaxReviews = Number(activeJob.maxReviewsPerProduct ?? 20);
     activeJob.maxReviewsPerProduct = Number.isFinite(restoredMaxReviews)
-      ? Math.min(100, Math.max(0, Math.floor(restoredMaxReviews)))
+      ? Math.min(
+        MAX_REVIEWS_PER_PRODUCT,
+        Math.max(0, Math.floor(restoredMaxReviews))
+      )
       : 20;
     activeJob.pendingDetailData = activeJob.pendingDetailData || null;
     activeJob.reviewsApiError = activeJob.reviewsApiError || '';
     activeJob.reviewBuffer = Array.isArray(activeJob.reviewBuffer)
       ? activeJob.reviewBuffer
       : [];
+    activeJob.reviewsCollected = Number(
+      activeJob.reviewsCollected || activeJob.reviewBuffer.length || 0
+    );
+    activeJob.reviewRatingSum = Number(activeJob.reviewRatingSum || 0);
+    activeJob.reviewsWithRating = Number(activeJob.reviewsWithRating || 0);
     activeJob.reviewSeen = Array.isArray(activeJob.reviewSeen)
       ? activeJob.reviewSeen
       : [];
     activeJob.reviewApiPending = Boolean(activeJob.reviewApiPending);
     activeJob.reviewDomFinal = Boolean(activeJob.reviewDomFinal);
+    activeJob.reviewDomRetryRounds = Number(activeJob.reviewDomRetryRounds || 0);
+    activeJob.reviewPageReloads = Number(activeJob.reviewPageReloads || 0);
     activeJob.windowId = activeJob.windowId == null ? null : Number(activeJob.windowId);
     activeJob.scheduledPage = activeJob.scheduledPage == null
       ? null
@@ -46,11 +75,57 @@ const stateReady = chrome.storage.session.get(['config', 'activeJob']).then((sto
       activeJob.pageNewItemCounts &&
       typeof activeJob.pageNewItemCounts === 'object'
     ) ? activeJob.pageNewItemCounts : {};
+    activeJob.pageRetryCounts = (
+      activeJob.pageRetryCounts &&
+      typeof activeJob.pageRetryCounts === 'object'
+    ) ? activeJob.pageRetryCounts : {};
+    activeJob.itemImages = (
+      activeJob.itemImages &&
+      typeof activeJob.itemImages === 'object'
+    ) ? activeJob.itemImages : {};
+    activeJob.searchImageReadyRounds = Number(activeJob.searchImageReadyRounds || 0);
+    activeJob.searchImageReadyScheduled = Boolean(activeJob.searchImageReadyScheduled);
+    activeJob.detailConcurrency = Math.min(
+      MAX_DETAIL_CONCURRENCY,
+      Math.max(1, Math.floor(Number(activeJob.detailConcurrency || 1)))
+    );
+    activeJob.detailNextIndex = Number(
+      activeJob.detailNextIndex ?? activeJob.detailIndex ?? 0
+    );
+    activeJob.detailWorkers = Array.isArray(activeJob.detailWorkers)
+      ? activeJob.detailWorkers
+      : [];
+    activeJob.detailAssignments = (
+      activeJob.detailAssignments &&
+      typeof activeJob.detailAssignments === 'object'
+    ) ? activeJob.detailAssignments : {};
+    activeJob.reviewOwnerTabId = activeJob.reviewOwnerTabId == null
+      ? null
+      : Number(activeJob.reviewOwnerTabId);
+    activeJob.reviewApiFailureStreak = Number(activeJob.reviewApiFailureStreak || 0);
+    activeJob.reviewApiDegraded = Boolean(activeJob.reviewApiDegraded);
   }
 });
 
+function activeJobRecoverySnapshot(job) {
+  if (!job) return null;
+  return {
+    ...job,
+    detailWorkers: (job.detailWorkers || []).map((worker) => ({
+      ...worker,
+      reviewSeen: []
+    })),
+    reviewSeen: []
+  };
+}
+
 function persistActiveJob() {
-  return chrome.storage.session.set({ activeJob });
+  return Promise.all([
+    chrome.storage.session.set({ activeJob }),
+    chrome.storage.local.set({
+      activeJobRecovery: activeJobRecoverySnapshot(activeJob)
+    })
+  ]);
 }
 
 function enqueueSearchMessage(handler, fallbackError) {
@@ -78,6 +153,18 @@ function enqueueReviewMessage(handler, fallbackError) {
   });
 }
 
+function enqueueDetailMessage(handler, fallbackError) {
+  const task = detailMessageQueue
+    .catch(() => undefined)
+    .then(handler);
+  detailMessageQueue = task.catch(() => undefined);
+  void task.catch((error) => {
+    void logJob(
+      error instanceof Error ? error.message : fallbackError
+    ).catch(() => undefined);
+  });
+}
+
 function clearPageTimeout() {
   clearTimeout(pageTimer);
   if (activeJob) activeJob.pageDeadline = null;
@@ -101,14 +188,12 @@ async function handlePageTimeout() {
   if (!activeJob || !activeJob.pageDeadline || Date.now() < activeJob.pageDeadline) return;
   if (activeJob.phase === 'DETAIL' && activeJob.currentProduct) {
     if (activeJob.pendingDetailData) {
-      const bufferedReviews = Array.isArray(activeJob.reviewBuffer)
-        ? activeJob.reviewBuffer
-        : [];
+      const reviewsCollected = Number(activeJob.reviewsCollected || 0);
       await completeCurrentDetail({
         ...activeJob.pendingDetailData,
-        reviewsCollected: bufferedReviews.length,
-        reviews: bufferedReviews,
-        reviewsStatus: bufferedReviews.length ? 'PARTIAL' : 'FAILED',
+        reviewsCollected,
+        ...reviewRatingSummary(),
+        reviewsStatus: reviewsCollected ? 'PARTIAL' : 'FAILED',
         reviewsError: activeJob.reviewsApiError ||
           `Không nhận được dữ liệu đánh giá từ ${platformLabel(activeJob)} sau 90 giây.`
       });
@@ -253,7 +338,7 @@ function findItemObject(entry) {
     entry?.data?.item,
     entry
   ];
-  return candidates.find((candidate) => (
+  const isItemCandidate = (candidate) => (
     candidate &&
     typeof candidate === 'object' &&
     (
@@ -263,7 +348,83 @@ function findItemObject(entry) {
       candidate.title ||
       candidate.item_name
     )
-  )) || {};
+  );
+  const directMatch = candidates.find(isItemCandidate);
+  if (directMatch) return directMatch;
+
+  const queue = [{ value: entry, depth: 0 }];
+  const visited = new WeakSet();
+  let inspected = 0;
+  let richestMatch = null;
+  let richestScore = -1;
+  while (queue.length && inspected < 300) {
+    const current = queue.shift();
+    const value = current?.value;
+    const depth = current?.depth ?? 0;
+    if (!value || typeof value !== 'object' || visited.has(value)) continue;
+    visited.add(value);
+    inspected += 1;
+    if (isItemCandidate(value)) {
+      const score = [
+        value.itemid || value.item_id,
+        value.shopid || value.shop_id,
+        value.name || value.title || value.item_name,
+        value.image || value.images?.length,
+        value.price || value.price_min || value.price_info
+      ].filter(Boolean).length;
+      if (score > richestScore) {
+        richestMatch = value;
+        richestScore = score;
+      }
+    }
+    if (depth >= 6) continue;
+    for (const [key, child] of Object.entries(value)) {
+      if (
+        child &&
+        typeof child === 'object' &&
+        (
+          depth < 2 ||
+          /(?:item|product|card|data|basic|display|asset|content)/i.test(key)
+        )
+      ) {
+        queue.push({ value: child, depth: depth + 1 });
+      }
+    }
+  }
+  return richestMatch || {};
+}
+
+function findNestedField(root, fieldNames) {
+  if (!root || typeof root !== 'object') return undefined;
+  const wanted = new Set(fieldNames);
+  const queue = [{ value: root, depth: 0 }];
+  const visited = new WeakSet();
+  let inspected = 0;
+  while (queue.length && inspected < 300) {
+    const current = queue.shift();
+    const value = current?.value;
+    const depth = current?.depth ?? 0;
+    if (!value || typeof value !== 'object' || visited.has(value)) continue;
+    visited.add(value);
+    inspected += 1;
+    for (const [key, child] of Object.entries(value)) {
+      if (wanted.has(key) && child !== null && child !== undefined && child !== '') {
+        return child;
+      }
+      if (
+        depth < 6 &&
+        child &&
+        typeof child === 'object' &&
+        (
+          depth < 2 ||
+          /(?:item|product|card|data|basic|display|asset|content|price|rating|review|comment|summary)/i.test(key)
+        )
+      ) {
+        queue.push({ value: child, depth: depth + 1 });
+      }
+    }
+  }
+  return undefined;
 }
 
 function extractNumber(value) {
@@ -320,24 +481,102 @@ function unixTimestamp(value) {
   return new Date(numeric * (numeric < 10_000_000_000 ? 1000 : 1)).toISOString();
 }
 
-function imageUrl(value) {
-  const image = typeof value === 'object'
-    ? (
-      value?.full_url ||
-      value?.display_url ||
-      value?.image_url ||
-      value?.display_image ||
-      value?.image_id ||
-      value?.image ||
+function imageUrl(value, depth = 0) {
+  if (depth > 6 || value === null || value === undefined) return '';
+  if (Array.isArray(value)) {
+    for (const candidate of value) {
+      const resolved = imageUrl(candidate, depth + 1);
+      if (resolved) return resolved;
+    }
+    return '';
+  }
+  if (typeof value === 'object') {
+    const candidates = [
+      value?.full_url,
+      value?.display_url,
+      value?.image_url,
+      value?.url_list,
+      value?.urlList,
+      value?.urls,
+      value?.display_image,
+      value?.thumbnail,
+      value?.cover_image,
+      value?.cover,
+      value?.image_id,
+      value?.image,
       value?.url
-    )
-    : value;
-  if (!image) return '';
-  if (image !== value && typeof image === 'object') return imageUrl(image);
-  const text = String(image);
+    ];
+    for (const candidate of candidates) {
+      const resolved = imageUrl(candidate, depth + 1);
+      if (resolved) return resolved;
+    }
+    for (const [key, candidate] of Object.entries(value)) {
+      if (!/(?:image|thumbnail|cover|url[_-]?list|display[_-]?asset)/i.test(key)) continue;
+      const resolved = imageUrl(candidate, depth + 1);
+      if (resolved) return resolved;
+    }
+    return '';
+  }
+  const text = String(value).replace(/\\u002F/g, '/').trim();
+  if (!text || text.startsWith('data:') || text === '[object Object]') return '';
   if (/^https?:\/\//i.test(text)) return text;
   if (text.startsWith('//')) return `https:${text}`;
+  if (/\s/.test(text) || text.length < 8) return '';
   return `https://down-vn.img.susercontent.com/file/${text}`;
+}
+
+function findNestedImage(root) {
+  if (!root || typeof root !== 'object') return '';
+  const queue = [{ value: root, depth: 0 }];
+  const visited = new WeakSet();
+  let inspected = 0;
+  while (queue.length && inspected < 500) {
+    const current = queue.shift();
+    const value = current?.value;
+    const depth = current?.depth ?? 0;
+    if (!value || typeof value !== 'object' || visited.has(value)) continue;
+    visited.add(value);
+    inspected += 1;
+    for (const [key, child] of Object.entries(value)) {
+      if (/(?:^|_)(?:image|images|image_id|image_info|image_list|thumbnail|cover_image|display_image|display_asset)(?:$|_)/i.test(key)) {
+        const resolved = imageUrl(child);
+        if (resolved) return resolved;
+      }
+      if (depth < 6 && child && typeof child === 'object') {
+        queue.push({ value: child, depth: depth + 1 });
+      }
+    }
+  }
+  return '';
+}
+
+function normalizeSoldValue(value) {
+  if (value === null || value === undefined || value === '') return 0;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+  if (typeof value === 'object') {
+    const candidates = [
+      value.value,
+      value.count,
+      value.total,
+      value.historical_sold,
+      value.total_sold,
+      value.sold_count,
+      value.text,
+      value.display_text,
+      value.label
+    ];
+    for (const candidate of candidates) {
+      const normalized = normalizeSoldValue(candidate);
+      if (normalized !== 0 && normalized !== '') return normalized;
+    }
+    return 0;
+  }
+  const text = String(value).replace(/\s+/g, ' ').trim();
+  if (!text) return 0;
+  const match = text.match(
+    /(\d+(?:[.,]\d+)?\s*(?:k|nghìn|tr|triệu)?\+?)(?:\s*(?:đã bán|sold))?/i
+  );
+  return match ? match[1].replace(/\s+/g, '') : 0;
 }
 
 function firstTikTokImage(...values) {
@@ -564,10 +803,20 @@ function mapItem(entry, context = {}) {
     item?.item_price ??
     entry?.price_info ??
     entry?.display_price ??
-    entry?.item_card_display_price
+    entry?.item_card_display_price ??
+    findNestedField(entry, [
+      'price_min',
+      'price',
+      'price_info',
+      'item_price',
+      'display_price',
+      'item_card_display_price'
+    ])
   );
-  const itemId = item?.itemid ?? item?.item_id;
-  const shopId = item?.shopid ?? item?.shop_id;
+  const itemId = item?.itemid ?? item?.item_id ??
+    findNestedField(entry, ['itemid', 'item_id']);
+  const shopId = item?.shopid ?? item?.shop_id ??
+    findNestedField(entry, ['shopid', 'shop_id']);
   const searchPosition = Number(context.position || 0);
   const adId = entry?.adsid ?? entry?.item_card?.adsid ?? item?.adsid;
   const campaignId = entry?.campaignid ?? entry?.item_card?.campaignid;
@@ -587,7 +836,38 @@ function mapItem(entry, context = {}) {
     item?.image?.image_id ??
     item?.image ??
     item?.images?.[0]?.image_id ??
-    item?.images?.[0]
+    item?.images?.[0] ??
+    entry?.image ??
+    entry?.images?.[0] ??
+    entry?.item_card?.image ??
+    entry?.item_card?.images?.[0] ??
+    findNestedField(entry, [
+      'image_url',
+      'imageUrl',
+      'display_image',
+      'displayImage',
+      'thumbnail',
+      'cover_image',
+      'coverImage',
+      'image_id'
+    ]) ??
+    findNestedImage(entry)
+  );
+  const resolvedImage = imageUrl(imageId) || findNestedImage(entry);
+  const sold = normalizeSoldValue(
+    item?.historical_sold ??
+    item?.total_sold ??
+    item?.sold ??
+    item?.sold_count ??
+    item?.soldCount ??
+    findNestedField(entry, [
+      'historical_sold',
+      'total_sold',
+      'sold',
+      'sold_count',
+      'soldCount'
+    ]) ??
+    0
   );
   return {
     itemId: itemId === undefined || itemId === null ? '' : String(itemId),
@@ -597,6 +877,7 @@ function mapItem(entry, context = {}) {
       item?.title ||
       item?.item_name ||
       entry?.display_name ||
+      findNestedField(entry, ['name', 'title', 'item_name', 'display_name']) ||
       ''
     ).trim(),
     price: priceValue !== null
@@ -605,7 +886,7 @@ function mapItem(entry, context = {}) {
     priceValue,
     originalPrice,
     discountPercent: extractNumber(item?.discount ?? item?.discount_percentage),
-    sold: item?.historical_sold ?? item?.sold ?? item?.sold_count ?? 0,
+    sold,
     searchKeyword: String(context.keyword || ''),
     searchPage: Number(context.page || 0),
     searchPosition,
@@ -621,7 +902,7 @@ function mapItem(entry, context = {}) {
       item?.is_preferred_plus
     ),
     url: itemId && shopId ? `https://shopee.vn/product/${shopId}/${itemId}` : '',
-    image: imageUrl(imageId),
+    image: resolvedImage,
     observedAt: new Date().toISOString()
   };
 }
@@ -677,12 +958,38 @@ function mapDetailPayload(payload, expectedProduct) {
     : [];
   const brandAttribute = attributes.find((attribute) => /brand|thương hiệu/i.test(attribute.name));
   const rating = item?.item_rating ?? item?.rating ?? {};
-  const ratingCount = extractNumber(
+  const rawRatingCount = (
     rating?.rating_count ??
     rating?.count ??
     item?.rating_count ??
-    item?.cmt_count
+    item?.cmt_count ??
+    findNestedField(root, [
+      'rating_total',
+      'rating_count',
+      'review_count',
+      'cmt_count'
+    ])
   );
+  const ratingCount = extractNumber(
+    Array.isArray(rawRatingCount) ? rawRatingCount[0] : rawRatingCount
+  );
+  const rawTotalSold = (
+    item?.historical_sold ??
+    item?.total_sold ??
+    root?.historical_sold ??
+    root?.total_sold ??
+    findNestedField(root, ['historical_sold', 'total_sold'])
+  );
+  const rawRecentSold = (
+    item?.sold ??
+    item?.monthly_sold ??
+    root?.sold ??
+    root?.monthly_sold ??
+    findNestedField(root, ['sold', 'monthly_sold', 'sold_count'])
+  );
+  const sold = normalizeSoldValue(
+    rawTotalSold ?? rawRecentSold ?? expectedProduct?.sold ?? null
+  ) || null;
   const ratingBreakdown = Array.isArray(rating?.rating_count)
     ? rating.rating_count.map((count, index) => ({
       star: index === 0 ? 'all' : index,
@@ -823,8 +1130,9 @@ function mapDetailPayload(payload, expectedProduct) {
     rating: extractNumber(rating?.rating_star ?? rating?.rating ?? item?.rating_star),
     ratingCount,
     ratingBreakdown,
-    totalSold: extractNumber(item?.historical_sold ?? item?.total_sold),
-    salesLast30Days: extractNumber(item?.sold ?? item?.monthly_sold),
+    sold,
+    totalSold: extractNumber(rawTotalSold),
+    salesLast30Days: extractNumber(rawRecentSold),
     stock: extractNumber(item?.stock ?? root?.stock),
     likedCount: extractNumber(item?.liked_count ?? item?.likedCount),
     viewCount: extractNumber(item?.view_count ?? item?.views),
@@ -901,24 +1209,24 @@ function mapReview(rating) {
     ? new Date(createdAtValue * (createdAtValue < 10_000_000_000 ? 1000 : 1)).toISOString()
     : '';
   const images = Array.isArray(rating?.images)
-    ? rating.images.map(imageUrl).filter(Boolean)
+    ? rating.images.map(imageUrl).filter(Boolean).map((value) => value.slice(0, 2000))
     : [];
   const videos = Array.isArray(rating?.videos)
     ? rating.videos
       .map((video) => video?.url || video?.video_url || video)
       .filter(Boolean)
-      .map(String)
+      .map((value) => String(value).slice(0, 2000))
     : [];
   const productItem = Array.isArray(rating?.product_items)
     ? rating.product_items[0]
     : rating?.product_item;
   const rawShopReply = rating?.seller_reply || rating?.shop_reply || rating?.reply;
   return {
-    reviewId: String(rating?.cmtid ?? rating?.comment_id ?? ''),
-    author: String(rating?.author_username || rating?.username || ''),
-    authorId: String(rating?.userid ?? rating?.user_id ?? ''),
+    reviewId: String(rating?.cmtid ?? rating?.comment_id ?? '').slice(0, 200),
+    author: String(rating?.author_username || rating?.username || '').slice(0, 1000),
+    authorId: String(rating?.userid ?? rating?.user_id ?? '').slice(0, 200),
     rating: extractNumber(rating?.rating_star ?? rating?.rating),
-    comment: String(rating?.comment || rating?.content || ''),
+    comment: String(rating?.comment || rating?.content || '').slice(0, 20_000),
     createdAt,
     variation: String(
       productItem?.model_name ||
@@ -927,11 +1235,11 @@ function mapReview(rating) {
       ''
     ),
     likes: extractNumber(rating?.like_count ?? rating?.likes),
-    images,
-    videos,
-    shopReply: typeof rawShopReply === 'object'
+    images: images.slice(0, 20),
+    videos: videos.slice(0, 10),
+    shopReply: (typeof rawShopReply === 'object'
       ? String(rawShopReply?.comment || rawShopReply?.content || rawShopReply?.reply || '')
-      : String(rawShopReply || '')
+      : String(rawShopReply || '')).slice(0, 20_000)
   };
 }
 
@@ -986,7 +1294,7 @@ function mapTikTokCommentsPayload(payload) {
 
 function maxReviewsForJob(job = activeJob) {
   return Math.min(
-    100,
+    MAX_REVIEWS_PER_PRODUCT,
     Math.max(0, Math.floor(Number(job?.maxReviewsPerProduct ?? 20)))
   );
 }
@@ -1002,9 +1310,9 @@ function expectedReviewTarget(value, job = activeJob) {
 }
 
 async function mergeReviewBuffer(reviews) {
-  if (!activeJob || !Array.isArray(reviews)) return [];
+  if (!activeJob || !Array.isArray(reviews)) return { length: 0 };
   const seen = new Set(activeJob.reviewSeen || []);
-  const buffer = Array.isArray(activeJob.reviewBuffer) ? activeJob.reviewBuffer : [];
+  const fresh = [];
   for (const review of reviews) {
     const key = String(
       review?.reviewId ||
@@ -1012,19 +1320,80 @@ async function mergeReviewBuffer(reviews) {
     );
     if (!key || seen.has(key)) continue;
     seen.add(key);
-    buffer.push(review);
-    if (buffer.length >= maxReviewsForJob(activeJob)) break;
+    fresh.push(review);
+    if (
+      Number(activeJob.reviewsCollected || 0) + fresh.length >=
+      maxReviewsForJob(activeJob)
+    ) break;
+  }
+  if (fresh.length) {
+    const chunks = [];
+    let chunk = [];
+    let chunkBytes = 0;
+    for (const review of fresh) {
+      const reviewBytes = new TextEncoder().encode(JSON.stringify(review)).length;
+      if (chunk.length && (chunk.length >= 50 || chunkBytes + reviewBytes > 70_000)) {
+        chunks.push(chunk);
+        chunk = [];
+        chunkBytes = 0;
+      }
+      chunk.push(review);
+      chunkBytes += reviewBytes;
+    }
+    if (chunk.length) chunks.push(chunk);
+
+    for (const reviewsChunk of chunks) {
+      const response = await api(
+        `/api/browser-agent/jobs/${activeJob.runId}/items/` +
+        `${encodeURIComponent(activeJob.currentProduct?.itemId || '')}/reviews`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            reviews: reviewsChunk,
+            summary: {
+              rating: activeJob.pendingDetailData?.rating,
+              ratingCount: activeJob.pendingDetailData?.ratingCount
+            }
+          })
+        }
+      );
+      const result = await response.json();
+      const acceptedTotal = Number(result?.total);
+      activeJob.reviewsCollected = Number.isFinite(acceptedTotal)
+        ? acceptedTotal
+        : Number(activeJob.reviewsCollected || 0) + reviewsChunk.length;
+    }
+    for (const review of fresh) {
+      const rating = Number(review?.rating);
+      if (Number.isFinite(rating) && rating > 0) {
+        activeJob.reviewRatingSum = Number(activeJob.reviewRatingSum || 0) + rating;
+        activeJob.reviewsWithRating = Number(activeJob.reviewsWithRating || 0) + 1;
+      }
+    }
   }
   activeJob.reviewSeen = [...seen];
-  activeJob.reviewBuffer = buffer;
+  activeJob.reviewBuffer = [];
   await persistActiveJob();
-  return buffer;
+  return { length: Number(activeJob.reviewsCollected || 0) };
+}
+
+function reviewRatingSummary(job = activeJob) {
+  const reviewsWithRating = Number(job?.reviewsWithRating || 0);
+  const ratingSum = Number(job?.reviewRatingSum || 0);
+  return {
+    reviewsWithRating,
+    reviewsRatingAverage: reviewsWithRating > 0
+      ? Number((ratingSum / reviewsWithRating).toFixed(4))
+      : null
+  };
 }
 
 async function storeItems(items) {
   if (!activeJob || activeJob.phase !== 'SEARCH') return 0;
   const seenSet = new Set(activeJob.seen);
   const freshItems = [];
+  const itemEnrichments = [];
+  activeJob.itemImages = activeJob.itemImages || {};
   for (const [itemIndex, original] of items.entries()) {
     const fallbackPosition = itemIndex + 1;
     const item = {
@@ -1043,9 +1412,35 @@ async function storeItems(items) {
     };
     const key = String(item.itemId || item.url || item.title);
     const requiresPrice = activeJob.platform !== 'tiktok';
-    if (!item.title || (requiresPrice && !item.price) || seenSet.has(key)) continue;
+    if (!item.title || (requiresPrice && !item.price)) continue;
+    if (seenSet.has(key)) {
+      const existingProduct = activeJob.products.find(
+        (product) => String(product.itemId || '') === String(item.itemId || '')
+      );
+      const enrichment = { itemId: item.itemId };
+      if (item.itemId && item.image && !activeJob.itemImages[key]) {
+        activeJob.itemImages[key] = item.image;
+        enrichment.image = item.image;
+        if (existingProduct) existingProduct.image = item.image;
+      }
+      if (
+        item.itemId &&
+        item.sold !== null &&
+        item.sold !== undefined &&
+        item.sold !== '' &&
+        String(item.sold) !== '0'
+      ) {
+        enrichment.sold = item.sold;
+        if (existingProduct) existingProduct.sold = item.sold;
+      }
+      if (Object.keys(enrichment).length > 1) {
+        itemEnrichments.push(enrichment);
+      }
+      continue;
+    }
     seenSet.add(key);
     activeJob.seen.push(key);
+    activeJob.itemImages[key] = String(item.image || '');
     if (activeJob.includeDetails && item.itemId && item.url) {
       activeJob.products.push({
         itemId: item.itemId,
@@ -1055,6 +1450,7 @@ async function storeItems(items) {
         image: item.image,
         sourceType: item.sourceType || (activeJob.platform === 'tiktok' ? activeJob.mode : 'product'),
         description: item.description || '',
+        sold: item.sold ?? null,
         rating: item.rating ?? null,
         ratingCount: item.ratingCount ?? item.reviewCount ?? null,
         comments: item.comments ?? null
@@ -1063,15 +1459,45 @@ async function storeItems(items) {
     freshItems.push(item);
     if (activeJob.seen.length >= activeJob.maxItems) break;
   }
-  if (!freshItems.length) return 0;
-  activeJob.consecutiveNoNewPages = 0;
-  activeJob.lastNoNewPage = null;
+  if (freshItems.length) {
+    activeJob.consecutiveNoNewPages = 0;
+    activeJob.lastNoNewPage = null;
+  }
   await persistActiveJob();
-  await api(`/api/browser-agent/jobs/${activeJob.runId}/items`, {
-    method: 'POST',
-    body: JSON.stringify({ items: freshItems })
-  });
+  if (freshItems.length) {
+    await api(`/api/browser-agent/jobs/${activeJob.runId}/items`, {
+      method: 'POST',
+      body: JSON.stringify({ items: freshItems })
+    });
+  }
+  if (itemEnrichments.length) {
+    await api(`/api/browser-agent/jobs/${activeJob.runId}/items/enrich`, {
+      method: 'POST',
+      body: JSON.stringify({ items: itemEnrichments })
+    });
+  }
   return freshItems.length;
+}
+
+async function enrichStoredProductFromDetail(product, detail) {
+  if (!activeJob || !product?.itemId || !detail) return;
+  const image = imageUrl(detail?.image) || imageUrl(detail?.images);
+  const sold = normalizeSoldValue(detail?.sold ?? detail?.totalSold);
+  const rating = extractNumber(detail?.rating);
+  const ratingCount = extractNumber(detail?.ratingCount);
+  if (!image && !sold && rating === null && ratingCount === null) return;
+  await api(`/api/browser-agent/jobs/${activeJob.runId}/items/enrich`, {
+    method: 'POST',
+    body: JSON.stringify({
+      items: [{
+        itemId: product.itemId,
+        ...(image ? { image } : {}),
+        ...(sold ? { sold } : {}),
+        ...(rating === null ? {} : { rating }),
+        ...(ratingCount === null ? {} : { ratingCount })
+      }]
+    })
+  }).catch(() => undefined);
 }
 
 async function recordPageItems(page, count) {
@@ -1168,7 +1594,9 @@ async function scheduleNextPage() {
   const runId = activeJob.runId;
   const nextPage = activeJob.scheduledPage;
   const nextUrl = searchUrlForJob(activeJob, nextPage);
-  const delay = 2000 + Math.floor(Math.random() * 800);
+  const delay = activeJob.platform === 'shopee'
+    ? 1000 + Math.floor(Math.random() * 1000)
+    : 1200 + Math.floor(Math.random() * 500);
   await persistActiveJob();
   await logJob(
     `Waiting ${(delay / 1000).toFixed(1)} seconds before loading ` +
@@ -1189,6 +1617,47 @@ async function scheduleNextPage() {
       void finishJob(false, error?.message || 'Không thể mở trang tìm kiếm Shopee.');
     });
   }, delay);
+}
+
+async function retryCurrentShopeePage(page, itemCount) {
+  if (
+    !activeJob ||
+    activeJob.platform !== 'shopee' ||
+    activeJob.phase !== 'SEARCH' ||
+    activeJob.navigationScheduled
+  ) return false;
+  const key = String(page);
+  const retries = Number(activeJob.pageRetryCounts?.[key] || 0);
+  if (retries >= MAX_SHOPEE_PAGE_RETRIES) return false;
+
+  clearPageTimeout();
+  activeJob.pageRetryCounts = activeJob.pageRetryCounts || {};
+  activeJob.pageRetryCounts[key] = retries + 1;
+  activeJob.navigationScheduled = true;
+  const runId = activeJob.runId;
+  const delay = 1000;
+  await persistActiveJob();
+  await logJob(
+    `Shopee page ${page} returned only ${itemCount} products; ` +
+    `retrying the same page (${retries + 1}/${MAX_SHOPEE_PAGE_RETRIES}).`
+  );
+  setTimeout(() => {
+    if (
+      !activeJob ||
+      activeJob.runId !== runId ||
+      activeJob.phase !== 'SEARCH' ||
+      activeJob.page !== page
+    ) return;
+    activeJob.navigationScheduled = false;
+    void persistActiveJob();
+    armPageTimeout(searchTimeoutForJob(activeJob));
+    chrome.tabs.update(activeJob.tabId, {
+      url: searchUrlForJob(activeJob, page)
+    }).catch((error) => {
+      void finishJob(false, error?.message || 'Không thể tải lại trang tìm kiếm Shopee.');
+    });
+  }, delay);
+  return true;
 }
 
 async function continueAfterNoNewSearchData(message) {
@@ -1236,6 +1705,19 @@ async function finishJob(success, error) {
   const job = activeJob;
   activeJob = null;
   clearTimeout(pageTimer);
+  clearTimeout(searchImageReadyTimer);
+  searchImageReadyTimer = null;
+  chrome.alarms.clear(SHOPEE_IMAGE_READY_ALARM).catch(() => undefined);
+  for (const timer of detailWorkerTimers.values()) clearTimeout(timer);
+  detailWorkerTimers.clear();
+  for (const worker of job.detailWorkers || []) {
+    chrome.alarms.clear(
+      `${DETAIL_DEADLINE_ALARM_PREFIX}${worker.tabId}`
+    ).catch(() => undefined);
+    chrome.alarms.clear(
+      `${DETAIL_READY_ALARM_PREFIX}${worker.tabId}`
+    ).catch(() => undefined);
+  }
   await persistActiveJob();
   try {
     await api(`/api/browser-agent/jobs/${job.runId}/${success ? 'complete' : 'fail'}`, {
@@ -1247,13 +1729,629 @@ async function finishJob(success, error) {
   } catch {
     // The dashboard can still stop or delete a run if the local API disappears.
   } finally {
-    if (job.windowId) {
-      chrome.windows.remove(job.windowId).catch(() => undefined);
+    const crawlerWindowIds = new Set(
+      [job.windowId, ...(job.detailWorkers || []).map((worker) => worker.windowId)]
+        .filter((windowId) => windowId !== null && windowId !== undefined)
+        .map(Number)
+        .filter((windowId) => Number.isInteger(windowId) && windowId > 0)
+    );
+    if (crawlerWindowIds.size) {
+      await Promise.all(
+        [...crawlerWindowIds].map((windowId) => (
+          chrome.windows.remove(windowId).catch(() => undefined)
+        ))
+      );
     } else if (job.tabId) {
       chrome.tabs.remove(job.tabId).catch(() => undefined);
     }
     schedulePoll(1000);
   }
+}
+
+function shopeeDetailWorker(tabId) {
+  if (!activeJob || activeJob.platform !== 'shopee') return null;
+  return activeJob.detailWorkers?.find((worker) => worker.tabId === tabId) || null;
+}
+
+function emptyDetailWorker(tabId, slot, windowId = null) {
+  return {
+    tabId,
+    slot,
+    windowId,
+    productIndex: null,
+    currentProduct: null,
+    detailHandledFor: null,
+    pendingDetailData: null,
+    sparseDetailData: null,
+    sparseRechecks: 0,
+    readyProbeCount: 0,
+    readyReloads: 0,
+    reviewRequestedFor: null,
+    reviewsApiError: '',
+    reviewSeen: [],
+    reviewsCollected: 0,
+    reviewRatingSum: 0,
+    reviewsWithRating: 0,
+    reviewApiPending: false,
+    reviewDomFinal: false,
+    reviewDomRetryRounds: 0,
+    reviewPageReloads: 0,
+    waitingForReview: false,
+    deadline: null,
+    busy: false
+  };
+}
+
+async function createShopeeAgentWindow(slot) {
+  const crawlerWindow = await chrome.windows.create({
+    url: 'about:blank',
+    type: 'normal',
+    focused: false,
+    width: 1100,
+    height: 820,
+    left: 40 + Number(slot || 0) * 24,
+    top: 40 + Number(slot || 0) * 24
+  });
+  const tab = crawlerWindow.tabs?.[0];
+  if (!crawlerWindow.id || !tab?.id) {
+    throw new Error(`Không thể tạo cửa sổ cho Shopee agent ${Number(slot || 0) + 1}.`);
+  }
+  return { tabId: tab.id, windowId: crawlerWindow.id };
+}
+
+async function restartShopeeAgentWindow(worker, reason) {
+  if (!activeJob || !worker?.currentProduct) return;
+  const product = worker.currentProduct;
+  const productIndex = worker.productIndex;
+  const replacement = await createShopeeAgentWindow(worker.slot);
+  Object.assign(
+    worker,
+    emptyDetailWorker(replacement.tabId, worker.slot, replacement.windowId),
+    {
+      productIndex,
+      currentProduct: product,
+      busy: true
+    }
+  );
+  if (Number(worker.slot || 0) === 0) {
+    activeJob.tabId = replacement.tabId;
+    activeJob.windowId = replacement.windowId;
+  }
+  await persistActiveJob();
+  await logJob(
+    `Shopee agent ${worker.slot + 1} recreated its browser window` +
+    `${reason ? ` after ${reason}` : ''}; resuming the same product.`
+  );
+  await chrome.tabs.update(worker.tabId, { url: product.url, active: true });
+  armDetailWorkerDeadline(worker);
+  scheduleShopeeWorkerReadyProbe(worker);
+}
+
+function clearDetailWorkerTimer(worker) {
+  const timer = detailWorkerTimers.get(worker.tabId);
+  if (timer) clearTimeout(timer);
+  detailWorkerTimers.delete(worker.tabId);
+  chrome.alarms.clear(
+    `${DETAIL_DEADLINE_ALARM_PREFIX}${worker.tabId}`
+  ).catch(() => undefined);
+  chrome.alarms.clear(
+    `${DETAIL_READY_ALARM_PREFIX}${worker.tabId}`
+  ).catch(() => undefined);
+  worker.deadline = null;
+}
+
+function armDetailWorkerDeadline(worker, timeoutMs = DETAIL_TIMEOUT_MS) {
+  clearDetailWorkerTimer(worker);
+  const runId = activeJob?.runId;
+  const itemId = String(worker.currentProduct?.itemId || '');
+  worker.deadline = Date.now() + timeoutMs;
+  chrome.alarms.create(
+    `${DETAIL_DEADLINE_ALARM_PREFIX}${worker.tabId}`,
+    { when: worker.deadline }
+  );
+  void persistActiveJob();
+  const timer = setTimeout(() => {
+    if (
+      !activeJob ||
+      activeJob.runId !== runId ||
+      String(worker.currentProduct?.itemId || '') !== itemId
+    ) return;
+    enqueueDetailMessage(
+      () => failShopeeDetailWorker(worker, 'Không nhận đủ dữ liệu chi tiết sau 90 giây.'),
+      'Không thể xử lý thời hạn chi tiết Shopee.'
+    );
+  }, timeoutMs);
+  detailWorkerTimers.set(worker.tabId, timer);
+}
+
+function scheduleShopeeWorkerReadyProbe(worker, delayMs = SPARSE_DETAIL_RECHECK_MS) {
+  if (!worker?.busy || worker.reviewRequestedFor || worker.waitingForReview) return;
+  chrome.alarms.create(
+    `${DETAIL_READY_ALARM_PREFIX}${worker.tabId}`,
+    { when: Date.now() + Math.max(100, delayMs) }
+  );
+}
+
+async function probeShopeeWorkerDetail(worker) {
+  if (
+    !activeJob ||
+    activeJob.phase !== 'DETAIL' ||
+    !worker?.busy ||
+    !worker.currentProduct ||
+    worker.reviewRequestedFor ||
+    worker.waitingForReview
+  ) return;
+  const itemId = String(worker.currentProduct.itemId);
+  worker.readyProbeCount = Number(worker.readyProbeCount || 0) + 1;
+  await persistActiveJob();
+  try {
+    const response = await chrome.tabs.sendMessage(worker.tabId, {
+      type: 'REQUEST_SHOPEE_DETAIL_RECHECK',
+      itemId
+    });
+    if (response?.detail) {
+      await processShopeeWorkerDomDetail(response.detail, {
+        tab: { id: worker.tabId }
+      });
+      return;
+    }
+  } catch {
+    // The content script may not be attached until the navigation completes.
+  }
+  if (
+    activeJob &&
+    worker.busy &&
+    !worker.reviewRequestedFor &&
+    !worker.waitingForReview &&
+    worker.readyProbeCount < MAX_DETAIL_READY_PROBES
+  ) {
+    if (worker.readyProbeCount === 3) {
+      await logJob(
+        `Shopee detail worker ${worker.slot + 1} has not received rendered data; ` +
+        'continuing readiness checks.'
+      );
+    }
+    scheduleShopeeWorkerReadyProbe(worker);
+    return;
+  }
+  if (
+    activeJob &&
+    worker.busy &&
+    !worker.reviewRequestedFor &&
+    worker.readyReloads < 1
+  ) {
+    worker.readyReloads += 1;
+    worker.readyProbeCount = 0;
+    await persistActiveJob();
+    await logJob(
+      `Shopee detail worker ${worker.slot + 1} received no detail signal; ` +
+      'reloading its product tab once.'
+    );
+    await chrome.tabs.reload(worker.tabId, { bypassCache: true });
+    scheduleShopeeWorkerReadyProbe(worker);
+    return;
+  }
+  if (activeJob && worker.busy && !worker.reviewRequestedFor) {
+    await failShopeeDetailWorker(
+      worker,
+      'Trang sản phẩm đã tải lại nhưng không cung cấp dữ liệu chi tiết.'
+    );
+  }
+}
+
+function detailFieldScore(detail) {
+  if (!detail) return 0;
+  return [
+    Boolean(detail.title),
+    Boolean(detail.description),
+    Array.isArray(detail.images) && detail.images.length > 0,
+    Array.isArray(detail.models) && detail.models.length > 0,
+    Array.isArray(detail.variations) && detail.variations.length > 0,
+    detail.price !== null && detail.price !== undefined && detail.price !== '',
+    detail.rating !== null && detail.rating !== undefined,
+    detail.ratingCount !== null && detail.ratingCount !== undefined,
+    Boolean(detail.shopName || detail.shopId),
+    Array.isArray(detail.attributes) && detail.attributes.length > 0
+  ].filter(Boolean).length;
+}
+
+function richerDetailValue(current, incoming) {
+  if (incoming === null || incoming === undefined || incoming === '') return current;
+  if (current === null || current === undefined || current === '') return incoming;
+  if (Array.isArray(incoming)) {
+    return incoming.length > (Array.isArray(current) ? current.length : 0)
+      ? incoming
+      : current;
+  }
+  if (typeof incoming === 'number' && typeof current === 'number') {
+    if (incoming === 0 && current !== 0) return current;
+    if (current === 0 && incoming !== 0) return incoming;
+  }
+  if (typeof incoming === 'string' && typeof current === 'string') {
+    return incoming.length > current.length ? incoming : current;
+  }
+  return incoming;
+}
+
+function mergeDetailData(current, incoming) {
+  const merged = { ...(current || {}) };
+  for (const [key, value] of Object.entries(incoming || {})) {
+    merged[key] = richerDetailValue(merged[key], value);
+  }
+  return merged;
+}
+
+async function assignNextShopeeProduct(worker) {
+  if (!activeJob || activeJob.phase !== 'DETAIL' || activeJob.platform !== 'shopee') return;
+  clearDetailWorkerTimer(worker);
+  activeJob.detailAssignments = activeJob.detailAssignments || {};
+  let productIndex = Number(activeJob.detailNextIndex || 0);
+  while (productIndex < activeJob.products.length) {
+    const candidate = activeJob.products[productIndex];
+    const assignment = activeJob.detailAssignments[String(candidate.itemId)];
+    if (!assignment || assignment.status === 'PENDING') break;
+    productIndex += 1;
+  }
+  activeJob.detailNextIndex = productIndex;
+  if (productIndex >= activeJob.products.length) {
+    worker.busy = false;
+    worker.currentProduct = null;
+    worker.productIndex = null;
+    await persistActiveJob();
+    const allIdle = activeJob.detailWorkers.every((candidate) => !candidate.busy);
+    if (allIdle) await finishJob(true);
+    return;
+  }
+
+  const product = activeJob.products[productIndex];
+  activeJob.detailNextIndex = productIndex + 1;
+  activeJob.detailIndex = activeJob.detailNextIndex;
+  activeJob.detailAssignments[String(product.itemId)] = {
+    status: 'CLAIMED',
+    workerSlot: worker.slot,
+    productIndex,
+    claimedAt: Date.now()
+  };
+  Object.assign(
+    worker,
+    emptyDetailWorker(worker.tabId, worker.slot, worker.windowId),
+    {
+      productIndex,
+      currentProduct: product,
+      busy: true
+    }
+  );
+  await persistActiveJob();
+  await logJob(
+    `Shopee agent ${worker.slot + 1}/${activeJob.detailWorkers.length} claimed ` +
+    `product ${productIndex + 1}/${activeJob.products.length}.`
+  );
+  try {
+    await chrome.tabs.update(worker.tabId, { url: product.url, active: true });
+    armDetailWorkerDeadline(worker);
+    scheduleShopeeWorkerReadyProbe(worker);
+  } catch (error) {
+    await failShopeeDetailWorker(
+      worker,
+      error?.message || 'Không thể mở trang sản phẩm Shopee.'
+    );
+  }
+}
+
+async function patchShopeeDetailWorker(worker, detail) {
+  if (!activeJob || !worker.currentProduct) return;
+  worker.waitingForReview = false;
+  const itemId = String(worker.currentProduct.itemId);
+  const failed = detail.detailStatus === 'FAILED';
+  const projected = {
+    completed: activeJob.detailCompleted + (failed ? 0 : 1),
+    failed: activeJob.detailFailed + (failed ? 1 : 0),
+    total: activeJob.products.length
+  };
+  await api(
+    `/api/browser-agent/jobs/${activeJob.runId}/items/` +
+    `${encodeURIComponent(worker.currentProduct.itemId)}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify({ detail, progress: projected })
+    }
+  );
+  activeJob.detailAssignments[itemId] = {
+    ...(activeJob.detailAssignments[itemId] || {}),
+    status: failed ? 'FAILED' : 'COMPLETED',
+    workerSlot: worker.slot,
+    productIndex: worker.productIndex,
+    completedAt: Date.now()
+  };
+  activeJob.detailCompleted = projected.completed;
+  activeJob.detailFailed = projected.failed;
+  await assignNextShopeeProduct(worker);
+}
+
+async function completeShopeeDetailWorker(worker, detail) {
+  if (!activeJob || !worker.currentProduct || !worker.busy) return;
+  const key = String(worker.currentProduct.itemId);
+  if (worker.detailHandledFor === key) return;
+  worker.detailHandledFor = key;
+  clearDetailWorkerTimer(worker);
+  await persistActiveJob();
+  await patchShopeeDetailWorker(worker, { ...detail, detailStatus: 'COMPLETED' });
+}
+
+async function failShopeeDetailWorker(worker, error) {
+  if (!activeJob || !worker.currentProduct || !worker.busy) return;
+  const key = String(worker.currentProduct.itemId);
+  if (worker.detailHandledFor === key) return;
+  worker.detailHandledFor = key;
+  clearDetailWorkerTimer(worker);
+  await persistActiveJob();
+  await patchShopeeDetailWorker(worker, {
+    detailStatus: 'FAILED',
+    detailError: String(error || 'Không lấy được chi tiết sản phẩm.')
+  });
+}
+
+async function mergeShopeeWorkerReviews(worker, reviews) {
+  if (!activeJob || !worker.currentProduct || !Array.isArray(reviews)) {
+    return { length: 0 };
+  }
+  const seen = new Set(worker.reviewSeen || []);
+  const fresh = [];
+  for (const review of reviews) {
+    const key = String(
+      review?.reviewId ||
+      `${review?.author || ''}:${review?.createdAt || ''}:${review?.comment || ''}`
+    );
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    fresh.push(review);
+    if (Number(worker.reviewsCollected || 0) + fresh.length >= maxReviewsForJob()) break;
+  }
+  for (let offset = 0; offset < fresh.length; offset += 50) {
+    const reviewsChunk = fresh.slice(offset, offset + 50);
+    const response = await api(
+      `/api/browser-agent/jobs/${activeJob.runId}/items/` +
+      `${encodeURIComponent(worker.currentProduct.itemId)}/reviews`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          reviews: reviewsChunk,
+          summary: {
+            rating: worker.pendingDetailData?.rating,
+            ratingCount: worker.pendingDetailData?.ratingCount
+          }
+        })
+      }
+    );
+    const result = await response.json();
+    const acceptedTotal = Number(result?.total);
+    worker.reviewsCollected = Number.isFinite(acceptedTotal)
+      ? acceptedTotal
+      : Number(worker.reviewsCollected || 0) + reviewsChunk.length;
+  }
+  for (const review of fresh) {
+    const rating = Number(review?.rating);
+    if (Number.isFinite(rating) && rating > 0) {
+      worker.reviewRatingSum += rating;
+      worker.reviewsWithRating += 1;
+    }
+  }
+  worker.reviewSeen = [...seen];
+  await persistActiveJob();
+  return { length: Number(worker.reviewsCollected || 0) };
+}
+
+async function requestShopeeWorkerReviews(worker, detail) {
+  if (!activeJob || !worker.currentProduct || !worker.busy) return;
+  const key = String(worker.currentProduct.itemId);
+  if (worker.reviewRequestedFor === key) return;
+  await enrichStoredProductFromDetail(worker.currentProduct, detail);
+  worker.pendingDetailData = mergeDetailData(worker.pendingDetailData, detail);
+  activeJob.reviewOwnerTabId = null;
+  worker.waitingForReview = false;
+  armDetailWorkerDeadline(worker);
+  worker.reviewRequestedFor = key;
+  worker.reviewApiPending = true;
+  worker.reviewDomFinal = false;
+  worker.reviewDomRetryRounds = 0;
+  await persistActiveJob();
+  const limit = maxReviewsForJob();
+  if (limit === 0) {
+    await completeShopeeDetailWorker(worker, {
+      ...detail,
+      reviewsCollected: 0,
+      reviewsStatus: 'SKIPPED',
+      reviewsError: ''
+    });
+    return;
+  }
+  let response;
+  try {
+    await new Promise((resolve) => {
+      setTimeout(resolve, 250 + Number(worker.slot || 0) * 350);
+    });
+    response = await chrome.tabs.sendMessage(worker.tabId, {
+      type: 'REQUEST_SHOPEE_REVIEWS',
+      itemId: worker.currentProduct.itemId,
+      shopId: worker.currentProduct.shopId,
+      limit
+    });
+    if (response?.ok === false) {
+      throw new Error(response.error || 'Không thể đọc vùng đánh giá trên trang.');
+    }
+  } catch (error) {
+    await completeShopeeDetailWorker(worker, {
+      ...detail,
+      reviewsCollected: 0,
+      reviewsStatus: 'FAILED',
+      reviewsError: error?.message || 'Không thể yêu cầu dữ liệu đánh giá Shopee.'
+    });
+    return;
+  }
+  if (
+    Number(response?.renderedCount ?? 0) === 0 &&
+    Number(detail.ratingCount) === 0
+  ) {
+    await completeShopeeDetailWorker(worker, {
+      ...detail,
+      reviewsCollected: 0,
+      reviewsStatus: 'COMPLETED',
+      reviewsError: ''
+    });
+  }
+}
+
+async function acceptOrRecheckShopeeDetail(worker, detail) {
+  if (!activeJob || !worker.currentProduct || !worker.busy) return;
+  worker.sparseDetailData = mergeDetailData(worker.sparseDetailData, detail);
+  const score = detailFieldScore(worker.sparseDetailData);
+  if (score >= 5 || worker.sparseRechecks >= 1) {
+    await requestShopeeWorkerReviews(worker, {
+      ...worker.sparseDetailData,
+      itemId: String(worker.currentProduct.itemId),
+      detailStatus: 'COMPLETED'
+    });
+    return;
+  }
+  worker.sparseRechecks += 1;
+  const runId = activeJob.runId;
+  const itemId = String(worker.currentProduct.itemId);
+  await persistActiveJob();
+  await logJob(
+    `Shopee product ${worker.productIndex + 1} has sparse detail data; ` +
+    'checking the rendered page again in 1 second.'
+  );
+  setTimeout(() => {
+    if (
+      !activeJob ||
+      activeJob.runId !== runId ||
+      String(worker.currentProduct?.itemId || '') !== itemId ||
+      worker.reviewRequestedFor
+    ) return;
+    chrome.tabs.sendMessage(worker.tabId, {
+      type: 'REQUEST_SHOPEE_DETAIL_RECHECK',
+      itemId
+    }).then((response) => {
+      if (!response?.detail) {
+        enqueueDetailMessage(
+          () => acceptOrRecheckShopeeDetail(worker, worker.sparseDetailData),
+          'Không thể xác nhận dữ liệu chi tiết Shopee.'
+        );
+      }
+    }).catch(() => {
+      enqueueDetailMessage(
+        () => acceptOrRecheckShopeeDetail(worker, worker.sparseDetailData),
+        'Không thể xác nhận dữ liệu chi tiết Shopee.'
+      );
+    });
+  }, SPARSE_DETAIL_RECHECK_MS);
+}
+
+async function beginShopeeDetailWorkers() {
+  const requested = Math.min(
+    MAX_DETAIL_CONCURRENCY,
+    Math.max(1, Math.floor(Number(activeJob.detailConcurrency || 1))),
+    activeJob.products.length
+  );
+  activeJob.detailNextIndex = 0;
+  activeJob.detailAssignments = {};
+  activeJob.reviewOwnerTabId = null;
+  activeJob.detailWorkers = [
+    emptyDetailWorker(activeJob.tabId, 0, activeJob.windowId)
+  ];
+  for (let slot = 1; slot < requested; slot += 1) {
+    const crawlerWindow = await createShopeeAgentWindow(slot);
+    activeJob.detailWorkers.push(
+      emptyDetailWorker(crawlerWindow.tabId, slot, crawlerWindow.windowId)
+    );
+  }
+  await persistActiveJob();
+  await logJob(
+    `Starting distributed Shopee detail crawl with ` +
+    `${activeJob.detailWorkers.length} independent browser windows for ` +
+    `${activeJob.products.length} products.`
+  );
+  for (const worker of activeJob.detailWorkers) {
+    await assignNextShopeeProduct(worker);
+  }
+}
+
+function shopeeImageCoverage(job = activeJob) {
+  if (!job) return { total: 0, withImage: 0 };
+  const total = Math.min(
+    Number(job.maxItems || 0),
+    Array.isArray(job.seen) ? job.seen.length : 0
+  );
+  const withImage = (job.seen || [])
+    .slice(0, total)
+    .filter((key) => Boolean(String(job.itemImages?.[key] || '').trim()))
+    .length;
+  return { total, withImage };
+}
+
+async function maybeBeginDetailAfterShopeeImages() {
+  if (
+    !activeJob ||
+    activeJob.phase !== 'SEARCH' ||
+    activeJob.seen.length < activeJob.maxItems
+  ) return false;
+
+  if (activeJob.platform !== 'shopee') {
+    await beginDetailPhase();
+    return true;
+  }
+
+  clearPageTimeout();
+  const { total, withImage } = shopeeImageCoverage();
+  const rounds = Number(activeJob.searchImageReadyRounds || 0);
+  if (total > 0 && withImage >= total) {
+    activeJob.searchImageReadyScheduled = false;
+    await chrome.alarms.clear(SHOPEE_IMAGE_READY_ALARM).catch(() => undefined);
+    await logJob(`Shopee product images are ready for ${withImage}/${total} items.`);
+    await beginDetailPhase();
+    return true;
+  }
+
+  if (rounds >= MAX_SHOPEE_IMAGE_READY_ROUNDS) {
+    activeJob.searchImageReadyScheduled = false;
+    await chrome.alarms.clear(SHOPEE_IMAGE_READY_ALARM).catch(() => undefined);
+    await logJob(
+      `Shopee product image coverage stopped at ${withImage}/${total} after ` +
+      `${MAX_SHOPEE_IMAGE_READY_ROUNDS} readiness checks; continuing detail crawl.`
+    );
+    await beginDetailPhase();
+    return true;
+  }
+
+  if (!activeJob.searchImageReadyScheduled) {
+    activeJob.searchImageReadyRounds = rounds + 1;
+    activeJob.searchImageReadyScheduled = true;
+    await persistActiveJob();
+    if (rounds === 0 || rounds === 4) {
+      await logJob(
+        `Shopee product images are ${withImage}/${total}; waiting for rendered cards ` +
+        `(${rounds + 1}/${MAX_SHOPEE_IMAGE_READY_ROUNDS}).`
+      );
+    }
+    chrome.tabs.sendMessage(activeJob.tabId, {
+      type: 'REQUEST_SHOPEE_SEARCH_RESCAN',
+      round: rounds
+    }).catch(() => undefined);
+    chrome.alarms.create(SHOPEE_IMAGE_READY_ALARM, {
+      when: Date.now() + 1000
+    });
+    clearTimeout(searchImageReadyTimer);
+    searchImageReadyTimer = setTimeout(() => {
+      searchImageReadyTimer = null;
+      chrome.alarms.clear(SHOPEE_IMAGE_READY_ALARM).catch(() => undefined);
+      if (activeJob) activeJob.searchImageReadyScheduled = false;
+      enqueueSearchMessage(
+        () => maybeBeginDetailAfterShopeeImages(),
+        'Không thể kiểm tra độ phủ ảnh sản phẩm Shopee.'
+      );
+    }, 1000);
+  }
+  return true;
 }
 
 async function beginDetailPhase() {
@@ -1263,8 +2361,12 @@ async function beginDetailPhase() {
     return;
   }
   clearPageTimeout();
+  clearTimeout(searchImageReadyTimer);
+  searchImageReadyTimer = null;
+  await chrome.alarms.clear(SHOPEE_IMAGE_READY_ALARM).catch(() => undefined);
   activeJob.phase = 'DETAIL';
   activeJob.navigationScheduled = false;
+  activeJob.searchImageReadyScheduled = false;
   activeJob.detailIndex = 0;
   activeJob.detailCompleted = 0;
   activeJob.detailFailed = 0;
@@ -1275,9 +2377,21 @@ async function beginDetailPhase() {
   activeJob.reviewsApiError = '';
   activeJob.reviewBuffer = [];
   activeJob.reviewSeen = [];
+  activeJob.reviewsCollected = 0;
+  activeJob.reviewRatingSum = 0;
+  activeJob.reviewsWithRating = 0;
   activeJob.reviewApiPending = false;
   activeJob.reviewDomFinal = false;
+  activeJob.reviewDomRetryRounds = 0;
+  activeJob.reviewPageReloads = 0;
   await persistActiveJob();
+  if (
+    activeJob.platform === 'shopee' &&
+    Number(activeJob.detailConcurrency || 1) > 1
+  ) {
+    await beginShopeeDetailWorkers();
+    return;
+  }
   await logJob(
     `Starting ${platformLabel(activeJob)} detail and review crawl for ` +
     `${activeJob.products.length} items.`
@@ -1301,8 +2415,13 @@ async function navigateNextDetail() {
   activeJob.reviewsApiError = '';
   activeJob.reviewBuffer = [];
   activeJob.reviewSeen = [];
+  activeJob.reviewsCollected = 0;
+  activeJob.reviewRatingSum = 0;
+  activeJob.reviewsWithRating = 0;
   activeJob.reviewApiPending = false;
   activeJob.reviewDomFinal = false;
+  activeJob.reviewDomRetryRounds = 0;
+  activeJob.reviewPageReloads = 0;
   activeJob.navigationScheduled = true;
   const runId = activeJob.runId;
   const productIndex = activeJob.detailIndex;
@@ -1353,8 +2472,13 @@ async function patchCurrentDetail(detail) {
   activeJob.reviewsApiError = '';
   activeJob.reviewBuffer = [];
   activeJob.reviewSeen = [];
+  activeJob.reviewsCollected = 0;
+  activeJob.reviewRatingSum = 0;
+  activeJob.reviewsWithRating = 0;
   activeJob.reviewApiPending = false;
   activeJob.reviewDomFinal = false;
+  activeJob.reviewDomRetryRounds = 0;
+  activeJob.reviewPageReloads = 0;
   await persistActiveJob();
   await navigateNextDetail();
 }
@@ -1386,10 +2510,12 @@ async function requestReviewsForCurrent(detail) {
   if (!activeJob?.currentProduct || activeJob.phase !== 'DETAIL') return;
   const key = String(activeJob.currentProduct.itemId);
   if (activeJob.reviewRequestedFor === key) return;
-  activeJob.pendingDetailData = detail;
+  await enrichStoredProductFromDetail(activeJob.currentProduct, detail);
+  activeJob.pendingDetailData = mergeDetailData(activeJob.pendingDetailData, detail);
   activeJob.reviewRequestedFor = key;
   activeJob.reviewApiPending = activeJob.platform === 'shopee';
   activeJob.reviewDomFinal = false;
+  activeJob.reviewDomRetryRounds = 0;
   await persistActiveJob();
 
   const limit = maxReviewsForJob(activeJob);
@@ -1397,7 +2523,6 @@ async function requestReviewsForCurrent(detail) {
     await completeCurrentDetail({
       ...detail,
       reviewsCollected: 0,
-      reviews: [],
       reviewsStatus: 'SKIPPED',
       reviewsError: ''
     });
@@ -1434,7 +2559,6 @@ async function requestReviewsForCurrent(detail) {
       await completeCurrentDetail({
         ...detail,
         reviewsCollected: 0,
-        reviews: [],
         reviewsStatus: 'COMPLETED',
         reviewsError: ''
       });
@@ -1448,7 +2572,6 @@ async function requestReviewsForCurrent(detail) {
     await completeCurrentDetail({
       ...detail,
       reviewsCollected: 0,
-      reviews: [],
       reviewsStatus: 'FAILED',
       reviewsError: error?.message ||
         `Không thể yêu cầu dữ liệu đánh giá từ tab ${platformLabel(activeJob)}.`
@@ -1520,8 +2643,17 @@ async function processSearchResponse(detail, sender) {
     return;
   }
 
-  if (activeJob.seen.length >= activeJob.maxItems) {
-    await beginDetailPhase();
+  if (await maybeBeginDetailAfterShopeeImages()) return;
+
+  const pageNewCount = Number(
+    activeJob.pageNewItemCounts?.[String(responsePage)] || 0
+  );
+  if (pageNewCount >= FAST_SHOPEE_PAGE_ITEMS) {
+    await logJob(
+      `Shopee page ${responsePage} already yielded ${pageNewCount} products; ` +
+      'loading the next page immediately.'
+    );
+    await scheduleNextPage();
     return;
   }
 
@@ -1583,10 +2715,7 @@ async function processTikTokSearchResponse(detail, sender) {
   }
 
   const storedCount = await storeItems(mappedItems);
-  if (activeJob.seen.length >= activeJob.maxItems) {
-    await beginDetailPhase();
-    return;
-  }
+  if (await maybeBeginDetailAfterShopeeImages()) return;
   if (!storedCount) {
     if (activeJob.seen.length > 0) {
       await continueAfterNoNewSearchData(
@@ -1597,6 +2726,279 @@ async function processTikTokSearchResponse(detail, sender) {
   }
   await logJob(`Captured ${storedCount} items from TikTok ${activeJob.mode} response.`);
   await scheduleNextPage();
+}
+
+async function processShopeeWorkerDetailResponse(detail, sender) {
+  const worker = shopeeDetailWorker(sender.tab?.id);
+  if (
+    !worker ||
+    !worker.currentProduct ||
+    !worker.busy ||
+    detail?.kind !== 'detail'
+  ) return;
+  const payload = detail?.payload;
+  if (
+    detail?.status === 401 ||
+    detail?.status === 403 ||
+    payload?.error === 90309999 ||
+    payload?.error_msg === 'Login Required'
+  ) {
+    await finishJob(false, 'Shopee yêu cầu đăng nhập lại trong Chrome.');
+    return;
+  }
+  if (detail?.status >= 400 || (payload?.error && payload.error !== 0)) return;
+  const mapped = mapDetailPayload(payload, worker.currentProduct);
+  if (!mapped) return;
+  if (
+    mapped.itemId &&
+    String(mapped.itemId) !== String(worker.currentProduct.itemId)
+  ) return;
+  armDetailWorkerDeadline(worker);
+  await acceptOrRecheckShopeeDetail(worker, mapped);
+}
+
+async function processShopeeWorkerReviewsResponse(detail, sender) {
+  const worker = shopeeDetailWorker(sender.tab?.id);
+  if (
+    !worker ||
+    !worker.currentProduct ||
+    !worker.pendingDetailData ||
+    detail?.kind !== 'reviews'
+  ) return;
+  const payload = detail?.payload;
+  let responseItemId = String(payload?.omnicrawlItemId || '');
+  if (!responseItemId) {
+    try {
+      responseItemId = String(
+        new URL(String(detail?.url || ''), 'https://shopee.vn')
+          .searchParams.get('itemid') || ''
+      );
+    } catch {
+      responseItemId = '';
+    }
+  }
+  if (
+    responseItemId &&
+    responseItemId !== String(worker.currentProduct.itemId)
+  ) return;
+
+  const isFinal = Boolean(payload?.omnicrawlFinal);
+  if (!isFinal) armDetailWorkerDeadline(worker);
+  if (isFinal) worker.reviewApiPending = false;
+  const error = String(payload?.error || '');
+  if (isFinal && error) worker.reviewsApiError = error;
+  const buffered = await mergeShopeeWorkerReviews(worker, mapReviewsPayload(payload));
+  if (isFinal) {
+    const apiCollected = Number(payload?.omnicrawlCollected || buffered.length || 0);
+    if (error && apiCollected === 0) {
+      activeJob.reviewApiFailureStreak =
+        Number(activeJob.reviewApiFailureStreak || 0) + 1;
+      if (
+        Number(activeJob.detailConcurrency || 1) > 1 &&
+        activeJob.reviewApiFailureStreak >= 2 &&
+        !activeJob.reviewApiDegraded
+      ) {
+        activeJob.reviewApiDegraded = true;
+        await logJob(
+          'Shopee review API failed on consecutive products; independent agents ' +
+          'will continue with rendered-review fallback without waiting for each other.'
+        );
+      }
+    } else if (apiCollected > 0 && !error) {
+      activeJob.reviewApiFailureStreak = 0;
+    }
+    await logJob(
+      `Shopee review API collected ${apiCollected}/${maxReviewsForJob()} ` +
+      `for item ${worker.productIndex + 1}/${activeJob.products.length}` +
+      `${error ? `; ${error}` : '.'}`
+    );
+  }
+
+  const ratingSummary = payload?.itemRatingSummary ?? payload?.data?.item_rating_summary;
+  const totalValue = Number(
+    payload?.total ?? payload?.data?.item_rating_summary?.rating_total
+  );
+  const total = Number.isFinite(totalValue) && totalValue >= 0 ? totalValue : null;
+  if (ratingSummary && typeof ratingSummary === 'object') {
+    const average = extractNumber(
+      ratingSummary.rating_star ??
+      ratingSummary.rating_average ??
+      ratingSummary.average
+    );
+    const counts = ratingSummary.rating_count;
+    worker.pendingDetailData = {
+      ...worker.pendingDetailData,
+      ...(total === null ? {} : { ratingCount: total }),
+      ...(average === null ? {} : { rating: average }),
+      ...(Array.isArray(counts) ? {
+        ratingBreakdown: counts.map((count, index) => ({
+          star: index === 0 ? 'all' : index,
+          count: extractNumber(count)
+        }))
+      } : {})
+    };
+  } else if (total !== null) {
+    worker.pendingDetailData = {
+      ...worker.pendingDetailData,
+      ratingCount: total
+    };
+  }
+  await persistActiveJob();
+
+  const target = total === null
+    ? maxReviewsForJob()
+    : Math.min(maxReviewsForJob(), total);
+  if (buffered.length < target) {
+    if (isFinal && worker.reviewDomFinal) {
+      await completeShopeeDetailWorker(worker, {
+        ...worker.pendingDetailData,
+        reviewsCollected: buffered.length,
+        ...reviewRatingSummary(worker),
+        reviewsStatus: buffered.length ? 'PARTIAL' : 'FAILED',
+        reviewsError: error || worker.reviewsApiError
+      });
+    }
+    return;
+  }
+  await completeShopeeDetailWorker(worker, {
+    ...worker.pendingDetailData,
+    reviewsCollected: buffered.length,
+    ...reviewRatingSummary(worker),
+    reviewsStatus: error ? 'PARTIAL' : 'COMPLETED',
+    reviewsError: error
+  });
+}
+
+async function processShopeeWorkerDomReviews(message, sender) {
+  const worker = shopeeDetailWorker(sender.tab?.id);
+  if (
+    !worker ||
+    !worker.currentProduct ||
+    !worker.pendingDetailData ||
+    !Array.isArray(message?.reviews)
+  ) return;
+  if (
+    message.itemId &&
+    String(message.itemId) !== String(worker.currentProduct.itemId)
+  ) return;
+  const renderedSummary = message?.ratingSummary;
+  if (renderedSummary && typeof renderedSummary === 'object') {
+    worker.pendingDetailData = mergeDetailData(worker.pendingDetailData, {
+      rating: extractNumber(renderedSummary.rating),
+      ratingCount: extractNumber(renderedSummary.ratingCount)
+    });
+    await enrichStoredProductFromDetail(
+      worker.currentProduct,
+      worker.pendingDetailData
+    );
+  }
+  const isFinal = Boolean(message.isFinal);
+  if (isFinal) worker.reviewDomFinal = true;
+  const mapped = message.reviews
+    .slice(0, maxReviewsForJob())
+    .map((review) => ({
+      reviewId: String(review?.reviewId || ''),
+      author: String(review?.author || ''),
+      authorId: String(review?.authorId || ''),
+      rating: extractNumber(review?.rating),
+      comment: String(review?.comment || ''),
+      createdAt: String(review?.createdAt || ''),
+      likes: extractNumber(review?.likes),
+      images: Array.isArray(review?.images) ? review.images.slice(0, 20).map(String) : [],
+      videos: Array.isArray(review?.videos) ? review.videos.slice(0, 10).map(String) : [],
+      variation: String(review?.variation || ''),
+      shopReply: String(review?.shopReply || '')
+    }))
+    .filter((review) => review.reviewId || review.comment);
+  const buffered = await mergeShopeeWorkerReviews(worker, mapped);
+  const expected = expectedReviewTarget(worker.pendingDetailData.ratingCount);
+  const reached = buffered.length >= expected;
+  const zeroWithKnownRatings = (
+    buffered.length === 0 &&
+    Number(worker.pendingDetailData.ratingCount || 0) > 0
+  );
+  const retryLimit = zeroWithKnownRatings
+    ? (worker.reviewPageReloads ? MAX_SHOPEE_ZERO_REVIEW_RETRIES : 1)
+    : MAX_SHOPEE_DOM_REVIEW_RETRIES;
+
+  if (
+    isFinal &&
+    !reached &&
+    !worker.reviewApiPending &&
+    worker.reviewDomRetryRounds < retryLimit
+  ) {
+    worker.reviewDomFinal = false;
+    worker.reviewDomRetryRounds += 1;
+    await persistActiveJob();
+    armDetailWorkerDeadline(worker);
+    await chrome.tabs.sendMessage(worker.tabId, {
+      type: 'REQUEST_SHOPEE_RENDERED_REVIEWS',
+      itemId: String(worker.currentProduct.itemId),
+      limit: maxReviewsForJob()
+    }).catch((error) => {
+      enqueueDetailMessage(
+        () => failShopeeDetailWorker(
+          worker,
+          error?.message || 'Không thể tiếp tục phân trang đánh giá Shopee.'
+        ),
+        'Không thể tiếp tục phân trang đánh giá Shopee.'
+      );
+    });
+    return;
+  }
+  if (
+    isFinal &&
+    zeroWithKnownRatings &&
+    !worker.reviewApiPending &&
+    Number(worker.reviewPageReloads || 0) < 1
+  ) {
+    worker.reviewPageReloads = Number(worker.reviewPageReloads || 0) + 1;
+    worker.reviewDomFinal = false;
+    worker.reviewDomRetryRounds = 0;
+    worker.reviewRequestedFor = null;
+    await persistActiveJob();
+    armDetailWorkerDeadline(worker);
+    await logJob(
+      `Shopee reports ${worker.pendingDetailData.ratingCount} ratings but rendered 0 reviews; ` +
+      'reloading the product page once before retrying.'
+    );
+    await chrome.tabs.reload(worker.tabId).catch((error) => {
+      enqueueDetailMessage(
+        () => failShopeeDetailWorker(
+          worker,
+          error?.message || 'Không thể tải lại trang đánh giá Shopee.'
+        ),
+        'Không thể tải lại trang đánh giá Shopee.'
+      );
+    });
+    return;
+  }
+  if (!reached && (!isFinal || worker.reviewApiPending)) return;
+  await completeShopeeDetailWorker(worker, {
+    ...worker.pendingDetailData,
+    reviewsCollected: buffered.length,
+    ...reviewRatingSummary(worker),
+    reviewsStatus: reached && !worker.reviewsApiError
+      ? 'COMPLETED'
+      : buffered.length
+        ? 'PARTIAL'
+        : 'FAILED',
+    reviewsError: worker.reviewsApiError || ''
+  });
+}
+
+async function processShopeeWorkerDomDetail(detail, sender) {
+  const worker = shopeeDetailWorker(sender.tab?.id);
+  if (!worker || !worker.currentProduct || !detail) return;
+  if (
+    detail.itemId &&
+    String(detail.itemId) !== String(worker.currentProduct.itemId)
+  ) return;
+  armDetailWorkerDeadline(worker);
+  await acceptOrRecheckShopeeDetail(worker, {
+    ...detail,
+    itemId: String(worker.currentProduct.itemId)
+  });
 }
 
 async function processDetailResponse(detail, sender) {
@@ -1654,6 +3056,9 @@ async function processReviewsResponse(detail, sender) {
   const currentItemId = String(activeJob.currentProduct?.itemId || '');
   if (responseItemId && responseItemId !== currentItemId) return;
   const isRequestedFinal = Boolean(payload?.omnicrawlFinal);
+  if (!isRequestedFinal) {
+    armPageTimeout(DETAIL_TIMEOUT_MS);
+  }
   if (isRequestedFinal) {
     activeJob.reviewApiPending = false;
     await persistActiveJob();
@@ -1661,9 +3066,11 @@ async function processReviewsResponse(detail, sender) {
   const reviews = mapReviewsPayload(payload);
   const error = String(payload?.error || '');
   const bufferedReviews = await mergeReviewBuffer(reviews);
-  if (error && reviews.length === 0) {
+  if (isRequestedFinal && error) {
     activeJob.reviewsApiError = error;
     await persistActiveJob();
+  }
+  if (error && reviews.length === 0) {
     await logJob(
       `Shopee review API was unavailable (${error}); waiting for rendered reviews.`
     );
@@ -1671,7 +3078,7 @@ async function processReviewsResponse(detail, sender) {
       await completeCurrentDetail({
         ...activeJob.pendingDetailData,
         reviewsCollected: bufferedReviews.length,
-        reviews: bufferedReviews,
+        ...reviewRatingSummary(),
         reviewsStatus: bufferedReviews.length ? 'PARTIAL' : 'FAILED',
         reviewsError: error
       });
@@ -1683,6 +3090,36 @@ async function processReviewsResponse(detail, sender) {
     payload?.data?.item_rating_summary?.rating_total
   );
   const total = Number.isFinite(totalValue) && totalValue >= 0 ? totalValue : null;
+  const ratingSummary = (
+    payload?.itemRatingSummary ??
+    payload?.data?.item_rating_summary
+  );
+  if (ratingSummary && typeof ratingSummary === 'object') {
+    const average = extractNumber(
+      ratingSummary?.rating_star ??
+      ratingSummary?.rating_average ??
+      ratingSummary?.average
+    );
+    const counts = ratingSummary?.rating_count;
+    activeJob.pendingDetailData = {
+      ...activeJob.pendingDetailData,
+      ...(total === null ? {} : { ratingCount: total }),
+      ...(average === null ? {} : { rating: average }),
+      ...(Array.isArray(counts) ? {
+        ratingBreakdown: counts.map((count, index) => ({
+          star: index === 0 ? 'all' : index,
+          count: extractNumber(count)
+        }))
+      } : {})
+    };
+    await persistActiveJob();
+  } else if (total !== null) {
+    activeJob.pendingDetailData = {
+      ...activeJob.pendingDetailData,
+      ratingCount: total
+    };
+    await persistActiveJob();
+  }
   const target = total === null
     ? maxReviewsForJob(activeJob)
     : Math.min(maxReviewsForJob(activeJob), total);
@@ -1695,7 +3132,7 @@ async function processReviewsResponse(detail, sender) {
       await completeCurrentDetail({
         ...activeJob.pendingDetailData,
         reviewsCollected: bufferedReviews.length,
-        reviews: bufferedReviews,
+        ...reviewRatingSummary(),
         reviewsStatus: 'PARTIAL',
         reviewsError: activeJob.reviewsApiError || ''
       });
@@ -1703,7 +3140,7 @@ async function processReviewsResponse(detail, sender) {
     return;
   }
   const reviewsStatus = error
-    ? (reviews.length ? 'PARTIAL' : 'FAILED')
+    ? (bufferedReviews.length ? 'PARTIAL' : 'FAILED')
     : 'COMPLETED';
   await logJob(
     `Captured ${bufferedReviews.length}/${target} reviews for product ` +
@@ -1712,7 +3149,7 @@ async function processReviewsResponse(detail, sender) {
   await completeCurrentDetail({
     ...activeJob.pendingDetailData,
     reviewsCollected: bufferedReviews.length,
-    reviews: bufferedReviews,
+    ...reviewRatingSummary(),
     reviewsStatus,
     reviewsError: error
   });
@@ -1774,7 +3211,7 @@ async function processTikTokReviewsResponse(detail, sender) {
   await completeCurrentDetail({
     ...activeJob.pendingDetailData,
     reviewsCollected: bufferedReviews.length,
-    reviews: bufferedReviews,
+    ...reviewRatingSummary(),
     reviewsStatus: error ? 'PARTIAL' : 'COMPLETED',
     reviewsError: error
   });
@@ -1796,6 +3233,20 @@ async function processDomReviews(message, sender, platform) {
     message?.itemId &&
     String(message.itemId) !== String(activeJob.currentProduct?.itemId || '')
   ) return;
+  if (
+    platform === 'shopee' &&
+    message?.ratingSummary &&
+    typeof message.ratingSummary === 'object'
+  ) {
+    activeJob.pendingDetailData = mergeDetailData(activeJob.pendingDetailData, {
+      rating: extractNumber(message.ratingSummary.rating),
+      ratingCount: extractNumber(message.ratingSummary.ratingCount)
+    });
+    await enrichStoredProductFromDetail(
+      activeJob.currentProduct,
+      activeJob.pendingDetailData
+    );
+  }
   if (platform === 'shopee' && isFinal) {
     activeJob.reviewDomFinal = true;
     await persistActiveJob();
@@ -1816,30 +3267,13 @@ async function processDomReviews(message, sender, platform) {
       shopReply: String(review?.shopReply || '')
     }))
     .filter((review) => review.reviewId || review.comment);
-  if (!mapped.length && !(activeJob.reviewBuffer || []).length) {
-    if (
-      platform === 'shopee' &&
-      isFinal &&
-      activeJob.reviewApiPending
-    ) {
-      await logJob('Rendered reviews finished; waiting for Shopee API pagination.');
-      return;
-    }
-    if (platform === 'shopee' && isFinal) {
-      const expected = expectedReviewTarget(
-        activeJob.pendingDetailData?.ratingCount,
-        activeJob
-      );
-      await completeCurrentDetail({
-        ...activeJob.pendingDetailData,
-        reviewsCollected: 0,
-        reviews: [],
-        reviewsStatus: expected === 0 ? 'COMPLETED' : 'FAILED',
-        reviewsError: activeJob.reviewsApiError || (
-          expected === 0 ? '' : 'Shopee returned no reviews for this product.'
-        )
-      });
-    }
+  if (
+    !mapped.length &&
+    platform === 'shopee' &&
+    isFinal &&
+    activeJob.reviewApiPending
+  ) {
+    await logJob('Rendered reviews finished; waiting for Shopee API pagination.');
     return;
   }
   const bufferedReviews = await mergeReviewBuffer(mapped);
@@ -1850,6 +3284,77 @@ async function processDomReviews(message, sender, platform) {
   );
   const expected = expectedReviewTarget(expectedValue, activeJob);
   const reachedRequestedCount = bufferedReviews.length >= expected;
+  const zeroWithKnownRatings = (
+    platform === 'shopee' &&
+    bufferedReviews.length === 0 &&
+    Number(activeJob.pendingDetailData?.ratingCount || 0) > 0
+  );
+  const retryLimit = zeroWithKnownRatings
+    ? (Number(activeJob.reviewPageReloads || 0)
+      ? MAX_SHOPEE_ZERO_REVIEW_RETRIES
+      : 1)
+    : MAX_SHOPEE_DOM_REVIEW_RETRIES;
+
+  if (
+    platform === 'shopee' &&
+    isFinal &&
+    !reachedRequestedCount &&
+    !activeJob.reviewApiPending &&
+    Number(activeJob.reviewDomRetryRounds || 0) < retryLimit
+  ) {
+    activeJob.reviewDomFinal = false;
+    activeJob.reviewDomRetryRounds = Number(activeJob.reviewDomRetryRounds || 0) + 1;
+    await persistActiveJob();
+    armPageTimeout(DETAIL_TIMEOUT_MS);
+    await logJob(
+      `Rendered Shopee reviews stopped at ${bufferedReviews.length}/${expected}; ` +
+      `retrying pagination from the current review page ` +
+      `(${activeJob.reviewDomRetryRounds}/${retryLimit}).`
+    );
+    const itemId = String(activeJob.currentProduct?.itemId || '');
+    setTimeout(() => {
+      if (
+        !activeJob ||
+        activeJob.phase !== 'DETAIL' ||
+        String(activeJob.currentProduct?.itemId || '') !== itemId
+      ) return;
+      chrome.tabs.sendMessage(activeJob.tabId, {
+        type: 'REQUEST_SHOPEE_RENDERED_REVIEWS',
+        itemId,
+        limit: maxReviewsForJob(activeJob)
+      }).catch((error) => {
+        void failCurrentDetail(
+          error?.message || 'Không thể tiếp tục phân trang đánh giá Shopee.'
+        );
+      });
+    }, 300);
+    return;
+  }
+  if (
+    platform === 'shopee' &&
+    isFinal &&
+    zeroWithKnownRatings &&
+    !activeJob.reviewApiPending &&
+    Number(activeJob.reviewPageReloads || 0) < 1
+  ) {
+    const itemId = String(activeJob.currentProduct?.itemId || '');
+    activeJob.reviewPageReloads = Number(activeJob.reviewPageReloads || 0) + 1;
+    activeJob.reviewDomFinal = false;
+    activeJob.reviewDomRetryRounds = 0;
+    activeJob.reviewRequestedFor = null;
+    await persistActiveJob();
+    armPageTimeout(DETAIL_TIMEOUT_MS);
+    await logJob(
+      `Shopee reports ${activeJob.pendingDetailData?.ratingCount} ratings but rendered 0 reviews; ` +
+      'reloading the product page once before retrying.'
+    );
+    await chrome.tabs.reload(activeJob.tabId).catch((error) => {
+      void failCurrentDetail(
+        error?.message || `Không thể tải lại trang đánh giá Shopee cho item ${itemId}.`
+      );
+    });
+    return;
+  }
 
   if (
     !reachedRequestedCount &&
@@ -1878,10 +3383,12 @@ async function processDomReviews(message, sender, platform) {
   await completeCurrentDetail({
     ...activeJob.pendingDetailData,
     reviewsCollected: bufferedReviews.length,
-    reviews: bufferedReviews,
+    ...reviewRatingSummary(),
     reviewsStatus: reachedRequestedCount && !activeJob.reviewsApiError
       ? 'COMPLETED'
-      : 'PARTIAL',
+      : bufferedReviews.length
+        ? 'PARTIAL'
+        : 'FAILED',
     reviewsError: activeJob.reviewsApiError || ''
   });
 }
@@ -1906,10 +3413,7 @@ async function processDomItems(message, sender) {
       `Captured ${storedCount} items from rendered ${platformLabel(activeJob)} cards.`
     );
   }
-  if (activeJob.seen.length >= activeJob.maxItems) {
-    await beginDetailPhase();
-    return;
-  }
+  if (await maybeBeginDetailAfterShopeeImages()) return;
   if (activeJob.platform !== 'shopee' || !message?.isFinal) {
     if (activeJob.platform !== 'shopee' && storedCount) await scheduleNextPage();
     return;
@@ -1917,6 +3421,11 @@ async function processDomItems(message, sender) {
   const pageNewCount = Number(
     activeJob.pageNewItemCounts?.[String(messagePage)] || 0
   );
+  if (
+    pageNewCount < MIN_SHOPEE_ITEMS_PER_PAGE &&
+    activeJob.seen.length < activeJob.maxItems &&
+    await retryCurrentShopeePage(messagePage, pageNewCount)
+  ) return;
   if (pageNewCount > 0) {
     await logJob(
       `Finished Shopee page ${messagePage} with ${pageNewCount} new products.`
@@ -1953,9 +3462,32 @@ async function closeActiveBrowserJob(runId) {
   const job = activeJob;
   activeJob = null;
   clearTimeout(pageTimer);
+  clearTimeout(searchImageReadyTimer);
+  searchImageReadyTimer = null;
+  chrome.alarms.clear(SHOPEE_IMAGE_READY_ALARM).catch(() => undefined);
+  for (const timer of detailWorkerTimers.values()) clearTimeout(timer);
+  detailWorkerTimers.clear();
+  for (const worker of job.detailWorkers || []) {
+    chrome.alarms.clear(
+      `${DETAIL_DEADLINE_ALARM_PREFIX}${worker.tabId}`
+    ).catch(() => undefined);
+    chrome.alarms.clear(
+      `${DETAIL_READY_ALARM_PREFIX}${worker.tabId}`
+    ).catch(() => undefined);
+  }
   await persistActiveJob();
-  if (job.windowId) {
-    await chrome.windows.remove(job.windowId).catch(() => undefined);
+  const crawlerWindowIds = new Set(
+    [job.windowId, ...(job.detailWorkers || []).map((worker) => worker.windowId)]
+      .filter((windowId) => windowId !== null && windowId !== undefined)
+      .map(Number)
+      .filter((windowId) => Number.isInteger(windowId) && windowId > 0)
+  );
+  if (crawlerWindowIds.size) {
+    await Promise.all(
+      [...crawlerWindowIds].map((windowId) => (
+        chrome.windows.remove(windowId).catch(() => undefined)
+      ))
+    );
   } else if (job.tabId) {
     await chrome.tabs.remove(job.tabId).catch(() => undefined);
   }
@@ -2001,8 +3533,23 @@ async function poll() {
       reviewsApiError: '',
       reviewBuffer: [],
       reviewSeen: [],
+      reviewsCollected: 0,
+      reviewRatingSum: 0,
+      reviewsWithRating: 0,
       reviewApiPending: false,
       reviewDomFinal: false,
+      reviewDomRetryRounds: 0,
+      reviewPageReloads: 0,
+      detailConcurrency: Math.min(
+        MAX_DETAIL_CONCURRENCY,
+        Math.max(1, Math.floor(Number(job.detailConcurrency || 1)))
+      ),
+      detailNextIndex: 0,
+      detailWorkers: [],
+      detailAssignments: {},
+      reviewOwnerTabId: null,
+      reviewApiFailureStreak: 0,
+      reviewApiDegraded: false,
       tabId: null,
       windowId: null,
       unexpectedResponses: 0,
@@ -2011,6 +3558,10 @@ async function poll() {
       consecutiveNoNewPages: 0,
       lastNoNewPage: null,
       pageNewItemCounts: {},
+      pageRetryCounts: {},
+      itemImages: {},
+      searchImageReadyRounds: 0,
+      searchImageReadyScheduled: false,
       pageDeadline: Date.now() + searchTimeoutForJob(job)
     };
     await persistActiveJob();
@@ -2055,6 +3606,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'CONFIGURE') {
       config = { token: message.token, apiBase: message.apiBase };
       await chrome.storage.session.set({ config });
+      if (activeJob) await resumePersistedActiveJob();
       schedulePoll(0);
     } else if (message.type === 'POLL_NOW') {
       void poll();
@@ -2089,6 +3641,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         );
       }
     } else if (message.type === 'SHOPEE_RESPONSE') {
+      if (
+        activeJob?.platform === 'shopee' &&
+        activeJob.phase === 'DETAIL' &&
+        shopeeDetailWorker(sender.tab?.id)
+      ) {
+        const workerHandler = message.detail?.kind === 'detail'
+          ? processShopeeWorkerDetailResponse
+          : message.detail?.kind === 'reviews'
+            ? processShopeeWorkerReviewsResponse
+            : null;
+        if (workerHandler) {
+          enqueueDetailMessage(
+            () => workerHandler(message.detail, sender),
+            'Không thể xử lý dữ liệu chi tiết Shopee.'
+          );
+        }
+        sendResponse({ ok: true });
+        return;
+      }
       const handler = message.detail?.kind === 'detail'
         ? processDetailResponse
         : message.detail?.kind === 'reviews'
@@ -2118,10 +3689,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         'Không thể xử lý card sản phẩm.'
       );
     } else if (message.type === 'SHOPEE_DOM_REVIEWS') {
-      enqueueReviewMessage(
-        () => processDomReviews(message, sender, 'shopee'),
-        'Không thể lưu đánh giá Shopee.'
-      );
+      if (shopeeDetailWorker(sender.tab?.id)) {
+        enqueueDetailMessage(
+          () => processShopeeWorkerDomReviews(message, sender),
+          'Không thể lưu đánh giá Shopee.'
+        );
+      } else {
+        enqueueReviewMessage(
+          () => processDomReviews(message, sender, 'shopee'),
+          'Không thể lưu đánh giá Shopee.'
+        );
+      }
     } else if (message.type === 'TIKTOK_DOM_REVIEWS') {
       void processDomReviews(message, sender, 'tiktok').catch((error) => {
         void failCurrentDetail(
@@ -2129,16 +3707,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         );
       });
     } else if (message.type === 'SHOPEE_DOM_DETAIL') {
-      void processDomDetail(message.detail, sender).catch((error) => {
-        void finishJob(
-          false,
-          error instanceof Error ? error.message : 'Không thể lưu chi tiết sản phẩm Shopee.'
-        ).catch(() => undefined);
-      });
+      if (shopeeDetailWorker(sender.tab?.id)) {
+        enqueueDetailMessage(
+          () => processShopeeWorkerDomDetail(message.detail, sender),
+          'Không thể lưu chi tiết sản phẩm Shopee.'
+        );
+      } else {
+        void processDomDetail(message.detail, sender).catch((error) => {
+          void finishJob(
+            false,
+            error instanceof Error ? error.message : 'Không thể lưu chi tiết sản phẩm Shopee.'
+          ).catch(() => undefined);
+        });
+      }
     } else if (
       (message.type === 'SHOPEE_BLOCKED' || message.type === 'TIKTOK_BLOCKED') &&
       activeJob &&
-      sender.tab?.id === activeJob.tabId
+      (
+        sender.tab?.id === activeJob.tabId ||
+        Boolean(shopeeDetailWorker(sender.tab?.id))
+      )
     ) {
       const label = message.type === 'TIKTOK_BLOCKED' ? 'TikTok' : 'Shopee';
       void finishJob(
@@ -2191,10 +3779,39 @@ async function checkAuthStatuses() {
 }
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  const worker = shopeeDetailWorker(tabId);
+  if (worker && activeJob?.phase === 'DETAIL') {
+    enqueueDetailMessage(
+      async () => {
+        const oldTimer = detailWorkerTimers.get(tabId);
+        if (oldTimer) clearTimeout(oldTimer);
+        detailWorkerTimers.delete(tabId);
+        await chrome.alarms.clear(
+          `${DETAIL_DEADLINE_ALARM_PREFIX}${tabId}`
+        ).catch(() => undefined);
+        await chrome.alarms.clear(
+          `${DETAIL_READY_ALARM_PREFIX}${tabId}`
+        ).catch(() => undefined);
+        await restartShopeeAgentWindow(worker, 'its tab was closed');
+      },
+      'Không thể xử lý tab lấy chi tiết Shopee bị đóng.'
+    );
+    return;
+  }
   if (activeJob?.tabId === tabId) {
     void finishJob(false, `Tab ${platformLabel(activeJob)} của Browser Agent đã bị đóng.`)
       .catch(() => undefined);
   }
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status !== 'complete') return;
+  const worker = shopeeDetailWorker(tabId);
+  if (!worker?.busy || worker.reviewRequestedFor || worker.waitingForReview) return;
+  enqueueDetailMessage(
+    () => probeShopeeWorkerDetail(worker),
+    'Không thể kiểm tra trạng thái tải trang chi tiết Shopee.'
+  );
 });
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -2202,28 +3819,121 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === SHOPEE_IMAGE_READY_ALARM) {
+    clearTimeout(searchImageReadyTimer);
+    searchImageReadyTimer = null;
+    if (activeJob) activeJob.searchImageReadyScheduled = false;
+    enqueueSearchMessage(
+      () => maybeBeginDetailAfterShopeeImages(),
+      'Không thể kiểm tra độ phủ ảnh sản phẩm Shopee.'
+    );
+    return;
+  }
+  if (alarm.name.startsWith(DETAIL_READY_ALARM_PREFIX)) {
+    const tabId = Number(alarm.name.slice(DETAIL_READY_ALARM_PREFIX.length));
+    const worker = shopeeDetailWorker(tabId);
+    if (worker) {
+      enqueueDetailMessage(
+        () => probeShopeeWorkerDetail(worker),
+        'Không thể kiểm tra dữ liệu chi tiết Shopee.'
+      );
+    }
+    return;
+  }
+  if (alarm.name.startsWith(DETAIL_DEADLINE_ALARM_PREFIX)) {
+    const tabId = Number(alarm.name.slice(DETAIL_DEADLINE_ALARM_PREFIX.length));
+    const worker = shopeeDetailWorker(tabId);
+    if (worker?.busy) {
+      enqueueDetailMessage(
+        () => failShopeeDetailWorker(
+          worker,
+          'Không nhận đủ dữ liệu chi tiết sau 90 giây.'
+        ),
+        'Không thể xử lý thời hạn chi tiết Shopee.'
+      );
+    }
+    return;
+  }
   if (alarm.name !== 'omnicrawl-poll') return;
   if (activeJob?.pageDeadline && Date.now() >= activeJob.pageDeadline) {
     void handlePageTimeout().catch(() => undefined);
     return;
   }
+  const expiredWorker = activeJob?.detailWorkers?.find(
+    (worker) => worker.busy && worker.deadline && Date.now() >= worker.deadline
+  );
+  if (expiredWorker) {
+    enqueueDetailMessage(
+      () => failShopeeDetailWorker(
+        expiredWorker,
+        'Không nhận đủ dữ liệu chi tiết sau 90 giây.'
+      ),
+      'Không thể xử lý thời hạn chi tiết Shopee.'
+    );
+    return;
+  }
   void poll();
 });
 
-stateReady.then(async () => {
-  if (activeJob) {
-    if (activeJob.navigationScheduled) {
-      activeJob.navigationScheduled = false;
-      activeJob.scheduledPage = null;
-      await persistActiveJob();
-      if (activeJob.phase === 'DETAIL') await navigateNextDetail();
-      else await scheduleNextPage();
-    } else if (activeJob.pageDeadline) {
-      const remaining = Math.max(1, activeJob.pageDeadline - Date.now());
-      pageTimer = setTimeout(() => void handlePageTimeout(), remaining);
-    } else if (activeJob.phase === 'DETAIL') {
-      await navigateNextDetail();
-    }
+async function resumePersistedActiveJob() {
+  if (!activeJob || !config) return;
+  chrome.alarms.create('omnicrawl-poll', { periodInMinutes: 0.5 });
+  if (
+    activeJob.platform === 'shopee' &&
+    activeJob.phase === 'SEARCH' &&
+    activeJob.seen?.length >= activeJob.maxItems
+  ) {
+    activeJob.searchImageReadyScheduled = false;
+    await persistActiveJob();
+    await maybeBeginDetailAfterShopeeImages();
+    return;
   }
+  if (
+    activeJob.platform === 'shopee' &&
+    activeJob.phase === 'DETAIL' &&
+    activeJob.detailWorkers?.length
+  ) {
+    for (const worker of activeJob.detailWorkers) {
+      if (!worker.busy) continue;
+      const existingTab = await chrome.tabs.get(worker.tabId).catch(() => null);
+      if (!existingTab) {
+        await restartShopeeAgentWindow(worker, 'Browser Agent recovery');
+        continue;
+      }
+      worker.windowId = existingTab.windowId;
+      const storedRemaining = Number(
+        worker.deadline || Date.now() + DETAIL_TIMEOUT_MS
+      ) - Date.now();
+      const recoveringExpiredWorker = storedRemaining <= 0;
+      if (recoveringExpiredWorker) {
+        worker.readyProbeCount = 0;
+        worker.readyReloads = 0;
+      }
+      const remaining = recoveringExpiredWorker
+        ? DETAIL_TIMEOUT_MS
+        : Math.max(1, storedRemaining);
+      armDetailWorkerDeadline(worker, remaining);
+      scheduleShopeeWorkerReadyProbe(
+        worker,
+        recoveringExpiredWorker ? 100 : SPARSE_DETAIL_RECHECK_MS
+      );
+    }
+    await persistActiveJob();
+  } else if (activeJob.navigationScheduled) {
+    activeJob.navigationScheduled = false;
+    activeJob.scheduledPage = null;
+    await persistActiveJob();
+    if (activeJob.phase === 'DETAIL') await navigateNextDetail();
+    else await scheduleNextPage();
+  } else if (activeJob.pageDeadline) {
+    const remaining = Math.max(1, activeJob.pageDeadline - Date.now());
+    pageTimer = setTimeout(() => void handlePageTimeout(), remaining);
+  } else if (activeJob.phase === 'DETAIL') {
+    await navigateNextDetail();
+  }
+}
+
+stateReady.then(async () => {
+  if (activeJob && config) await resumePersistedActiveJob();
   if (config) schedulePoll(0);
 });
