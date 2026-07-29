@@ -15,6 +15,7 @@ model User {
   password  String
   role      String   @default("USER") // USER or ADMIN
   status    String   @default("ACTIVE") // ACTIVE or SUSPENDED
+  tier      String   @default("FREE") // FREE, BASIC, PRO, ENTERPRISE
   credits   Int      @default(1000)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

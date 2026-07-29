@@ -257,7 +257,7 @@ const requireAuth = async (req: any, res: any, next: any) => {
     const decoded = jwt.verify(token, JWT_SECRET) as jwt.JwtPayload;
     const user = await prisma.user.findUnique({
       where: { id: String(decoded.id || '') },
-      select: { id: true, email: true, role: true, status: true, credits: true }
+      select: { id: true, email: true, role: true, tier: true, status: true, credits: true }
     });
     if (!user) return res.status(401).json({ error: 'User no longer exists' });
     if (user.status !== 'ACTIVE') {
@@ -301,6 +301,7 @@ app.post('/api/auth/register', async (req, res) => {
         id: user.id,
         email: user.email,
         role: user.role,
+        tier: user.tier,
         status: user.status,
         credits: user.credits
       }
@@ -332,6 +333,7 @@ app.post('/api/auth/login', async (req, res) => {
         id: user.id,
         email: user.email,
         role: user.role,
+        tier: user.tier,
         status: user.status,
         credits: user.credits
       }
@@ -348,6 +350,7 @@ app.get('/api/auth/me', requireAuth, async (req: any, res: any) => {
     id: user.id,
     email: user.email,
     role: user.role,
+    tier: user.tier,
     status: user.status,
     credits: user.credits
   });
@@ -363,6 +366,7 @@ app.get('/api/admin/users', requireAuth, requireAdmin, async (_req: any, res: an
       email: true,
       role: true,
       status: true,
+      tier: true,
       credits: true,
       createdAt: true,
       updatedAt: true,
@@ -389,16 +393,22 @@ app.post('/api/admin/users', requireAuth, requireAdmin, async (req: any, res: an
   if (!email || password.length < 8) {
     return res.status(400).json({ error: 'Valid email and password of at least 8 characters are required' });
   }
+  const requestedTier = String(req.body?.tier || 'FREE');
+  if (!['FREE', 'BASIC', 'PRO', 'ENTERPRISE'].includes(requestedTier)) {
+    return res.status(400).json({ error: 'Tier must be FREE, BASIC, PRO or ENTERPRISE' });
+  }
+  const tier = requestedTier;
   try {
     const created = await prisma.user.create({
       data: {
         email,
         password: await bcrypt.hash(password, 10),
         role,
+        tier,
         status: 'ACTIVE',
         credits
       },
-      select: { id: true, email: true, role: true, status: true, credits: true, createdAt: true }
+      select: { id: true, email: true, role: true, tier: true, status: true, credits: true, createdAt: true }
     });
     res.status(201).json(created);
   } catch (error: any) {
@@ -413,12 +423,16 @@ app.patch('/api/admin/users/:id', requireAuth, requireAdmin, async (req: any, re
 
   const role = req.body?.role;
   const status = req.body?.status;
+  const tier = req.body?.tier;
   const credits = req.body?.credits;
   if (role !== undefined && !['SUPER_ADMIN', 'ADMIN', 'USER'].includes(role)) {
     return res.status(400).json({ error: 'Role must be SUPER_ADMIN, ADMIN or USER' });
   }
   if (status !== undefined && !['ACTIVE', 'SUSPENDED'].includes(status)) {
     return res.status(400).json({ error: 'Status must be ACTIVE or SUSPENDED' });
+  }
+  if (tier !== undefined && !['FREE', 'BASIC', 'PRO', 'ENTERPRISE'].includes(tier)) {
+    return res.status(400).json({ error: 'Tier must be FREE, BASIC, PRO or ENTERPRISE' });
   }
   if (credits !== undefined && (!Number.isInteger(Number(credits)) || Number(credits) < 0 || Number(credits) > 1_000_000)) {
     return res.status(400).json({ error: 'Credits must be an integer from 0 to 1000000' });
@@ -463,6 +477,7 @@ app.patch('/api/admin/users/:id', requireAuth, requireAdmin, async (req: any, re
     data: {
       ...(role !== undefined ? { role } : {}),
       ...(status !== undefined ? { status } : {}),
+      ...(tier !== undefined ? { tier } : {}),
       ...(credits !== undefined ? { credits: Number(credits) } : {})
     },
     select: {
@@ -470,6 +485,7 @@ app.patch('/api/admin/users/:id', requireAuth, requireAdmin, async (req: any, re
       email: true,
       role: true,
       status: true,
+      tier: true,
       credits: true,
       createdAt: true,
       updatedAt: true,
@@ -518,6 +534,44 @@ app.delete('/api/integrations/shopee/session', requireAuth, async (req: any, res
 
 // --- CORE ROUTES ---
 
+function applyTierLimits(schemaString: string | null, tier: string, role?: string): string | null {
+  if (!schemaString) return null;
+  try {
+    const schema = JSON.parse(schemaString);
+    if (!schema.properties) return schemaString;
+
+    if (role === 'SUPER_ADMIN') {
+      if (schema.properties.maxItems) delete schema.properties.maxItems.maximum;
+      if (schema.properties.maxReviewsPerProduct) delete schema.properties.maxReviewsPerProduct.maximum;
+      return JSON.stringify(schema);
+    }
+
+    const limits: Record<string, { maxItems: number, maxReviews: number }> = {
+      'FREE': { maxItems: 10, maxReviews: 10 },
+      'BASIC': { maxItems: 100, maxReviews: 100 },
+      'PRO': { maxItems: 1000, maxReviews: 1000 },
+      'ENTERPRISE': { maxItems: 100000, maxReviews: 100000 }
+    };
+    const tierLimits = limits[tier] || limits['FREE'];
+
+    if (schema.properties.maxItems) {
+      schema.properties.maxItems.maximum = Math.min(
+        schema.properties.maxItems.maximum ?? 100000,
+        tierLimits.maxItems
+      );
+    }
+    if (schema.properties.maxReviewsPerProduct) {
+      schema.properties.maxReviewsPerProduct.maximum = Math.min(
+        schema.properties.maxReviewsPerProduct.maximum ?? 100000,
+        tierLimits.maxReviews
+      );
+    }
+    return JSON.stringify(schema);
+  } catch {
+    return schemaString;
+  }
+}
+
 // List all actors
 app.get('/api/actors', requireAuth, async (req: any, res) => {
   const actors = await prisma.actor.findMany({
@@ -526,7 +580,11 @@ app.get('/api/actors', requireAuth, async (req: any, res) => {
     },
     orderBy: { createdAt: 'desc' }
   });
-  res.json(actors);
+  const adjustedActors = actors.map(actor => ({
+    ...actor,
+    inputSchema: applyTierLimits(actor.inputSchema, req.user.tier || 'FREE', req.user.role)
+  }));
+  res.json(adjustedActors);
 });
 
 // Trigger a run
@@ -544,7 +602,7 @@ app.post('/api/actors/:id/run', requireAuth, async (req: any, res: any) => {
     if (!actor) {
       return res.status(404).json({ error: 'Actor not found' });
     }
-    const input = normalizeActorInput(actor.inputSchema, rawInput);
+    const input = normalizeActorInput(applyTierLimits(actor.inputSchema, req.user.tier || 'FREE', req.user.role), rawInput);
     if (
       BROWSER_ACTOR_NAMES.includes(actor.name) &&
       (typeof input.keyword !== 'string' || !input.keyword.trim())
@@ -645,7 +703,7 @@ app.get('/api/browser-agent/jobs/next', requireAuth, async (req: any, res: any) 
     const includeDetails = input.includeDetails !== false;
     const maxReviewsValue = Number(input.maxReviewsPerProduct ?? 20);
     const maxReviewsPerProduct = includeDetails && Number.isFinite(maxReviewsValue)
-      ? Math.min(100, Math.max(0, Math.floor(maxReviewsValue)))
+      ? Math.min(100000, Math.max(0, Math.floor(maxReviewsValue)))
       : 0;
     await new Dataset(candidate.id).setMetadata({
       source: platform === 'tiktok' ? 'tiktok.com' : 'shopee.vn',

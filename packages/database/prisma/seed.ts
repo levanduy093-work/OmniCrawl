@@ -64,7 +64,7 @@ async function main() {
         title: 'Số đánh giá tối đa mỗi sản phẩm',
         description: 'Đặt bằng 0 nếu không cần lưu nội dung đánh giá.',
         minimum: 0,
-        maximum: 100,
+        maximum: 100000,
         default: 20
       },
       allowEmpty: {
@@ -204,7 +204,7 @@ async function main() {
         title: 'Số bình luận / đánh giá tối đa mỗi mục',
         description: 'Với video sẽ thu thập bình luận; với sản phẩm TikTok Shop sẽ thu thập đánh giá hiển thị.',
         minimum: 0,
-        maximum: 100,
+        maximum: 100000,
         default: 20
       }
     }

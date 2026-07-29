@@ -281,7 +281,7 @@ function scrapeTikTokReviews() {
 }
 
 async function collectRenderedTikTokReviews(limit) {
-  const maxReviews = Math.min(100, Math.max(0, Math.floor(limit || 20)));
+  const maxReviews = Math.min(100000, Math.max(0, Math.floor(limit || 20)));
   document.querySelector(
     '[data-e2e="comment-icon"], [data-e2e*="review-tab"], [class*="CommentIcon"]'
   )?.click();

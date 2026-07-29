@@ -137,12 +137,7 @@ function App() {
   const [runDetailPage, setRunDetailPage] = useState(1)
   const [runDetailLoading, setRunDetailLoading] = useState(false)
   const [users, setUsers] = useState<any[]>([])
-  const [newUser, setNewUser] = useState({
-    email: '',
-    password: '',
-    role: 'USER',
-    credits: 1000
-  })
+  const [newUser, setNewUser] = useState({ email: '', password: '', role: 'USER', tier: 'FREE', credits: 1000 })
 
   const handleLogout = useCallback(() => {
     localStorage.removeItem('token')
@@ -460,7 +455,7 @@ function App() {
     })
     const data = await res.json()
     if (!res.ok) return alert(data.error || 'Không thể tạo user')
-    setNewUser({ email: '', password: '', role: 'USER', credits: 1000 })
+    setNewUser({ email: '', password: '', role: 'USER', tier: 'FREE', credits: 1000 })
     fetchUsers()
   }
 
@@ -916,6 +911,16 @@ function App() {
                   <option value="ADMIN">ADMIN</option>
                   {user?.role === 'SUPER_ADMIN' && <option value="SUPER_ADMIN">SUPER_ADMIN</option>}
                 </select>
+                <select
+                  value={(newUser as any).tier || 'FREE'}
+                  onChange={(event) => setNewUser({ ...newUser, tier: event.target.value })}
+                  className="px-4 py-3 bg-gray-50 rounded-xl border border-gray-200"
+                >
+                  <option value="FREE">FREE</option>
+                  <option value="BASIC">BASIC</option>
+                  <option value="PRO">PRO</option>
+                  <option value="ENTERPRISE">ENTERPRISE</option>
+                </select>
                 <button onClick={createUser} className="px-5 py-3 bg-blue-600 text-white rounded-xl font-medium">
                   Create
                 </button>
@@ -928,6 +933,7 @@ function App() {
                   <tr>
                     <th className="px-5 py-4">User</th>
                     <th className="px-5 py-4">Role</th>
+                    <th className="px-5 py-4">Tier</th>
                     <th className="px-5 py-4">Status</th>
                     <th className="px-5 py-4">Credits</th>
                     <th className="px-5 py-4">Usage</th>
@@ -950,6 +956,19 @@ function App() {
                           <option value="USER">USER</option>
                           <option value="ADMIN">ADMIN</option>
                           {user?.role === 'SUPER_ADMIN' && <option value="SUPER_ADMIN">SUPER_ADMIN</option>}
+                        </select>
+                      </td>
+                      <td className="px-5 py-4">
+                        <select
+                          value={entry.tier || 'FREE'}
+                          disabled={entry.role === 'SUPER_ADMIN' && user.role !== 'SUPER_ADMIN'}
+                          onChange={(event) => updateUser(entry.id, { tier: event.target.value })}
+                          className="px-3 py-2 rounded-lg border border-gray-200 bg-gray-50 disabled:opacity-50"
+                        >
+                          <option value="FREE">FREE</option>
+                          <option value="BASIC">BASIC</option>
+                          <option value="PRO">PRO</option>
+                          <option value="ENTERPRISE">ENTERPRISE</option>
                         </select>
                       </td>
                       <td className="px-5 py-4">

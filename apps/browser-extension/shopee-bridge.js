@@ -163,7 +163,11 @@ function findShopeeNextReviewButton() {
 }
 
 async function collectRenderedShopeeReviews(limit) {
-  const maxReviews = Math.min(100, Math.max(0, Math.floor(limit || 20)));
+  const maxReviews = Math.min(100000, Math.max(0, Math.floor(limit || 20)));
+
+  window.scrollTo({ top: 2200, behavior: 'smooth' });
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+
   const reviewHeading = [...document.querySelectorAll('h2, h3, div, span')]
     .find((element) => (
       element.children.length < 5 &&
@@ -171,8 +175,12 @@ async function collectRenderedShopeeReviews(limit) {
         (element.textContent || '').replace(/\s+/g, ' ').trim()
       )
   ));
-  reviewHeading?.scrollIntoView({ block: 'start', behavior: 'auto' });
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  if (reviewHeading) {
+    reviewHeading.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  } else {
+    window.scrollTo({ top: Math.max(2500, document.body.scrollHeight - 1000), behavior: 'smooth' });
+  }
+  await new Promise((resolve) => setTimeout(resolve, 1000));
 
   const accumulated = new Map();
   let noGrowthRounds = 0;
@@ -183,32 +191,48 @@ async function collectRenderedShopeeReviews(limit) {
       if (accumulated.size >= maxReviews) break;
     }
     noGrowthRounds = accumulated.size > before ? 0 : noGrowthRounds + 1;
+
+    if (accumulated.size > before && accumulated.size < maxReviews) {
+      chrome.runtime.sendMessage({
+        type: 'SHOPEE_DOM_REVIEWS',
+        reviews: [...accumulated.values()],
+        isFinal: false
+      }).catch(() => undefined);
+    }
+
     if (accumulated.size >= maxReviews) break;
 
     const reviewCards = document.querySelectorAll(
       '.shopee-product-rating, [class*="ProductRating"]'
     );
-    reviewCards[reviewCards.length - 1]?.scrollIntoView({
-      block: 'end',
-      behavior: 'auto'
-    });
+    if (reviewCards.length) {
+      reviewCards[reviewCards.length - 1]?.scrollIntoView({
+        block: 'end',
+        behavior: 'smooth'
+      });
+    }
 
-    const nextButton = findShopeeNextReviewButton();
+    let nextButton = findShopeeNextReviewButton();
+    if (!nextButton && attempt < 4) {
+      window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      nextButton = findShopeeNextReviewButton();
+    }
+
     if (nextButton) {
       nextButton.click();
-      await new Promise((resolve) => setTimeout(resolve, 450));
+      await new Promise((resolve) => setTimeout(resolve, 800));
       continue;
     }
     if (noGrowthRounds >= 3) break;
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await new Promise((resolve) => setTimeout(resolve, 500));
   }
   const reviews = [...accumulated.values()].slice(0, maxReviews);
-  if (reviews.length) {
-    chrome.runtime.sendMessage({
-      type: 'SHOPEE_DOM_REVIEWS',
-      reviews
-    }).catch(() => undefined);
-  }
+  chrome.runtime.sendMessage({
+    type: 'SHOPEE_DOM_REVIEWS',
+    reviews,
+    isFinal: true
+  }).catch(() => undefined);
   return reviews;
 }
 
@@ -260,6 +284,34 @@ function scrapeRenderedProducts() {
 
 let lastDomSignature = '';
 let domAttempts = 0;
+
+async function autoScrollShopeeSearchPage() {
+  if (!location.pathname.includes('/search')) return;
+
+  for (let i = 0; i < 4; i += 1) {
+    const totalHeight = Math.max(document.body.scrollHeight, 4000);
+    const targetY = Math.floor((totalHeight / 4) * (i + 1));
+    window.scrollTo({ top: targetY, behavior: 'smooth' });
+    await new Promise((resolve) => setTimeout(resolve, 800));
+
+    const items = scrapeRenderedProducts();
+    const signature = items.map((item) => item.itemId).join(',');
+    if (items.length && signature !== lastDomSignature) {
+      lastDomSignature = signature;
+      chrome.runtime.sendMessage({
+        type: 'SHOPEE_DOM_ITEMS',
+        items
+      }).catch(() => undefined);
+    }
+  }
+}
+
+if (location.pathname.includes('/search')) {
+  setTimeout(() => {
+    void autoScrollShopeeSearchPage();
+  }, 300);
+}
+
 const domCaptureTimer = setInterval(() => {
   domAttempts += 1;
   const items = scrapeRenderedProducts();
@@ -272,7 +324,7 @@ const domCaptureTimer = setInterval(() => {
     }).catch(() => undefined);
   }
   if (domAttempts >= 15) clearInterval(domCaptureTimer);
-}, 2000);
+}, 1500);
 
 function scrapeRenderedProductDetail() {
   const ids = parseProductIds(location.href);

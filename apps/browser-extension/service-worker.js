@@ -1098,7 +1098,7 @@ async function scheduleNextPage() {
   const runId = activeJob.runId;
   const nextPage = activeJob.scheduledPage;
   const nextUrl = searchUrlForJob(activeJob, nextPage);
-  const delay = 1000 + Math.floor(Math.random() * 1000);
+  const delay = 2000 + Math.floor(Math.random() * 800);
   await persistActiveJob();
   await logJob(
     `Waiting ${(delay / 1000).toFixed(1)} seconds before loading ` +
@@ -1659,7 +1659,7 @@ async function processTikTokReviewsResponse(detail, sender) {
   });
 }
 
-async function processDomReviews(reviews, sender, platform) {
+async function processDomReviews(reviews, sender, platform, isFinal = false) {
   if (
     !activeJob ||
     activeJob.platform !== platform ||
@@ -1693,9 +1693,19 @@ async function processDomReviews(reviews, sender, platform) {
   );
   const expected = expectedReviewTarget(expectedValue, activeJob);
   const reachedRequestedCount = bufferedReviews.length >= expected;
+
+  if (!reachedRequestedCount && !isFinal) {
+    await logJob(
+      `Captured ${bufferedReviews.length}/${expected} rendered ${platformLabel(activeJob)} ` +
+      `${platform === 'tiktok' ? 'comments/reviews' : 'reviews'}; continuing review pagination.`
+    );
+    return;
+  }
+
   await logJob(
-    `Captured ${bufferedReviews.length}/${expected} rendered ${platformLabel(activeJob)} ` +
-    `${platform === 'tiktok' ? 'comments/reviews' : 'reviews'}.`
+    `Captured ${bufferedReviews.length}/${expected} ${platformLabel(activeJob)} ` +
+    `${platform === 'tiktok' ? 'comments/reviews' : 'reviews'} for item ` +
+    `${activeJob.detailIndex + 1}/${activeJob.products.length}.`
   );
   await completeCurrentDetail({
     ...activeJob.pendingDetailData,
@@ -1869,13 +1879,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         ).catch(() => undefined);
       });
     } else if (message.type === 'SHOPEE_DOM_REVIEWS') {
-      void processDomReviews(message.reviews, sender, 'shopee').catch((error) => {
+      void processDomReviews(message.reviews, sender, 'shopee', Boolean(message.isFinal)).catch((error) => {
         void failCurrentDetail(
           error instanceof Error ? error.message : 'Không thể lưu đánh giá Shopee.'
         );
       });
     } else if (message.type === 'TIKTOK_DOM_REVIEWS') {
-      void processDomReviews(message.reviews, sender, 'tiktok').catch((error) => {
+      void processDomReviews(message.reviews, sender, 'tiktok', Boolean(message.isFinal)).catch((error) => {
         void failCurrentDetail(
           error instanceof Error ? error.message : 'Không thể lưu bình luận TikTok.'
         );
