@@ -22,7 +22,7 @@ import Login from './Login'
 import OmniCrawlLogo from './Logo'
 import './App.css'
 
-const REQUIRED_BROWSER_AGENT_VERSION = '0.11.0'
+const REQUIRED_BROWSER_AGENT_VERSION = '0.11.9'
 
 function isVersionAtLeast(current: string | null, required: string) {
   if (!current) return false
@@ -783,6 +783,7 @@ function App() {
                     <td className="px-6 py-5">
                       <span className={`px-3 py-1 text-xs font-semibold rounded-full ${
                         run.status === 'SUCCESS' ? 'bg-green-100 text-green-700' :
+                        run.status === 'PARTIAL' ? 'bg-amber-100 text-amber-700' :
                         run.status === 'FAILED' ? 'bg-red-100 text-red-700' :
                         (run.status === 'RUNNING' || run.status === 'BROWSER_RUNNING' || run.status === 'STOPPING') ? 'bg-blue-100 text-blue-700' :
                         (run.status === 'PENDING' || run.status === 'BROWSER_PENDING') ? 'bg-amber-100 text-amber-700' :
@@ -1176,7 +1177,6 @@ function RunDetailModal({
     'price',
     'rating',
     'ratingCount',
-    'reviewsCollected',
     'sold',
     'url',
     'image',
@@ -1412,7 +1412,15 @@ function RunDetailModal({
             <div className="flex items-center gap-3">
               <h2 className="text-xl font-semibold text-gray-900">Run data</h2>
               {detail?.run?.status && (
-                <span className="px-3 py-1 rounded-full bg-gray-100 text-gray-700 text-xs font-semibold">
+                <span className={`px-3 py-1 rounded-full text-xs font-semibold ${
+                  detail.run.status === 'SUCCESS'
+                    ? 'bg-green-100 text-green-700'
+                    : detail.run.status === 'PARTIAL'
+                      ? 'bg-amber-100 text-amber-700'
+                      : detail.run.status === 'FAILED'
+                        ? 'bg-red-100 text-red-700'
+                        : 'bg-gray-100 text-gray-700'
+                }`}>
                   {detail.run.status}
                 </span>
               )}

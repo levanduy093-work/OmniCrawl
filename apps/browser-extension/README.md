@@ -15,14 +15,22 @@ Video search is the default. TikTok Shop product search additionally requires
 TikTok to expose a Shop/Products tab in the signed-in desktop web session; the
 run log records whether that tab was found.
 When the Shopee option
-`Thu thập chi tiết từng sản phẩm` is enabled, it then opens each collected
-product and captures description, rating, stock, shop, images, attributes,
-variations and review content. `Số tác nhân lấy chi tiết cùng lúc` can start
-up to six independent browser windows. A durable coordinator claims each
-`itemId` for exactly one agent, records completion, and assigns the next
-unclaimed product without making review crawlers wait for one another. Review
-pagination is limited by `Số đánh giá tối đa mỗi sản phẩm`. A failure on one
-product is recorded and the remaining products continue.
+`Thu thập chi tiết từng sản phẩm` is enabled, one crawler tab opens each
+collected product in sequence and captures description, rating, stock, shop,
+images, attributes, and variations. It stores the product's average rating and
+total rating count, but never requests, paginates, or stores customer comments.
+A failure on one product is recorded and the remaining products continue.
+If Shopee expires the authenticated session, the run pauses without discarding
+its queue, opens a focused login popup, and resumes the same tabs after login.
+Shopee search-page and product-page navigations use a single action scheduler.
+Only one Shopee tab is used, and external navigations are separated by a random
+1.5–2.5 second delay without a long cooldown. Search pages scroll downward in
+small viewport-sized steps so lazy-loaded cards and images can stabilize before
+the crawler advances.
+Shopee login challenges and `/verify/traffic/error` are handled separately.
+A traffic-control response pauses without retrying and preserves the unfinished
+queue. After the user resolves the Shopee page or changes network and opens the
+Shopee home page, the same queue resumes through the global scheduler.
 
 Each stored row also records its search keyword/rank, observation time, numeric
 price range, discount, sales and stock signals, rating distribution, shop

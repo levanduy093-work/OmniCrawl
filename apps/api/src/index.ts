@@ -35,6 +35,38 @@ const JWT_SECRET = process.env.JWT_SECRET || 'omnicrawl-secret-key-12345';
 const WORKSPACE_ROOT = path.resolve(__dirname, '..', '..', '..');
 const STORAGE_ROOT = path.join(WORKSPACE_ROOT, 'storage');
 const BROWSER_ACTOR_NAMES = ['shopee-scraper', 'tiktok-scraper'];
+const SHOPEE_UNUSED_OUTPUT_FIELDS = new Set([
+  'author',
+  'authorId',
+  'authorUrl',
+  'categoryId',
+  'comments',
+  'discountPercent',
+  'duration',
+  'hashtags',
+  'likes',
+  'logistics',
+  'musicTitle',
+  'promotions',
+  'publishedAt',
+  'reviewCount',
+  'reviews',
+  'reviewsCollected',
+  'reviewsError',
+  'reviewsRatingAverage',
+  'reviewsStatus',
+  'reviewsWithRating',
+  'salesLast30Days',
+  'saves',
+  'shares',
+  'shopDescription',
+  'sourceType',
+  'totalSold',
+  'productUpdatedAt',
+  'videos',
+  'viewCount',
+  'views'
+]);
 
 function appendRunLog(runId: string, message: string) {
   const logsDir = path.join(STORAGE_ROOT, 'logs');
@@ -133,6 +165,58 @@ function outputSchemaColumns(schemaJson: string | null) {
       : [];
   } catch {
     return [];
+  }
+}
+
+function compactActorRecord(actorName: string, value: unknown) {
+  if (
+    actorName !== 'shopee-scraper' ||
+    !value ||
+    typeof value !== 'object' ||
+    Array.isArray(value)
+  ) return value;
+  return Object.fromEntries(
+    Object.entries(value).filter(([field]) => (
+      !SHOPEE_UNUSED_OUTPUT_FIELDS.has(field)
+    ))
+  );
+}
+
+function compactActorOutputSchema(actorName: string, schemaJson: string | null) {
+  if (actorName !== 'shopee-scraper' || !schemaJson) return schemaJson;
+  try {
+    const schema = JSON.parse(schemaJson);
+    if (!schema?.properties || typeof schema.properties !== 'object') return schemaJson;
+    return JSON.stringify({
+      ...schema,
+      properties: Object.fromEntries(
+        Object.entries(schema.properties).filter(([field]) => (
+          !SHOPEE_UNUSED_OUTPUT_FIELDS.has(field)
+        ))
+      )
+    });
+  } catch {
+    return schemaJson;
+  }
+}
+
+function compactActorInputSchema(actorName: string, schemaJson: string | null) {
+  if (actorName !== 'shopee-scraper' || !schemaJson) return schemaJson;
+  try {
+    const schema = JSON.parse(schemaJson);
+    if (!schema?.properties || typeof schema.properties !== 'object') return schemaJson;
+    const properties = { ...schema.properties };
+    delete properties.maxReviewsPerProduct;
+    delete properties.detailConcurrency;
+    if (properties.includeDetails) {
+      properties.includeDetails = {
+        ...properties.includeDetails,
+        description: 'Dùng một tab Shopee duy nhất để lấy chi tiết và điểm đánh giá trung bình; không lấy bình luận.'
+      };
+    }
+    return JSON.stringify({ ...schema, properties });
+  } catch {
+    return schemaJson;
   }
 }
 
@@ -638,7 +722,11 @@ app.get('/api/actors', requireAuth, async (req: any, res) => {
   });
   const adjustedActors = actors.map(actor => ({
     ...actor,
-    inputSchema: applyTierLimits(actor.inputSchema, req.user.tier || 'FREE', req.user.role)
+    inputSchema: compactActorInputSchema(
+      actor.name,
+      applyTierLimits(actor.inputSchema, req.user.tier || 'FREE', req.user.role)
+    ),
+    outputSchema: compactActorOutputSchema(actor.name, actor.outputSchema)
   }));
   res.json(adjustedActors);
 });
@@ -658,7 +746,14 @@ app.post('/api/actors/:id/run', requireAuth, async (req: any, res: any) => {
     if (!actor) {
       return res.status(404).json({ error: 'Actor not found' });
     }
-    const input = normalizeActorInput(applyTierLimits(actor.inputSchema, req.user.tier || 'FREE', req.user.role), rawInput);
+    const input = normalizeActorInput(
+      compactActorInputSchema(
+        actor.name,
+        applyTierLimits(actor.inputSchema, req.user.tier || 'FREE', req.user.role)
+      ),
+      rawInput
+    );
+    if (actor.name === 'shopee-scraper') delete input.maxReviewsPerProduct;
     if (
       BROWSER_ACTOR_NAMES.includes(actor.name) &&
       (typeof input.keyword !== 'string' || !input.keyword.trim())
@@ -758,14 +853,12 @@ app.get('/api/browser-agent/jobs/next', requireAuth, async (req: any, res: any) 
     );
     const includeDetails = input.includeDetails !== false;
     const maxReviewsValue = Number(input.maxReviewsPerProduct ?? 20);
-    const maxReviewsPerProduct = includeDetails && Number.isFinite(maxReviewsValue)
+    const maxReviewsPerProduct = platform === 'shopee'
+      ? 0
+      : includeDetails && Number.isFinite(maxReviewsValue)
       ? Math.min(100000, Math.max(0, Math.floor(maxReviewsValue)))
       : 0;
-    const detailConcurrencyValue = Number(input.detailConcurrency ?? 1);
-    const detailConcurrency = platform === 'shopee' && includeDetails &&
-      Number.isFinite(detailConcurrencyValue)
-      ? Math.min(6, Math.max(1, Math.floor(detailConcurrencyValue)))
-      : 1;
+    const detailConcurrency = 1;
     await new Dataset(candidate.id).setMetadata({
       source: platform === 'tiktok' ? 'tiktok.com' : 'shopee.vn',
       platform,
@@ -775,7 +868,7 @@ app.get('/api/browser-agent/jobs/next', requireAuth, async (req: any, res: any) 
         mode,
         maxItems,
         includeDetails,
-        maxReviewsPerProduct,
+        ...(platform === 'shopee' ? {} : { maxReviewsPerProduct }),
         detailConcurrency
       },
       detailProgress: {
@@ -823,7 +916,7 @@ app.post('/api/browser-agent/jobs/:id/items', requireAuth, async (req: any, res:
         const parsed = Number(value);
         return Number.isFinite(parsed) ? parsed : null;
       };
-      safeItems.push({
+      const safeItem = {
         itemId: String(item.itemId || '').slice(0, 200),
         sourceType: String(item.sourceType || '').slice(0, 50),
         shopId: String(item.shopId || '').slice(0, 200),
@@ -867,7 +960,8 @@ app.post('/api/browser-agent/jobs/:id/items', requireAuth, async (req: any, res:
         detailStatus: ['PENDING', 'COMPLETED', 'PARTIAL'].includes(item.detailStatus)
           ? item.detailStatus
           : 'SKIPPED'
-      });
+      };
+      safeItems.push(compactActorRecord(run.actor.name, safeItem));
     }
     await new Dataset(run.id).pushData(safeItems);
     const storedCount = safeItems.length;
@@ -888,7 +982,7 @@ app.post('/api/browser-agent/jobs/:id/items/enrich', requireAuth, async (req: an
         status: 'BROWSER_RUNNING',
         actor: { name: { in: BROWSER_ACTOR_NAMES } }
       },
-      select: { id: true }
+      select: { id: true, actor: { select: { name: true } } }
     });
     if (!run) return res.status(404).json({ error: 'Active browser job not found' });
 
@@ -947,7 +1041,10 @@ app.patch('/api/browser-agent/jobs/:id/items/:itemId', requireAuth, async (req: 
     if (!run) return res.status(404).json({ error: 'Active browser job not found' });
 
     const dataset = new Dataset(run.id);
-    const detail = sanitizeDetailPatch(req.body?.detail);
+    const detail = compactActorRecord(
+      run.actor.name,
+      sanitizeDetailPatch(req.body?.detail)
+    ) as Record<string, unknown>;
     const updated = await dataset.updateData(String(req.params.itemId), detail);
     if (!updated) return res.status(404).json({ error: 'Product was not found in this run' });
 
@@ -986,9 +1083,12 @@ app.post('/api/browser-agent/jobs/:id/items/:itemId/reviews', requireAuth, async
         status: 'BROWSER_RUNNING',
         actor: { name: { in: BROWSER_ACTOR_NAMES } }
       },
-      select: { id: true }
+      select: { id: true, actor: { select: { name: true } } }
     });
     if (!run) return res.status(404).json({ error: 'Active browser job not found' });
+    if (run.actor.name === 'shopee-scraper') {
+      return res.json({ accepted: 0, total: 0, disabled: true });
+    }
 
     const reviews = sanitizeReviews(req.body?.reviews);
     if (!reviews.length) return res.json({ accepted: 0, total: 0 });
@@ -1090,16 +1190,17 @@ app.post('/api/browser-agent/jobs/:id/complete', requireAuth, async (req: any, r
     });
   }
 
+  const finalStatus = detailFailed > 0 ? 'PARTIAL' : 'SUCCESS';
   const completed = await prisma.run.updateMany({
     where: {
       id: req.params.id,
       userId: req.user.id,
       status: 'BROWSER_RUNNING'
     },
-    data: { status: 'SUCCESS', finishedAt: new Date() }
+    data: { status: finalStatus, finishedAt: new Date() }
   });
   if (completed.count !== 1) return res.status(409).json({ error: 'Browser job is no longer active' });
-  await dataset.finalize('SUCCESS');
+  await dataset.finalize(finalStatus);
   appendRunLog(
     req.params.id,
     `[INFO] [BrowserAgent] Completed with ${storedCount} ${platformLabel} items` +
@@ -1107,7 +1208,7 @@ app.post('/api/browser-agent/jobs/:id/complete', requireAuth, async (req: any, r
       ? `; details: ${detailCompleted} completed, ${detailFailed} failed.`
       : '.')
   );
-  res.json({ success: true });
+  res.json({ success: finalStatus === 'SUCCESS', status: finalStatus });
 });
 
 app.post('/api/browser-agent/jobs/:id/fail', requireAuth, async (req: any, res: any) => {
@@ -1169,12 +1270,15 @@ app.get('/api/runs/:id/input', requireAuth, async (req: any, res: any) => {
 app.get('/api/runs/:id/output', requireAuth, async (req: any, res: any) => {
   const run = await prisma.run.findFirst({
     where: { id: req.params.id, userId: req.user.id },
-    select: { id: true }
+    select: { id: true, actor: { select: { name: true } } }
   });
   if (!run) return res.status(404).json({ error: 'Run not found' });
   const output = await readRunOutput(run.id);
   if (!output) return res.status(404).json({ error: 'Run output not found' });
-  res.json(output);
+  res.json({
+    ...output,
+    items: output.items.map((item) => compactActorRecord(run.actor.name, item))
+  });
 });
 
 app.get('/api/runs/:id/items', requireAuth, async (req: any, res: any) => {
@@ -1211,7 +1315,10 @@ app.get('/api/runs/:id/items', requireAuth, async (req: any, res: any) => {
         id: run.actor.id,
         name: run.actor.name,
         version: run.actor.version,
-        outputSchema: run.actor.outputSchema
+        outputSchema: compactActorOutputSchema(
+          run.actor.name,
+          run.actor.outputSchema
+        )
       }
     },
     pagination: {
@@ -1224,7 +1331,7 @@ app.get('/api/runs/:id/items', requireAuth, async (req: any, res: any) => {
       id: item.id,
       position: item.position,
       createdAt: item.createdAt,
-      data: item.data
+      data: compactActorRecord(run.actor.name, item.data)
     }))
   });
 });
@@ -1270,7 +1377,11 @@ app.get('/api/runs/:id/export', requireAuth, async (req: any, res: any) => {
       });
       if (!batch.length) break;
       for (const item of batch) {
-        res.write(`${first ? '' : ',\n'}    ${JSON.stringify(item.data)}`);
+        res.write(
+          `${first ? '' : ',\n'}    ${JSON.stringify(
+            compactActorRecord(run.actor.name, item.data)
+          )}`
+        );
         first = false;
         cursor = item.position;
       }
@@ -1278,7 +1389,9 @@ app.get('/api/runs/:id/export', requireAuth, async (req: any, res: any) => {
     return res.end('\n  ]\n}');
   }
 
-  const schemaColumns = outputSchemaColumns(run.actor.outputSchema);
+  const schemaColumns = outputSchemaColumns(
+    compactActorOutputSchema(run.actor.name, run.actor.outputSchema)
+  );
   const sample = schemaColumns.length === 0
     ? await prisma.datasetItem.findMany({
       where: { runId: run.id },
@@ -1287,11 +1400,12 @@ app.get('/api/runs/:id/export', requireAuth, async (req: any, res: any) => {
       select: { data: true }
     })
     : [];
-  const records = sample.map((item) => (
-    item.data && typeof item.data === 'object' && !Array.isArray(item.data)
-      ? item.data as Record<string, unknown>
-      : { value: item.data }
-  ));
+  const records = sample.map((item) => {
+    const compacted = compactActorRecord(run.actor.name, item.data);
+    return compacted && typeof compacted === 'object' && !Array.isArray(compacted)
+      ? compacted as Record<string, unknown>
+      : { value: compacted };
+  });
   const columns = Array.from(new Set([
     ...schemaColumns,
     ...records.flatMap((record) => Object.keys(record))
@@ -1308,9 +1422,10 @@ app.get('/api/runs/:id/export', requireAuth, async (req: any, res: any) => {
     });
     if (!batch.length) break;
     for (const item of batch) {
-      const record = item.data && typeof item.data === 'object' && !Array.isArray(item.data)
-        ? item.data as Record<string, unknown>
-        : { value: item.data };
+      const compacted = compactActorRecord(run.actor.name, item.data);
+      const record = compacted && typeof compacted === 'object' && !Array.isArray(compacted)
+        ? compacted as Record<string, unknown>
+        : { value: compacted };
       res.write(`${columns.map((column) => csvCell(record[column])).join(',')}\r\n`);
       cursor = item.position;
     }

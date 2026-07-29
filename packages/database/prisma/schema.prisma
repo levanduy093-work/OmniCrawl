@@ -62,7 +62,7 @@ model Run {
   userId         String?
   actor          Actor     @relation(fields: [actorId], references: [id])
   user           User?     @relation(fields: [userId], references: [id])
-  status         String    @default("PENDING") // CREATING, PENDING, BROWSER_PENDING, RUNNING, BROWSER_RUNNING, STOPPING, STOPPED, SUCCESS, FAILED
+  status         String    @default("PENDING") // CREATING, PENDING, BROWSER_PENDING, RUNNING, BROWSER_RUNNING, STOPPING, STOPPED, SUCCESS, PARTIAL, FAILED
   input          Json?
   outputMetadata Json?
   outputError    String?

@@ -1,59 +1,9 @@
-const pendingReviewFallbacks = new Map();
-let renderedReviewCollectionQueue = Promise.resolve();
-
-function enqueueRenderedReviewCollection(limit, itemId) {
-  const task = renderedReviewCollectionQueue
-    .catch(() => undefined)
-    .then(() => collectRenderedShopeeReviews(limit, itemId));
-  renderedReviewCollectionQueue = task.catch(() => undefined);
-  return task;
-}
-
-async function prepareShopeeReviewSurface(itemId) {
-  const currentIds = parseProductIds(location.href);
-  if (
-    itemId &&
-    currentIds?.itemId &&
-    String(currentIds.itemId) !== String(itemId)
-  ) return;
-  const surface = renderedReviewSurface();
-  const target = surface.overview || surface.heading;
-  if (!target || surface.reviewCard) return;
-  target.scrollIntoView({ block: 'center', behavior: 'auto' });
-  const allFilter = [...document.querySelectorAll('button, [role="button"]')]
-    .find((element) => /^(?:tất cả|all)\b/i.test(
-      (element.textContent || '').replace(/\s+/g, ' ').trim()
-    ));
-  if (isEnabledPaginationControl(allFilter)) allFilter.click();
-  await waitForReviewSurfaceMutation(700);
-}
-
 window.addEventListener('omnicrawl:shopee-response', (event) => {
   const detail = event.detail;
   chrome.runtime.sendMessage({
     type: 'SHOPEE_RESPONSE',
     detail
   }).catch(() => undefined);
-
-  const payload = detail?.payload;
-  if (detail?.kind !== 'reviews' || !payload?.omnicrawlFinal) return;
-  const itemId = String(payload.omnicrawlItemId || '');
-  const pending = pendingReviewFallbacks.get(itemId);
-  if (!pending) return;
-
-  if (payload.error || payload.omnicrawlIncomplete) {
-    if (pending.fallbackStarted) return;
-    pending.fallbackStarted = true;
-    void enqueueRenderedReviewCollection(pending.limit, itemId)
-      .catch(() => {
-        sendShopeeDomReviews([], true, itemId);
-      })
-      .finally(() => {
-        pendingReviewFallbacks.delete(itemId);
-      });
-    return;
-  }
-  pendingReviewFallbacks.delete(itemId);
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -78,36 +28,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     sendResponse({ ok: true, detail });
     return;
   }
-  if (message.type === 'REQUEST_SHOPEE_RENDERED_REVIEWS') {
-    void enqueueRenderedReviewCollection(
-      Number(message.limit || 20),
-      String(message.itemId || '')
-    ).then((reviews) => {
-      sendResponse({ ok: true, renderedCount: reviews.length });
-    }).catch((error) => {
-      sendResponse({ ok: false, error: error?.message || String(error) });
-    });
-    return true;
-  }
-  if (message.type !== 'REQUEST_SHOPEE_REVIEWS') return;
-  const itemId = String(message.itemId || '');
-  pendingReviewFallbacks.set(itemId, {
-    limit: Number(message.limit || 20),
-    fallbackStarted: false
-  });
-  void prepareShopeeReviewSurface(itemId)
-    .catch(() => undefined)
-    .then(() => {
-      window.dispatchEvent(new CustomEvent('omnicrawl:request-reviews', {
-        detail: {
-          itemId,
-          shopId: String(message.shopId || ''),
-          limit: Number(message.limit || 0)
-        }
-      }));
-      sendResponse({ ok: true });
-    });
-  return true;
+  return undefined;
 });
 
 function scrapeRenderedShopeeReviews() {
@@ -559,6 +480,13 @@ function sendShopeeDomItems(items, page, isFinal = false) {
   }).catch(() => undefined);
 }
 
+function waitForRenderedScroll(minimumMs = 350, maximumMs = 650) {
+  const delay = minimumMs + Math.floor(
+    Math.random() * (maximumMs - minimumMs + 1)
+  );
+  return new Promise((resolve) => setTimeout(resolve, delay));
+}
+
 async function rescanRenderedShopeeProducts(round = 0) {
   if (!location.pathname.includes('/search')) return 0;
   const height = Math.max(document.body.scrollHeight, 4000);
@@ -566,9 +494,9 @@ async function rescanRenderedShopeeProducts(round = 0) {
   const ratio = positions[Math.abs(Math.floor(round)) % positions.length];
   window.scrollTo({
     top: Math.max(0, Math.floor(height * ratio) - Math.floor(innerHeight / 2)),
-    behavior: 'auto'
+    behavior: 'smooth'
   });
-  await new Promise((resolve) => setTimeout(resolve, 350));
+  await waitForRenderedScroll(450, 750);
   const items = scrapeRenderedProducts();
   const signature = renderedProductSignature(items);
   if (items.length && signature !== lastDomSignature) {
@@ -584,6 +512,7 @@ async function autoScrollShopeeSearchPage() {
   const minimumStableItems = 20;
   let stableRounds = 0;
   let previousSignature = '';
+  let currentY = Math.max(0, window.scrollY);
 
   const waitForProductChange = (signature, waitMs = 1000) => new Promise((resolve) => {
     let settled = false;
@@ -604,9 +533,15 @@ async function autoScrollShopeeSearchPage() {
 
   for (let i = 0; i < 25; i += 1) {
     const totalHeight = Math.max(document.body.scrollHeight, 4000);
-    const targetY = Math.floor((totalHeight / 4) * Math.min(i + 1, 4));
-    window.scrollTo({ top: targetY, behavior: 'auto' });
-    await waitForProductChange(previousSignature);
+    const maximumY = Math.max(0, totalHeight - window.innerHeight);
+    const step = Math.max(
+      320,
+      Math.floor(window.innerHeight * (0.55 + Math.random() * 0.25))
+    );
+    currentY = Math.min(maximumY, currentY + step);
+    window.scrollTo({ top: currentY, behavior: 'smooth' });
+    await waitForRenderedScroll();
+    await waitForProductChange(previousSignature, 800);
 
     const items = scrapeRenderedProducts();
     const signature = renderedProductSignature(items);
@@ -618,8 +553,17 @@ async function autoScrollShopeeSearchPage() {
       lastDomSignature = signature;
       sendShopeeDomItems(items, page);
     }
-    if (items.length >= minimumStableItems && stableRounds >= 1) break;
-    if (items.length < minimumStableItems && stableRounds >= 5) break;
+    const reachedDeepScroll = maximumY === 0 || currentY >= maximumY * 0.85;
+    if (
+      reachedDeepScroll &&
+      items.length >= minimumStableItems &&
+      stableRounds >= 2
+    ) break;
+    if (
+      reachedDeepScroll &&
+      items.length < minimumStableItems &&
+      stableRounds >= 5
+    ) break;
   }
   sendShopeeDomItems([], page, true);
 }
