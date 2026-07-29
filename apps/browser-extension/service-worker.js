@@ -23,6 +23,14 @@ const stateReady = chrome.storage.session.get(['config', 'activeJob']).then((sto
       ? Math.min(100, Math.max(0, Math.floor(restoredMaxReviews)))
       : 20;
     activeJob.pendingDetailData = activeJob.pendingDetailData || null;
+    activeJob.reviewsApiError = activeJob.reviewsApiError || '';
+    activeJob.reviewBuffer = Array.isArray(activeJob.reviewBuffer)
+      ? activeJob.reviewBuffer
+      : [];
+    activeJob.reviewSeen = Array.isArray(activeJob.reviewSeen)
+      ? activeJob.reviewSeen
+      : [];
+    activeJob.windowId = activeJob.windowId == null ? null : Number(activeJob.windowId);
     activeJob.scheduledPage = activeJob.scheduledPage == null
       ? null
       : Number(activeJob.scheduledPage);
@@ -60,16 +68,22 @@ async function handlePageTimeout() {
   if (!activeJob || !activeJob.pageDeadline || Date.now() < activeJob.pageDeadline) return;
   if (activeJob.phase === 'DETAIL' && activeJob.currentProduct) {
     if (activeJob.pendingDetailData) {
+      const bufferedReviews = Array.isArray(activeJob.reviewBuffer)
+        ? activeJob.reviewBuffer
+        : [];
       await completeCurrentDetail({
         ...activeJob.pendingDetailData,
-        reviewsCollected: 0,
-        reviews: [],
-        reviewsStatus: 'FAILED',
-        reviewsError: 'Không nhận được dữ liệu đánh giá từ Shopee sau 90 giây.'
+        reviewsCollected: bufferedReviews.length,
+        reviews: bufferedReviews,
+        reviewsStatus: bufferedReviews.length ? 'PARTIAL' : 'FAILED',
+        reviewsError: activeJob.reviewsApiError ||
+          `Không nhận được dữ liệu đánh giá từ ${platformLabel(activeJob)} sau 90 giây.`
       });
       return;
     }
-    await failCurrentDetail('Không nhận được dữ liệu chi tiết từ Shopee sau 90 giây.');
+    await failCurrentDetail(
+      `Không nhận được dữ liệu chi tiết từ ${platformLabel(activeJob)} sau 90 giây.`
+    );
     return;
   }
   if (activeJob.phase === 'SEARCH' && activeJob.seen.length > 0) {
@@ -125,6 +139,71 @@ function searchUrlForJob(job, page) {
     `https://www.tiktok.com/search?q=${encodeURIComponent(job.keyword)}` +
     `&omnicrawl_mode=${encodeURIComponent(job.mode || 'videos')}`
   );
+}
+
+function platformTabPatterns(job) {
+  return job?.platform === 'tiktok'
+    ? ['https://*.tiktok.com/*']
+    : ['https://shopee.vn/*', 'https://*.shopee.vn/*'];
+}
+
+async function createCrawlerWindow(job) {
+  const existingTabs = await chrome.tabs.query({
+    url: platformTabPatterns(job)
+  });
+  const sourceTab = existingTabs
+    .filter((tab) => (
+      tab.id &&
+      !tab.incognito &&
+      !String(tab.url || '').includes('/login') &&
+      !String(tab.url || '').includes('/verify')
+    ))
+    .sort((left, right) => Number(right.lastAccessed || 0) - Number(left.lastAccessed || 0))[0];
+
+  let workerTab = null;
+  let restoreTabId = null;
+  if (sourceTab?.id) {
+    const [activeSourceWindowTab] = await chrome.tabs.query({
+      active: true,
+      windowId: sourceTab.windowId
+    });
+    restoreTabId = activeSourceWindowTab?.id || null;
+    workerTab = await chrome.tabs.duplicate(sourceTab.id);
+  } else {
+    workerTab = await chrome.tabs.create({
+      url: 'about:blank',
+      active: false
+    });
+  }
+  if (!workerTab?.id) {
+    throw new Error(`Không thể tạo tab ${platformLabel(job)} cho Browser Agent.`);
+  }
+
+  const crawlerWindow = await chrome.windows.create({
+    tabId: workerTab.id,
+    type: 'normal',
+    focused: false,
+    width: 1100,
+    height: 820,
+    left: 40,
+    top: 40
+  });
+  if (restoreTabId && restoreTabId !== workerTab.id) {
+    await chrome.tabs.update(restoreTabId, { active: true }).catch(() => undefined);
+  }
+  const tab = crawlerWindow.tabs?.[0] || await chrome.tabs.get(workerTab.id);
+  if (!tab?.id || !crawlerWindow.id) {
+    throw new Error('Không thể tạo cửa sổ Browser Agent riêng.');
+  }
+  await chrome.tabs.update(tab.id, {
+    active: true,
+    url: searchUrlForJob(job, 0)
+  });
+  return {
+    tab,
+    windowId: crawlerWindow.id,
+    reusedSessionTab: Boolean(sourceTab?.id)
+  };
 }
 
 function findItemObject(entry) {
@@ -825,6 +904,87 @@ function mapReviewsPayload(payload) {
   return Array.isArray(rawRatings) ? rawRatings.map(mapReview) : [];
 }
 
+function mapTikTokComment(comment) {
+  const createdAtValue = Number(
+    comment?.create_time ?? comment?.createTime ?? comment?.created_at
+  );
+  const author = comment?.user ?? comment?.author ?? {};
+  const images = [
+    ...(Array.isArray(comment?.image_list) ? comment.image_list : []),
+    ...(Array.isArray(comment?.images) ? comment.images : [])
+  ].map(firstTikTokImage).filter(Boolean);
+  return {
+    reviewId: String(comment?.cid ?? comment?.comment_id ?? comment?.id ?? ''),
+    author: String(
+      author?.nickname ?? author?.unique_id ?? author?.uniqueId ??
+      comment?.user_name ?? comment?.username ?? ''
+    ),
+    authorId: String(author?.uid ?? author?.id ?? author?.sec_uid ?? ''),
+    rating: extractNumber(comment?.rating ?? comment?.score),
+    comment: String(comment?.text ?? comment?.content ?? comment?.comment ?? ''),
+    createdAt: Number.isFinite(createdAtValue) && createdAtValue > 0
+      ? new Date(createdAtValue * (createdAtValue < 10_000_000_000 ? 1000 : 1)).toISOString()
+      : '',
+    likes: extractNumber(comment?.digg_count ?? comment?.like_count ?? comment?.likes),
+    images,
+    videos: [],
+    variation: '',
+    shopReply: ''
+  };
+}
+
+function mapTikTokCommentsPayload(payload) {
+  const candidates = [
+    payload?.comments,
+    payload?.comment_list,
+    payload?.data?.comments,
+    payload?.data?.comment_list,
+    payload?.data?.reviews,
+    payload?.reviews
+  ];
+  const rawComments = candidates.find(Array.isArray) || [];
+  return rawComments
+    .map(mapTikTokComment)
+    .filter((comment) => comment.reviewId || comment.comment);
+}
+
+function maxReviewsForJob(job = activeJob) {
+  return Math.min(
+    100,
+    Math.max(0, Math.floor(Number(job?.maxReviewsPerProduct ?? 20)))
+  );
+}
+
+function expectedReviewTarget(value, job = activeJob) {
+  if (value === null || value === undefined || value === '') {
+    return maxReviewsForJob(job);
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0
+    ? Math.min(maxReviewsForJob(job), numeric)
+    : maxReviewsForJob(job);
+}
+
+async function mergeReviewBuffer(reviews) {
+  if (!activeJob || !Array.isArray(reviews)) return [];
+  const seen = new Set(activeJob.reviewSeen || []);
+  const buffer = Array.isArray(activeJob.reviewBuffer) ? activeJob.reviewBuffer : [];
+  for (const review of reviews) {
+    const key = String(
+      review?.reviewId ||
+      `${review?.author || ''}:${review?.createdAt || ''}:${review?.comment || ''}`
+    );
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    buffer.push(review);
+    if (buffer.length >= maxReviewsForJob(activeJob)) break;
+  }
+  activeJob.reviewSeen = [...seen];
+  activeJob.reviewBuffer = buffer;
+  await persistActiveJob();
+  return buffer;
+}
+
 async function storeItems(items) {
   if (!activeJob || activeJob.phase !== 'SEARCH') return 0;
   const seenSet = new Set(activeJob.seen);
@@ -843,35 +1003,26 @@ async function storeItems(items) {
         Number(original.searchPage ?? activeJob.page ?? 0) * 60 + fallbackPosition
       ),
       observedAt: String(original.observedAt || new Date().toISOString()),
-      detailStatus: activeJob.platform === 'tiktok'
-        ? String(original.detailStatus || (activeJob.includeDetails ? 'PARTIAL' : 'SKIPPED'))
-        : (activeJob.includeDetails ? 'PENDING' : 'SKIPPED')
+      detailStatus: activeJob.includeDetails ? 'PENDING' : 'SKIPPED'
     };
     const key = String(item.itemId || item.url || item.title);
     const requiresPrice = activeJob.platform !== 'tiktok';
     if (!item.title || (requiresPrice && !item.price) || seenSet.has(key)) continue;
     seenSet.add(key);
     activeJob.seen.push(key);
-    if (
-      activeJob.platform === 'shopee' &&
-      activeJob.includeDetails &&
-      item.itemId &&
-      item.url
-    ) {
+    if (activeJob.includeDetails && item.itemId && item.url) {
       activeJob.products.push({
         itemId: item.itemId,
         shopId: item.shopId,
         url: item.url,
         title: item.title,
-        image: item.image
+        image: item.image,
+        sourceType: item.sourceType || (activeJob.platform === 'tiktok' ? activeJob.mode : 'product'),
+        description: item.description || '',
+        rating: item.rating ?? null,
+        ratingCount: item.ratingCount ?? item.reviewCount ?? null,
+        comments: item.comments ?? null
       });
-    }
-    if (
-      activeJob.platform === 'tiktok' &&
-      activeJob.includeDetails &&
-      ['COMPLETED', 'PARTIAL'].includes(item.detailStatus)
-    ) {
-      activeJob.detailCompleted = Number(activeJob.detailCompleted || 0) + 1;
     }
     freshItems.push(item);
     if (activeJob.seen.length >= activeJob.maxItems) break;
@@ -885,6 +1036,58 @@ async function storeItems(items) {
     body: JSON.stringify({ items: freshItems })
   });
   return freshItems.length;
+}
+
+async function activateAndScrollTikTok(runId, tabId, page, fallbackUrl) {
+  let returnTabId = null;
+  try {
+    const jobTab = await chrome.tabs.get(tabId);
+    const [currentTab] = await chrome.tabs.query({
+      active: true,
+      windowId: jobTab.windowId
+    });
+    if (currentTab?.id && currentTab.id !== tabId) {
+      returnTabId = currentTab.id;
+    }
+
+    await chrome.tabs.update(tabId, { active: true });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    const result = await chrome.tabs.sendMessage(tabId, {
+      type: 'TIKTOK_LOAD_MORE',
+      page
+    });
+    if (!result?.ok) {
+      throw new Error(result?.error || 'TikTok content script did not complete scrolling.');
+    }
+
+    if (activeJob?.runId === runId) {
+      await logJob(
+        `TikTok auto-scroll page ${page}: results ${result.startCount ?? '?'} -> ` +
+        `${result.endCount ?? '?'}, height ${result.startHeight ?? '?'} -> ` +
+        `${result.endHeight ?? '?'}, ${result.attempts ?? '?'} attempts.`
+      );
+    }
+  } catch (error) {
+    if (activeJob?.runId === runId) {
+      await logJob(
+        `TikTok auto-scroll failed (${error?.message || String(error)}); reloading the search page.`
+      );
+      await chrome.tabs.update(tabId, { url: fallbackUrl }).catch((updateError) => {
+        void finishJob(
+          false,
+          updateError?.message || 'Không thể tải thêm kết quả tìm kiếm TikTok.'
+        );
+      });
+    }
+  } finally {
+    if (returnTabId) {
+      await chrome.tabs.update(returnTabId, { active: true }).catch(() => undefined);
+    }
+    if (activeJob?.runId === runId && activeJob.phase === 'SEARCH') {
+      armPageTimeout(searchTimeoutForJob(activeJob));
+    }
+  }
 }
 
 async function scheduleNextPage() {
@@ -907,20 +1110,11 @@ async function scheduleNextPage() {
     activeJob.page = nextPage;
     activeJob.scheduledPage = null;
     void persistActiveJob();
-    armPageTimeout(searchTimeoutForJob(activeJob));
     if (activeJob.platform === 'tiktok') {
-      chrome.tabs.sendMessage(activeJob.tabId, {
-        type: 'TIKTOK_LOAD_MORE',
-        page: nextPage
-      }).then(() => {
-        armPageTimeout(searchTimeoutForJob(activeJob));
-      }).catch(() => {
-        chrome.tabs.update(activeJob.tabId, { url: nextUrl }).catch((error) => {
-          void finishJob(false, error?.message || 'Không thể mở trang tìm kiếm TikTok.');
-        });
-      });
+      void activateAndScrollTikTok(runId, activeJob.tabId, nextPage, nextUrl);
       return;
     }
+    armPageTimeout(searchTimeoutForJob(activeJob));
     chrome.tabs.update(activeJob.tabId, { url: nextUrl }).catch((error) => {
       void finishJob(false, error?.message || 'Không thể mở trang tìm kiếm Shopee.');
     });
@@ -959,14 +1153,6 @@ async function logJob(message) {
 }
 
 function detailProgress(job = activeJob) {
-  if (job?.platform === 'tiktok') {
-    return {
-      enabled: Boolean(job.includeDetails),
-      completed: Number(job.detailCompleted || 0),
-      failed: Number(job.detailFailed || 0),
-      total: Number(job.seen?.length || 0)
-    };
-  }
   return {
     enabled: Boolean(job?.includeDetails),
     completed: Number(job?.detailCompleted || 0),
@@ -991,17 +1177,17 @@ async function finishJob(success, error) {
   } catch {
     // The dashboard can still stop or delete a run if the local API disappears.
   } finally {
-    if (success && job.tabId) chrome.tabs.remove(job.tabId).catch(() => undefined);
+    if (job.windowId) {
+      chrome.windows.remove(job.windowId).catch(() => undefined);
+    } else if (job.tabId) {
+      chrome.tabs.remove(job.tabId).catch(() => undefined);
+    }
     schedulePoll(1000);
   }
 }
 
 async function beginDetailPhase() {
   if (!activeJob || activeJob.phase === 'DETAIL') return;
-  if (activeJob.platform === 'tiktok') {
-    await finishJob(true);
-    return;
-  }
   if (!activeJob.includeDetails || !activeJob.products.length) {
     await finishJob(true);
     return;
@@ -1016,8 +1202,14 @@ async function beginDetailPhase() {
   activeJob.detailHandledFor = null;
   activeJob.pendingDetailData = null;
   activeJob.reviewRequestedFor = null;
+  activeJob.reviewsApiError = '';
+  activeJob.reviewBuffer = [];
+  activeJob.reviewSeen = [];
   await persistActiveJob();
-  await logJob(`Starting product detail crawl for ${activeJob.products.length} products.`);
+  await logJob(
+    `Starting ${platformLabel(activeJob)} detail and review crawl for ` +
+    `${activeJob.products.length} items.`
+  );
   await navigateNextDetail();
 }
 
@@ -1034,13 +1226,16 @@ async function navigateNextDetail() {
   activeJob.detailHandledFor = null;
   activeJob.pendingDetailData = null;
   activeJob.reviewRequestedFor = null;
+  activeJob.reviewsApiError = '';
+  activeJob.reviewBuffer = [];
+  activeJob.reviewSeen = [];
   activeJob.navigationScheduled = true;
   const runId = activeJob.runId;
   const productIndex = activeJob.detailIndex;
   const delay = 3000 + Math.floor(Math.random() * 3000);
   await persistActiveJob();
   await logJob(
-    `Waiting ${Math.ceil(delay / 1000)} seconds before product detail ` +
+    `Waiting ${Math.ceil(delay / 1000)} seconds before ${platformLabel(activeJob)} detail ` +
     `${productIndex + 1}/${activeJob.products.length}.`
   );
   setTimeout(() => {
@@ -1081,6 +1276,9 @@ async function patchCurrentDetail(detail) {
   activeJob.currentProduct = null;
   activeJob.pendingDetailData = null;
   activeJob.reviewRequestedFor = null;
+  activeJob.reviewsApiError = '';
+  activeJob.reviewBuffer = [];
+  activeJob.reviewSeen = [];
   await persistActiveJob();
   await navigateNextDetail();
 }
@@ -1116,10 +1314,7 @@ async function requestReviewsForCurrent(detail) {
   activeJob.reviewRequestedFor = key;
   await persistActiveJob();
 
-  const limit = Math.min(
-    100,
-    Math.max(0, Math.floor(Number(activeJob.maxReviewsPerProduct ?? 20)))
-  );
+  const limit = maxReviewsForJob(activeJob);
   if (limit === 0) {
     await completeCurrentDetail({
       ...detail,
@@ -1132,19 +1327,53 @@ async function requestReviewsForCurrent(detail) {
   }
 
   try {
-    await chrome.tabs.sendMessage(activeJob.tabId, {
-      type: 'REQUEST_SHOPEE_REVIEWS',
+    const response = await chrome.tabs.sendMessage(activeJob.tabId, {
+      type: activeJob.platform === 'tiktok'
+        ? 'REQUEST_TIKTOK_REVIEWS'
+        : 'REQUEST_SHOPEE_REVIEWS',
       itemId: activeJob.currentProduct.itemId,
       shopId: activeJob.currentProduct.shopId,
-      limit
+      limit,
+      sourceType: activeJob.currentProduct.sourceType
     });
+    if (
+      response?.ok === false &&
+      activeJob?.phase === 'DETAIL' &&
+      String(activeJob.currentProduct?.itemId || '') === key
+    ) {
+      throw new Error(response.error || 'Không thể đọc vùng đánh giá trên trang.');
+    }
+    const renderedCount = Number(response?.renderedCount ?? response?.count ?? 0);
+    const expectedCount = activeJob?.platform === 'tiktok'
+      ? activeJob.currentProduct?.comments ?? activeJob.currentProduct?.ratingCount
+      : detail.ratingCount;
+    if (
+      renderedCount === 0 &&
+      expectedCount === 0 &&
+      activeJob?.phase === 'DETAIL' &&
+      String(activeJob.currentProduct?.itemId || '') === key
+    ) {
+      await completeCurrentDetail({
+        ...detail,
+        reviewsCollected: 0,
+        reviews: [],
+        reviewsStatus: 'COMPLETED',
+        reviewsError: ''
+      });
+    }
   } catch (error) {
+    if (
+      !activeJob ||
+      activeJob.phase !== 'DETAIL' ||
+      String(activeJob.currentProduct?.itemId || '') !== key
+    ) return;
     await completeCurrentDetail({
       ...detail,
       reviewsCollected: 0,
       reviews: [],
       reviewsStatus: 'FAILED',
-      reviewsError: error?.message || 'Không thể yêu cầu dữ liệu đánh giá từ tab Shopee.'
+      reviewsError: error?.message ||
+        `Không thể yêu cầu dữ liệu đánh giá từ tab ${platformLabel(activeJob)}.`
     });
   }
 }
@@ -1217,8 +1446,8 @@ async function processSearchResponse(detail, sender) {
 
   if (!rawItems.length || !storedCount) {
     if (activeJob.seen.length > 0) {
-      await continueAfterNoNewSearchData(
-        'No new API-mapped products; continuing to the next Shopee page.'
+      await logJob(
+        'No new API-mapped products; waiting for rendered cards before changing pages.'
       );
     }
     return;
@@ -1328,19 +1557,154 @@ async function processReviewsResponse(detail, sender) {
   ) return;
   const reviews = mapReviewsPayload(detail?.payload);
   const error = String(detail?.payload?.error || '');
+  const bufferedReviews = await mergeReviewBuffer(reviews);
+  if (error && reviews.length === 0) {
+    activeJob.reviewsApiError = error;
+    await persistActiveJob();
+    await logJob(
+      `Shopee review API was unavailable (${error}); waiting for rendered reviews.`
+    );
+    return;
+  }
+  const totalValue = Number(
+    detail?.payload?.total ??
+    detail?.payload?.data?.item_rating_summary?.rating_total
+  );
+  const total = Number.isFinite(totalValue) && totalValue >= 0 ? totalValue : null;
+  const target = total === null
+    ? maxReviewsForJob(activeJob)
+    : Math.min(maxReviewsForJob(activeJob), total);
+  if (bufferedReviews.length < target) {
+    await logJob(
+      `Captured ${bufferedReviews.length}/${target} Shopee reviews; ` +
+      'continuing review pagination.'
+    );
+    return;
+  }
   const reviewsStatus = error
     ? (reviews.length ? 'PARTIAL' : 'FAILED')
     : 'COMPLETED';
   await logJob(
-    `Captured ${reviews.length} reviews for product ` +
+    `Captured ${bufferedReviews.length}/${target} reviews for product ` +
     `${activeJob.detailIndex + 1}/${activeJob.products.length}.`
   );
   await completeCurrentDetail({
     ...activeJob.pendingDetailData,
-    reviewsCollected: reviews.length,
-    reviews,
+    reviewsCollected: bufferedReviews.length,
+    reviews: bufferedReviews,
     reviewsStatus,
     reviewsError: error
+  });
+}
+
+async function processTikTokDetailReady(message, sender) {
+  if (
+    !activeJob ||
+    activeJob.platform !== 'tiktok' ||
+    activeJob.phase !== 'DETAIL' ||
+    sender.tab?.id !== activeJob.tabId ||
+    !activeJob.currentProduct
+  ) return;
+  const expectedId = String(activeJob.currentProduct.itemId || '');
+  if (message.itemId && String(message.itemId) !== expectedId) return;
+  await requestReviewsForCurrent({
+    description: activeJob.currentProduct.description || '',
+    rating: activeJob.currentProduct.rating ?? null,
+    ratingCount: activeJob.currentProduct.ratingCount ?? null,
+    observedAt: new Date().toISOString()
+  });
+}
+
+async function processTikTokReviewsResponse(detail, sender) {
+  if (
+    !activeJob ||
+    activeJob.platform !== 'tiktok' ||
+    activeJob.phase !== 'DETAIL' ||
+    sender.tab?.id !== activeJob.tabId ||
+    detail?.kind !== 'reviews' ||
+    !activeJob.pendingDetailData
+  ) return;
+  const reviews = mapTikTokCommentsPayload(detail?.payload)
+    .slice(0, activeJob.maxReviewsPerProduct);
+  const error = String(detail?.payload?.error || '');
+  const bufferedReviews = await mergeReviewBuffer(reviews);
+  if (error && reviews.length === 0) {
+    activeJob.reviewsApiError = error;
+    await persistActiveJob();
+    await logJob(
+      `TikTok comments API was unavailable (${error}); waiting for rendered comments.`
+    );
+    return;
+  }
+  const expectedValue = (
+    activeJob.currentProduct?.comments ?? activeJob.currentProduct?.ratingCount
+  );
+  const expected = expectedReviewTarget(expectedValue, activeJob);
+  if (bufferedReviews.length < expected) {
+    await logJob(
+      `Captured ${bufferedReviews.length}/${expected} TikTok comments; loading more.`
+    );
+    return;
+  }
+  await logJob(
+    `Captured ${bufferedReviews.length}/${expected} TikTok comments/reviews for item ` +
+    `${activeJob.detailIndex + 1}/${activeJob.products.length}.`
+  );
+  await completeCurrentDetail({
+    ...activeJob.pendingDetailData,
+    reviewsCollected: bufferedReviews.length,
+    reviews: bufferedReviews,
+    reviewsStatus: error ? 'PARTIAL' : 'COMPLETED',
+    reviewsError: error
+  });
+}
+
+async function processDomReviews(reviews, sender, platform) {
+  if (
+    !activeJob ||
+    activeJob.platform !== platform ||
+    activeJob.phase !== 'DETAIL' ||
+    sender.tab?.id !== activeJob.tabId ||
+    !activeJob.pendingDetailData ||
+    !Array.isArray(reviews)
+  ) return;
+  const mapped = reviews
+    .slice(0, activeJob.maxReviewsPerProduct)
+    .map((review) => ({
+      reviewId: String(review?.reviewId || ''),
+      author: String(review?.author || ''),
+      authorId: String(review?.authorId || ''),
+      rating: extractNumber(review?.rating),
+      comment: String(review?.comment || ''),
+      createdAt: String(review?.createdAt || ''),
+      likes: extractNumber(review?.likes),
+      images: Array.isArray(review?.images) ? review.images.slice(0, 20).map(String) : [],
+      videos: Array.isArray(review?.videos) ? review.videos.slice(0, 10).map(String) : [],
+      variation: String(review?.variation || ''),
+      shopReply: String(review?.shopReply || '')
+    }))
+    .filter((review) => review.reviewId || review.comment);
+  if (!mapped.length && !(activeJob.reviewBuffer || []).length) return;
+  const bufferedReviews = await mergeReviewBuffer(mapped);
+  const expectedValue = (
+    platform === 'tiktok'
+      ? activeJob.currentProduct?.comments ?? activeJob.currentProduct?.ratingCount
+      : activeJob.pendingDetailData?.ratingCount
+  );
+  const expected = expectedReviewTarget(expectedValue, activeJob);
+  const reachedRequestedCount = bufferedReviews.length >= expected;
+  await logJob(
+    `Captured ${bufferedReviews.length}/${expected} rendered ${platformLabel(activeJob)} ` +
+    `${platform === 'tiktok' ? 'comments/reviews' : 'reviews'}.`
+  );
+  await completeCurrentDetail({
+    ...activeJob.pendingDetailData,
+    reviewsCollected: bufferedReviews.length,
+    reviews: bufferedReviews,
+    reviewsStatus: reachedRequestedCount && !activeJob.reviewsApiError
+      ? 'COMPLETED'
+      : 'PARTIAL',
+    reviewsError: activeJob.reviewsApiError || ''
   });
 }
 
@@ -1400,7 +1764,11 @@ async function poll() {
       detailHandledFor: null,
       pendingDetailData: null,
       reviewRequestedFor: null,
+      reviewsApiError: '',
+      reviewBuffer: [],
+      reviewSeen: [],
       tabId: null,
+      windowId: null,
       unexpectedResponses: 0,
       navigationScheduled: false,
       scheduledPage: null,
@@ -1409,15 +1777,19 @@ async function poll() {
       pageDeadline: Date.now() + searchTimeoutForJob(job)
     };
     await persistActiveJob();
-    const tab = await chrome.tabs.create({
-      url: 'about:blank',
-      active: true
-    });
+    const {
+      tab,
+      windowId,
+      reusedSessionTab
+    } = await createCrawlerWindow(activeJob);
     activeJob.tabId = tab.id;
+    activeJob.windowId = windowId;
     await persistActiveJob();
-    await chrome.tabs.update(tab.id, {
-      url: searchUrlForJob(activeJob, 0)
-    });
+    await logJob(
+      reusedSessionTab
+        ? `Reused the authenticated ${platformLabel(activeJob)} tab session in a separate window.`
+        : `No existing ${platformLabel(activeJob)} tab was available; opened a new profile window.`
+    );
     armPageTimeout(searchTimeoutForJob(activeJob));
   } catch (error) {
     if (activeJob) {
@@ -1450,7 +1822,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } else if (message.type === 'POLL_NOW') {
       void poll();
     } else if (message.type === 'TIKTOK_RESPONSE') {
-      void processTikTokSearchResponse(message.detail, sender).catch((error) => {
+      const handler = message.detail?.kind === 'reviews'
+        ? processTikTokReviewsResponse
+        : processTikTokSearchResponse;
+      void handler(message.detail, sender).catch((error) => {
         void finishJob(
           false,
           error instanceof Error ? error.message : 'Không thể xử lý dữ liệu TikTok.'
@@ -1461,11 +1836,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       activeJob?.platform === 'tiktok' &&
       sender.tab?.id === activeJob.tabId
     ) {
-      void logJob(
-        `TikTok page ready: mode=${String(message.mode || activeJob.mode)}, ` +
-        `shopTab=${message.shopTabFound ? 'found' : 'not-found'}, ` +
-        `url=${String(message.url || '').slice(0, 500)}.`
-      );
+      if (activeJob.phase === 'DETAIL') {
+        void processTikTokDetailReady(message, sender).catch((error) => {
+          void failCurrentDetail(
+            error instanceof Error ? error.message : 'Không thể mở chi tiết TikTok.'
+          );
+        });
+      } else {
+        void logJob(
+          `TikTok page ready: mode=${String(message.mode || activeJob.mode)}, ` +
+          `shopTab=${message.shopTabFound ? 'found' : 'not-found'}, ` +
+          `url=${String(message.url || '').slice(0, 500)}.`
+        );
+      }
     } else if (message.type === 'SHOPEE_RESPONSE') {
       const handler = message.detail?.kind === 'detail'
         ? processDetailResponse
@@ -1484,6 +1867,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           false,
           error instanceof Error ? error.message : 'Không thể xử lý card sản phẩm.'
         ).catch(() => undefined);
+      });
+    } else if (message.type === 'SHOPEE_DOM_REVIEWS') {
+      void processDomReviews(message.reviews, sender, 'shopee').catch((error) => {
+        void failCurrentDetail(
+          error instanceof Error ? error.message : 'Không thể lưu đánh giá Shopee.'
+        );
+      });
+    } else if (message.type === 'TIKTOK_DOM_REVIEWS') {
+      void processDomReviews(message.reviews, sender, 'tiktok').catch((error) => {
+        void failCurrentDetail(
+          error instanceof Error ? error.message : 'Không thể lưu bình luận TikTok.'
+        );
       });
     } else if (message.type === 'SHOPEE_DOM_DETAIL') {
       void processDomDetail(message.detail, sender).catch((error) => {

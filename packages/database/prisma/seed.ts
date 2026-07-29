@@ -198,6 +198,14 @@ async function main() {
         title: 'Thu thập dữ liệu phân tích',
         description: 'Lấy mô tả, tác giả hoặc cửa hàng, tương tác, âm thanh, hashtag, giá và doanh số khi TikTok cung cấp.',
         default: true
+      },
+      maxReviewsPerProduct: {
+        type: 'integer',
+        title: 'Số bình luận / đánh giá tối đa mỗi mục',
+        description: 'Với video sẽ thu thập bình luận; với sản phẩm TikTok Shop sẽ thu thập đánh giá hiển thị.',
+        minimum: 0,
+        maximum: 100,
+        default: 20
       }
     }
   });
@@ -231,6 +239,10 @@ async function main() {
       hashtags: { type: 'array', title: 'Hashtag' },
       rating: { type: 'number', title: 'Điểm đánh giá' },
       reviewCount: { type: 'number', title: 'Số lượt đánh giá' },
+      reviewsCollected: { type: 'number', title: 'Số bình luận / đánh giá đã thu thập' },
+      reviews: { type: 'array', title: 'Nội dung bình luận / đánh giá' },
+      reviewsStatus: { type: 'string', title: 'Trạng thái lấy bình luận / đánh giá' },
+      reviewsError: { type: 'string', title: 'Lỗi lấy bình luận / đánh giá' },
       publishedAt: { type: 'string', format: 'date-time', title: 'Thời gian đăng' },
       searchKeyword: { type: 'string', title: 'Từ khóa tìm kiếm' },
       searchPage: { type: 'number', title: 'Lần tải kết quả' },
@@ -245,14 +257,14 @@ async function main() {
     where: { name: 'tiktok-scraper' },
     update: {
       userId: null,
-      version: '1.1.0',
+      version: '1.2.0',
       inputSchema: tiktokInputSchema,
       outputSchema: tiktokOutputSchema
     },
     create: {
       name: 'tiktok-scraper',
       description: 'Browser Agent crawler for TikTok videos and available TikTok Shop web results.',
-      version: '1.1.0',
+      version: '1.2.0',
       userId: null,
       inputSchema: tiktokInputSchema,
       outputSchema: tiktokOutputSchema

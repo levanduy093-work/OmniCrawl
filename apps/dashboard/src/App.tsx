@@ -23,7 +23,7 @@ import Login from './Login'
 import OmniCrawlLogo from './Logo'
 import './App.css'
 
-const REQUIRED_BROWSER_AGENT_VERSION = '0.6.1'
+const REQUIRED_BROWSER_AGENT_VERSION = '0.7.3'
 
 type JsonSchemaProperty = {
   type?: 'string' | 'integer' | 'number' | 'boolean'
@@ -1110,7 +1110,7 @@ function RunDetailModal({
             {value.map((review: any, index: number) => (
               <div key={review.reviewId || index} className="rounded-xl border border-gray-100 bg-gray-50 p-3">
                 <div className="flex items-center justify-between gap-2 text-xs">
-                  <span className="font-medium text-gray-700">{review.author || 'Người mua Shopee'}</span>
+                  <span className="font-medium text-gray-700">{review.author || 'Người dùng'}</span>
                   <span className="text-amber-600">{review.rating ? `${review.rating} ★` : 'Chưa chấm sao'}</span>
                 </div>
                 {review.variation && <div className="mt-1 text-xs text-gray-400">{review.variation}</div>}

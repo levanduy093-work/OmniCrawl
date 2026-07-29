@@ -11,6 +11,15 @@
   const requestKind = (url) => {
     const value = String(url).toLowerCase();
     if (
+      value.includes('/api/comment/list/') ||
+      value.includes('/api/comment/list') ||
+      value.includes('/api/v1/shop/review/') ||
+      value.includes('/api/v1/shop/product_review/') ||
+      value.includes('/review/list')
+    ) {
+      return 'reviews';
+    }
+    if (
       value.includes('/api/search/item/full/') ||
       value.includes('/api/search/general/full/') ||
       value.includes('/api/search/video/full/') ||

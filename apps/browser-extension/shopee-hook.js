@@ -19,6 +19,10 @@
       }
     }
     if (
+      value.includes('/api/v2/item/get_ratings') ||
+      value.includes('/api/v4/item/get_ratings')
+    ) return 'reviews';
+    if (
       value.includes('/api/v4/pdp/get_pc') ||
       value.includes('/api/v4/pdp/get_rw') ||
       value.includes('/api/v4/item/get')

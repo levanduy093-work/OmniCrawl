@@ -158,28 +158,166 @@ function startDomCapture() {
 }
 
 async function loadMoreTikTokResults() {
-  const startHeight = document.documentElement.scrollHeight;
-  for (let step = 0; step < 5; step += 1) {
-    window.scrollTo({
-      top: document.documentElement.scrollHeight,
-      behavior: 'smooth'
+  const resultSelector = isProductSearchPage()
+    ? 'a[href*="/view/product/"], a[href*="/product/"], a[href*="product_id="]'
+    : 'a[href*="/video/"]';
+  const scroller = document.scrollingElement || document.documentElement;
+  const countResults = () => document.querySelectorAll(resultSelector).length;
+  const startHeight = scroller.scrollHeight;
+  const startCount = countResults();
+  let previousHeight = startHeight;
+  let previousCount = startCount;
+  let stableRounds = 0;
+  let attempts = 0;
+
+  for (let step = 0; step < 10; step += 1) {
+    attempts = step + 1;
+    const results = document.querySelectorAll(resultSelector);
+    results[results.length - 1]?.scrollIntoView({
+      block: 'end',
+      inline: 'nearest',
+      behavior: 'auto'
     });
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    scroller.scrollTop = scroller.scrollHeight;
+    window.scrollTo(0, scroller.scrollHeight);
+    captureRenderedItems();
+    await new Promise((resolve) => setTimeout(resolve, 1400));
+
+    const currentHeight = scroller.scrollHeight;
+    const currentCount = countResults();
+    const grew = currentHeight > previousHeight || currentCount > previousCount;
+    stableRounds = grew ? 0 : stableRounds + 1;
+    previousHeight = currentHeight;
+    previousCount = currentCount;
+
+    if (currentCount > startCount && stableRounds >= 2) break;
+
+    if (stableRounds >= 2) {
+      scroller.scrollTop = Math.max(0, scroller.scrollHeight - 900);
+      window.scrollTo(0, Math.max(0, scroller.scrollHeight - 900));
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    }
   }
+
+  captureRenderedItems();
   startDomCapture();
   return {
     startHeight,
-    endHeight: document.documentElement.scrollHeight
+    endHeight: scroller.scrollHeight,
+    startCount,
+    endCount: countResults(),
+    attempts,
+    scrollTop: scroller.scrollTop
   };
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message.type !== 'TIKTOK_LOAD_MORE') return;
-  void loadMoreTikTokResults()
-    .then((result) => sendResponse({ ok: true, ...result }))
-    .catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
-  return true;
+  if (message.type === 'TIKTOK_LOAD_MORE') {
+    void loadMoreTikTokResults()
+      .then((result) => sendResponse({ ok: true, ...result }))
+      .catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
+    return true;
+  }
+  if (message.type === 'REQUEST_TIKTOK_REVIEWS') {
+    void collectRenderedTikTokReviews(Number(message.limit || 20))
+      .then((reviews) => sendResponse({ ok: true, count: reviews.length }))
+      .catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
+    return true;
+  }
 });
+
+function scrapeTikTokReviews() {
+  const candidates = document.querySelectorAll([
+    '[data-e2e="comment-level-1"]',
+    '[data-e2e="comment-item"]',
+    '[class*="DivCommentItemContainer"]',
+    '[class*="CommentItem"]',
+    '[class*="ReviewItem"]',
+    '[data-e2e*="review-item"]'
+  ].join(','));
+  const reviews = [];
+  const seen = new Set();
+  for (const [index, element] of [...candidates].entries()) {
+    const fullText = compactText(element.innerText || element.textContent);
+    if (!fullText || fullText.length < 2) continue;
+    const authorElement = element.querySelector(
+      'a[href^="/@"], [data-e2e*="comment-username"], [class*="Author"], [class*="Username"]'
+    );
+    const commentElement = element.querySelector(
+      '[data-e2e="comment-text"], [data-e2e*="review-content"], ' +
+      '[class*="CommentText"], [class*="ReviewContent"], p'
+    );
+    const author = compactText(authorElement?.textContent).replace(/^@/, '');
+    const comment = compactText(commentElement?.textContent || fullText);
+    if (!comment) continue;
+    const reviewId = String(
+      element.getAttribute('data-comment-id') ||
+      element.getAttribute('data-review-id') ||
+      element.id ||
+      `${author}:${comment.slice(0, 120)}:${index}`
+    );
+    if (seen.has(reviewId)) continue;
+    seen.add(reviewId);
+    const ratingMatch = fullText.match(/([1-5](?:[.,]\d)?)\s*(?:\/\s*5|stars?|sao)/i);
+    const images = [...element.querySelectorAll('img')]
+      .map((image) => image.currentSrc || image.src)
+      .filter(Boolean)
+      .filter((url, imageIndex, all) => all.indexOf(url) === imageIndex)
+      .slice(0, 20);
+    reviews.push({
+      reviewId,
+      author,
+      rating: ratingMatch ? Number(ratingMatch[1].replace(',', '.')) : null,
+      comment,
+      createdAt: '',
+      likes: null,
+      images,
+      videos: [],
+      variation: '',
+      shopReply: ''
+    });
+  }
+  return reviews;
+}
+
+async function collectRenderedTikTokReviews(limit) {
+  const maxReviews = Math.min(100, Math.max(0, Math.floor(limit || 20)));
+  document.querySelector(
+    '[data-e2e="comment-icon"], [data-e2e*="review-tab"], [class*="CommentIcon"]'
+  )?.click();
+
+  const accumulated = new Map();
+  let noGrowthRounds = 0;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const before = accumulated.size;
+    for (const review of scrapeTikTokReviews()) {
+      accumulated.set(review.reviewId, review);
+      if (accumulated.size >= maxReviews) break;
+    }
+    noGrowthRounds = accumulated.size > before ? 0 : noGrowthRounds + 1;
+    if (accumulated.size >= maxReviews) break;
+    const container = document.querySelector(
+      '[data-e2e="comment-list"], [class*="DivCommentListContainer"], ' +
+      '[class*="CommentList"], [class*="ReviewList"]'
+    );
+    if (container) {
+      container.scrollTop = container.scrollHeight;
+      container.lastElementChild?.scrollIntoView({ block: 'end', behavior: 'auto' });
+    } else {
+      window.scrollTo(0, document.documentElement.scrollHeight);
+    }
+    if (noGrowthRounds >= 4) break;
+    await new Promise((resolve) => setTimeout(resolve, 1400));
+  }
+  const reviews = [...accumulated.values()].slice(0, maxReviews);
+  if (reviews.length) {
+    chrome.runtime.sendMessage({
+      type: 'TIKTOK_DOM_REVIEWS',
+      reviews
+    }).catch(() => undefined);
+  }
+  return reviews;
+}
 
 function sendHydrationPayloads() {
   const scripts = [
@@ -232,8 +370,9 @@ function findShopTab() {
 
 async function initializeTikTokCapture() {
   reportBlockedPage();
+  const parsedPage = parseTikTokUrl(location.href);
   let shopTabFound = false;
-  if (isProductSearchPage()) {
+  if (!parsedPage && isProductSearchPage()) {
     await new Promise((resolve) => setTimeout(resolve, 2500));
     const shopTab = findShopTab();
     shopTabFound = Boolean(shopTab);
@@ -243,6 +382,8 @@ async function initializeTikTokCapture() {
   chrome.runtime.sendMessage({
     type: 'TIKTOK_PAGE_STATUS',
     mode: isProductSearchPage() ? 'products' : 'videos',
+    pageType: parsedPage?.sourceType || 'search',
+    itemId: parsedPage?.itemId || '',
     shopTabFound,
     url: location.href,
     title: document.title

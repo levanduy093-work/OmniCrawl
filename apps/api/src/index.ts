@@ -759,9 +759,9 @@ app.patch('/api/browser-agent/jobs/:id/items/:itemId', requireAuth, async (req: 
         id: req.params.id,
         userId: req.user.id,
         status: 'BROWSER_RUNNING',
-        actor: { name: 'shopee-scraper' }
+        actor: { name: { in: BROWSER_ACTOR_NAMES } }
       },
-      select: { id: true }
+      select: { id: true, actor: { select: { name: true } } }
     });
     if (!run) return res.status(404).json({ error: 'Active browser job not found' });
 
@@ -786,7 +786,8 @@ app.patch('/api/browser-agent/jobs/:id/items/:itemId', requireAuth, async (req: 
     });
     appendRunLog(
       run.id,
-      `[INFO] [BrowserAgent] Product details ${completed + failed}/${total}: ` +
+      `[INFO] [BrowserAgent] ${run.actor.name === 'tiktok-scraper' ? 'TikTok' : 'Shopee'} ` +
+      `details ${completed + failed}/${total}: ` +
       `${detail.detailStatus === 'FAILED' ? 'failed' : 'stored'} for item ${String(req.params.itemId).slice(0, 100)}.`
     );
     res.json({ success: true, detailStatus: detail.detailStatus });
