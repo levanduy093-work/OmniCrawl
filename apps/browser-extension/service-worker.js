@@ -624,39 +624,16 @@ function platformTabPatterns(job) {
 }
 
 async function createCrawlerWindow(job) {
-  const existingTabs = await chrome.tabs.query({
-    url: platformTabPatterns(job)
+  const isAllowed = await new Promise((resolve) => {
+    chrome.extension.isAllowedIncognitoAccess(resolve);
   });
-  const sourceTab = existingTabs
-    .filter((tab) => (
-      tab.id &&
-      !tab.incognito &&
-      !String(tab.url || '').includes('/login') &&
-      !String(tab.url || '').includes('/verify')
-    ))
-    .sort((left, right) => Number(right.lastAccessed || 0) - Number(left.lastAccessed || 0))[0];
-
-  let workerTab = null;
-  let restoreTabId = null;
-  if (sourceTab?.id) {
-    const [activeSourceWindowTab] = await chrome.tabs.query({
-      active: true,
-      windowId: sourceTab.windowId
-    });
-    restoreTabId = activeSourceWindowTab?.id || null;
-    workerTab = await chrome.tabs.duplicate(sourceTab.id);
-  } else {
-    workerTab = await chrome.tabs.create({
-      url: 'about:blank',
-      active: false
-    });
-  }
-  if (!workerTab?.id) {
-    throw new Error(`Không thể tạo tab ${platformLabel(job)} cho Browser Agent.`);
+  if (!isAllowed) {
+    throw new Error('OmniCrawl cần quyền "Allow in Incognito" (Cho phép ở chế độ Ẩn danh) để chạy Tách hồn khỏi xác. Vui lòng mở chrome://extensions, tìm OmniCrawl và bật tùy chọn này lên.');
   }
 
   const crawlerWindow = await chrome.windows.create({
-    tabId: workerTab.id,
+    incognito: true,
+    url: 'about:blank',
     type: 'normal',
     focused: false,
     width: 1100,
@@ -664,12 +641,10 @@ async function createCrawlerWindow(job) {
     left: 40,
     top: 40
   });
-  if (restoreTabId && restoreTabId !== workerTab.id) {
-    await chrome.tabs.update(restoreTabId, { active: true }).catch(() => undefined);
-  }
-  const tab = crawlerWindow.tabs?.[0] || await chrome.tabs.get(workerTab.id);
+
+  const tab = crawlerWindow.tabs?.[0];
   if (!tab?.id || !crawlerWindow.id) {
-    throw new Error('Không thể tạo cửa sổ Browser Agent riêng.');
+    throw new Error('Không thể tạo cửa sổ Ẩn danh cho Browser Agent.');
   }
   job.tabId = tab.id;
   job.windowId = crawlerWindow.id;
@@ -684,7 +659,7 @@ async function createCrawlerWindow(job) {
   return {
     tab,
     windowId: crawlerWindow.id,
-    reusedSessionTab: Boolean(sourceTab?.id)
+    reusedSessionTab: false
   };
 }
 

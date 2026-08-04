@@ -1,7 +1,6 @@
 import express from 'express';
 import cors from 'cors';
 import { prisma } from '@omnicrawl/database';
-import { queue } from '@omnicrawl/queue';
 import {
   Dataset,
   RUN_OUTPUT_KIND,

@@ -8,7 +8,6 @@
   },
   "dependencies": {
     "@omnicrawl/database": "workspace:*",
-    "@omnicrawl/queue": "workspace:*",
     "@omnicrawl/sdk": "workspace:*",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
