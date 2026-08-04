@@ -375,10 +375,10 @@ function parseProductIds(url) {
 function renderedSoldValue(text) {
   const normalized = String(text || '').replace(/\s+/g, ' ');
   const valueAfterLabel = normalized.match(
-    /(?:đã bán|sold)\s*:?\s*(\d+(?:[.,]\d+)?\s*(?:k|nghìn|tr|triệu)?)/i
+    /(?:đã bán|sold|lượt mua)\s*:?\s*(\d+(?:[.,]\d+)?\s*(?:k|nghìn|tr|triệu)?)/i
   );
   const valueBeforeLabel = normalized.match(
-    /(\d+(?:[.,]\d+)?\s*(?:k|nghìn|tr|triệu)?)\+?\s*(?:đã bán|sold)/i
+    /(\d+(?:[.,]\d+)?\s*(?:k|nghìn|tr|triệu)?)\+?\s*(?:đã bán|sold|lượt mua|bán)/i
   );
   return (valueAfterLabel?.[1] || valueBeforeLabel?.[1] || '')
     .replace(/\s+/g, '')
@@ -402,7 +402,7 @@ function scrapeRenderedProducts() {
     const title = nameNode?.textContent?.trim() || lines
       .filter((line) => (
         line.length > 5 &&
-        !/(?:₫|\d[\d.,]*\s*đ\b|đã bán|\bsold\b|giảm\s*\d+%|^\d(?:[.,]\d)?$)/i.test(line) &&
+        !/(?:₫|\d[\d.,]*\s*đ\b|đã bán|\bsold\b|giảm\s*\d+%|^\d(?:[.,]\d)?$|lượt mua)/i.test(line) &&
         !/^(?:yêu thích|voucher|cheap on shopee|add-on deal)$/i.test(line)
       ))
       .sort((left, right) => right.length - left.length)[0];

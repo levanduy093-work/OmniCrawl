@@ -309,7 +309,26 @@ async function api(path, options = {}) {
 }
 
 function searchUrl(keyword, page) {
-  return `https://shopee.vn/search?keyword=${encodeURIComponent(keyword)}&page=${page}`;
+  const url = new URL('https://shopee.vn/search');
+  url.searchParams.set('keyword', keyword);
+  
+  // Filter Rotation Strategy for Shopee guest mode
+  const sortIndex = page % 5;
+  if (sortIndex === 1) {
+    url.searchParams.set('sortBy', 'sales');
+  } else if (sortIndex === 2) {
+    url.searchParams.set('sortBy', 'price');
+    url.searchParams.set('order', 'asc');
+  } else if (sortIndex === 3) {
+    url.searchParams.set('sortBy', 'price');
+    url.searchParams.set('order', 'desc');
+  } else if (sortIndex === 4) {
+    url.searchParams.set('sortBy', 'ctime');
+  }
+  
+  // Notice we don't set 'page' parameter anymore.
+  // We stay on the first page of each sort category to bypass the login wall.
+  return url.toString();
 }
 
 function platformLabel(job = activeJob) {
@@ -932,9 +951,10 @@ function normalizeSoldValue(value) {
   const text = String(value).replace(/\s+/g, ' ').trim();
   if (!text) return 0;
   const match = text.match(
-    /(\d+(?:[.,]\d+)?\s*(?:k|nghìn|tr|triệu)?\+?)(?:\s*(?:đã bán|sold))?/i
+    /(\d+(?:[.,]\d+)?\s*(?:k|nghìn|tr|triệu)?\+?)(?:\s*(?:đã bán|sold|lượt mua|bán))?/i
   );
-  return match ? match[1].replace(/\s+/g, '') : 0;
+  if (!match) return 0;
+  return extractNumber(match[1]);
 }
 
 function firstTikTokImage(...values) {
@@ -1970,19 +1990,9 @@ async function scheduleNextPage() {
     }
     armPageTimeout(searchTimeoutForJob(activeJob));
 
-    if (page > 0) {
-      chrome.tabs.sendMessage(activeJob.tabId, {
-        type: 'REQUEST_SHOPEE_FETCH_PAGE',
-        page: page,
-        keyword: activeJob.keyword
-      }).catch((error) => {
-        void finishJob(false, error?.message || 'Không thể gửi lệnh tải trang Shopee.');
-      });
-    } else {
-      chrome.tabs.update(activeJob.tabId, { url: nextUrl }).catch((error) => {
-        void finishJob(false, error?.message || 'Không thể mở trang tìm kiếm Shopee.');
-      });
-    }
+    chrome.tabs.update(activeJob.tabId, { url: nextUrl }).catch((error) => {
+      void finishJob(false, error?.message || 'Không thể mở trang tìm kiếm Shopee.');
+    });
   }, delay);
 }
 
@@ -2021,21 +2031,11 @@ async function retryCurrentShopeePage(page, itemCount) {
     void persistActiveJob();
     armPageTimeout(searchTimeoutForJob(activeJob));
 
-    if (page > 0) {
-      chrome.tabs.sendMessage(activeJob.tabId, {
-        type: 'REQUEST_SHOPEE_FETCH_PAGE',
-        page: page,
-        keyword: activeJob.keyword
-      }).catch((error) => {
-        void finishJob(false, error?.message || 'Không thể gửi lệnh tải trang Shopee.');
-      });
-    } else {
-      chrome.tabs.update(activeJob.tabId, {
-        url: searchUrlForJob(activeJob, page)
-      }).catch((error) => {
-        void finishJob(false, error?.message || 'Không thể tải lại trang tìm kiếm Shopee.');
-      });
-    }
+    chrome.tabs.update(activeJob.tabId, {
+      url: searchUrlForJob(activeJob, page)
+    }).catch((error) => {
+      void finishJob(false, error?.message || 'Không thể tải lại trang tìm kiếm Shopee.');
+    });
   }, delay);
   return true;
 }
