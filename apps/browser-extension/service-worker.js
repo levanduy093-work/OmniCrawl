@@ -1969,9 +1969,20 @@ async function scheduleNextPage() {
       return;
     }
     armPageTimeout(searchTimeoutForJob(activeJob));
-    chrome.tabs.update(activeJob.tabId, { url: nextUrl }).catch((error) => {
-      void finishJob(false, error?.message || 'Không thể mở trang tìm kiếm Shopee.');
-    });
+
+    if (page > 0) {
+      chrome.tabs.sendMessage(activeJob.tabId, {
+        type: 'REQUEST_SHOPEE_FETCH_PAGE',
+        page: page,
+        keyword: activeJob.keyword
+      }).catch((error) => {
+        void finishJob(false, error?.message || 'Không thể gửi lệnh tải trang Shopee.');
+      });
+    } else {
+      chrome.tabs.update(activeJob.tabId, { url: nextUrl }).catch((error) => {
+        void finishJob(false, error?.message || 'Không thể mở trang tìm kiếm Shopee.');
+      });
+    }
   }, delay);
 }
 
@@ -2009,11 +2020,22 @@ async function retryCurrentShopeePage(page, itemCount) {
     activeJob.navigationScheduled = false;
     void persistActiveJob();
     armPageTimeout(searchTimeoutForJob(activeJob));
-    chrome.tabs.update(activeJob.tabId, {
-      url: searchUrlForJob(activeJob, page)
-    }).catch((error) => {
-      void finishJob(false, error?.message || 'Không thể tải lại trang tìm kiếm Shopee.');
-    });
+
+    if (page > 0) {
+      chrome.tabs.sendMessage(activeJob.tabId, {
+        type: 'REQUEST_SHOPEE_FETCH_PAGE',
+        page: page,
+        keyword: activeJob.keyword
+      }).catch((error) => {
+        void finishJob(false, error?.message || 'Không thể gửi lệnh tải trang Shopee.');
+      });
+    } else {
+      chrome.tabs.update(activeJob.tabId, {
+        url: searchUrlForJob(activeJob, page)
+      }).catch((error) => {
+        void finishJob(false, error?.message || 'Không thể tải lại trang tìm kiếm Shopee.');
+      });
+    }
   }, delay);
   return true;
 }

@@ -28,6 +28,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     sendResponse({ ok: true, detail });
     return;
   }
+  if (message.type === 'REQUEST_SHOPEE_FETCH_PAGE') {
+    window.dispatchEvent(new CustomEvent('omnicrawl:execute-shopee-search', {
+      detail: { page: message.page, keyword: message.keyword }
+    }));
+    sendResponse({ ok: true });
+    
+    // Simulate DOM re-scan completion quickly for virtual pages
+    // since we are bypassing the DOM.
+    setTimeout(() => {
+      chrome.runtime.sendMessage({
+        type: 'SHOPEE_DOM_SEARCH',
+        items: [] // Empty DOM items, allowing API data to be the primary source
+      }).catch(() => undefined);
+    }, 500);
+
+    return true;
+  }
   return undefined;
 });
 
