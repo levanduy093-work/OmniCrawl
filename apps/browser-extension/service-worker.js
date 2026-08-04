@@ -629,9 +629,10 @@ async function resumeShopeeAfterTrafficControl() {
 }
 
 function searchUrlForJob(job, page) {
-  if (job?.platform !== 'tiktok') return searchUrl(job.keyword, page);
+  const currentKeyword = (job.keywords && job.keywords[job.keywordIndex]) || job.keyword;
+  if (job?.platform !== 'tiktok') return searchUrl(currentKeyword, page);
   return (
-    `https://www.tiktok.com/search?q=${encodeURIComponent(job.keyword)}` +
+    `https://www.tiktok.com/search?q=${encodeURIComponent(currentKeyword)}` +
     `&omnicrawl_mode=${encodeURIComponent(job.mode || 'videos')}`
   );
 }
@@ -1770,7 +1771,7 @@ async function storeItems(items) {
       ...original,
       itemId: String(original.itemId || ''),
       shopId: String(original.shopId || ''),
-      searchKeyword: String(original.searchKeyword || activeJob.keyword || ''),
+      searchKeyword: String(original.searchKeyword || (activeJob.keywords && activeJob.keywords[activeJob.keywordIndex]) || activeJob.keyword || ''),
       searchPage: Number(original.searchPage ?? activeJob.page ?? 0),
       searchPosition: Number(original.searchPosition || fallbackPosition),
       searchRank: Number(
@@ -2050,6 +2051,20 @@ async function continueAfterNoNewSearchData(message) {
   }
 
   if (activeJob.consecutiveNoNewPages >= 3) {
+    if (activeJob.keywords && activeJob.keywordIndex + 1 < activeJob.keywords.length) {
+      await logJob(
+        `Keyword "${activeJob.keywords[activeJob.keywordIndex]}" exhausted after ${activeJob.consecutiveNoNewPages} consecutive no-new-items pages. ` +
+        `Switching to next keyword "${activeJob.keywords[activeJob.keywordIndex + 1]}".`
+      );
+      activeJob.keywordIndex++;
+      activeJob.page = 0;
+      activeJob.lastNoNewPage = -1;
+      activeJob.consecutiveNoNewPages = 0;
+      activeJob.navigationScheduled = false;
+      await persistActiveJob();
+      return goToNextShopeeSearchPage(0);
+    }
+    
     await logJob(
       `No new items on ${activeJob.consecutiveNoNewPages} consecutive ` +
       `${platformLabel(activeJob)} pages. Continuing with ` +
@@ -3110,7 +3125,7 @@ async function processSearchResponse(detail, sender) {
   }
 
   const mappedItems = rawItems.map((entry, index) => mapItem(entry, {
-    keyword: activeJob.keyword,
+    keyword: (activeJob.keywords && activeJob.keywords[activeJob.keywordIndex]) || activeJob.keyword,
     page: responsePage,
     position: index + 1
   }));
@@ -3189,7 +3204,7 @@ async function processTikTokSearchResponse(detail, sender) {
   const expectedKind = activeJob.mode === 'products' ? 'product-search' : 'video-search';
   if (detail?.kind !== expectedKind) return;
   const mappedItems = collectTikTokItems(payload, detail.kind, {
-    keyword: activeJob.keyword,
+    keyword: (activeJob.keywords && activeJob.keywords[activeJob.keywordIndex]) || activeJob.keyword,
     page: activeJob.page
   }).slice(0, activeJob.maxItems);
 
@@ -4097,9 +4112,15 @@ async function poll() {
     const response = await api('/api/browser-agent/jobs/next');
     if (response.status === 204) return;
     const job = await response.json();
+    const keywords = String(job.keyword || job.query || '')
+      .split(',')
+      .map((k) => k.trim())
+      .filter(Boolean);
     shopeeNavigationQueue = Promise.resolve();
     activeJob = {
       ...job,
+      keywords: keywords.length ? keywords : [job.keyword],
+      keywordIndex: 0,
       platform: job.platform || 'shopee',
       mode: job.mode || 'products',
       phase: 'SEARCH',

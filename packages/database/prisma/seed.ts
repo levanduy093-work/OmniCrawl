@@ -44,6 +44,7 @@ async function main() {
       keyword: {
         type: 'string',
         title: 'Từ khóa tìm kiếm',
+        description: 'Các từ khóa cách nhau bởi dấu phẩy (vd: áo thun, áo khoác)',
         minLength: 1
       },
       maxItems: {
