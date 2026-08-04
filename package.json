@@ -4,10 +4,10 @@
   "description": "An open-source, self-hosted crawling platform by Synapse.",
   "private": true,
   "scripts": {
-    "build": "pnpm -r build",
-    "dev": "pnpm -r dev",
-    "lint": "pnpm -r lint",
-    "test": "pnpm -r test"
+    "build": "pnpm -r --parallel build",
+    "dev": "pnpm -r --parallel dev",
+    "lint": "pnpm -r --parallel lint",
+    "test": "pnpm -r --parallel test"
   },
   "devDependencies": {
     "typescript": "^5.4.0"
