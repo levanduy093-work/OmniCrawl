@@ -116,6 +116,7 @@ const stateReady = Promise.all([
       ? null
       : Number(activeJob.scheduledPage);
     activeJob.consecutiveNoNewPages = Number(activeJob.consecutiveNoNewPages || 0);
+    activeJob.filterIndex = Number(activeJob.filterIndex || 0);
     activeJob.lastNoNewPage = activeJob.lastNoNewPage == null
       ? null
       : Number(activeJob.lastNoNewPage);
@@ -308,26 +309,30 @@ async function api(path, options = {}) {
   return response;
 }
 
-function searchUrl(keyword, page) {
+// Filter Rotation: each filter is fully paginated before moving to the next.
+const SHOPEE_SORT_FILTERS = [
+  {}, // Relevance (default)
+  { sortBy: 'sales' },
+  { sortBy: 'price', order: 'asc' },
+  { sortBy: 'price', order: 'desc' },
+  { sortBy: 'ctime' }
+];
+
+function searchUrl(keyword, page, filterIndex) {
   const url = new URL('https://shopee.vn/search');
   url.searchParams.set('keyword', keyword);
-  
-  // Filter Rotation Strategy for Shopee guest mode
-  const sortIndex = page % 5;
-  if (sortIndex === 1) {
-    url.searchParams.set('sortBy', 'sales');
-  } else if (sortIndex === 2) {
-    url.searchParams.set('sortBy', 'price');
-    url.searchParams.set('order', 'asc');
-  } else if (sortIndex === 3) {
-    url.searchParams.set('sortBy', 'price');
-    url.searchParams.set('order', 'desc');
-  } else if (sortIndex === 4) {
-    url.searchParams.set('sortBy', 'ctime');
-  }
-  
-  // Notice we don't set 'page' parameter anymore.
-  // We stay on the first page of each sort category to bypass the login wall.
+
+  // Apply sort filter from the rotation list
+  const filter = SHOPEE_SORT_FILTERS[
+    Math.abs(Math.floor(Number(filterIndex) || 0)) % SHOPEE_SORT_FILTERS.length
+  ];
+  if (filter.sortBy) url.searchParams.set('sortBy', filter.sortBy);
+  if (filter.order) url.searchParams.set('order', filter.order);
+
+  // We NEVER set the 'page' parameter on the browser URL for Shopee,
+  // because any page > 0 triggers the login wall in guest mode.
+  // Pagination is handled entirely via the shopee-hook API replay.
+
   return url.toString();
 }
 
@@ -630,7 +635,7 @@ async function resumeShopeeAfterTrafficControl() {
 
 function searchUrlForJob(job, page) {
   const currentKeyword = (job.keywords && job.keywords[job.keywordIndex]) || job.keyword;
-  if (job?.platform !== 'tiktok') return searchUrl(currentKeyword, page);
+  if (job?.platform !== 'tiktok') return searchUrl(currentKeyword, page, job.filterIndex || 0);
   return (
     `https://www.tiktok.com/search?q=${encodeURIComponent(currentKeyword)}` +
     `&omnicrawl_mode=${encodeURIComponent(job.mode || 'videos')}`
@@ -937,8 +942,15 @@ function normalizeSoldValue(value) {
       value.count,
       value.total,
       value.historical_sold,
+      value.historical_sold_count,
       value.total_sold,
       value.sold_count,
+      value.sold,
+      value.order_count,
+      value.sales,
+      value.global_sold_count,
+      value.global_sold,
+      value.tx_count,
       value.text,
       value.display_text,
       value.label
@@ -951,11 +963,32 @@ function normalizeSoldValue(value) {
   }
   const text = String(value).replace(/\s+/g, ' ').trim();
   if (!text) return 0;
-  const match = text.match(
-    /(\d+(?:[.,]\d+)?\s*(?:k|nghìn|tr|triệu)?\+?)(?:\s*(?:đã bán|sold|lượt mua|bán))?/i
-  );
-  if (!match) return 0;
-  return extractNumber(match[1]);
+
+  const kMatch = text.match(/(\d+(?:[.,]\d+)?)\s*(k|nghìn)/i);
+  if (kMatch) {
+    const num = parseFloat(kMatch[1].replace(',', '.'));
+    return Number.isFinite(num) ? Math.round(num * 1000) : 0;
+  }
+
+  const trMatch = text.match(/(\d+(?:[.,]\d+)?)\s*(tr|triệu)/i);
+  if (trMatch) {
+    const num = parseFloat(trMatch[1].replace(',', '.'));
+    return Number.isFinite(num) ? Math.round(num * 1000000) : 0;
+  }
+
+  const numMatch = text.match(/(\d+(?:[.,]\d+)*)/);
+  if (numMatch) {
+    let digits = numMatch[1];
+    if (/^\d{1,3}([.,]\d{3})+$/.test(digits)) {
+      digits = digits.replace(/[.,]/g, '');
+    } else {
+      digits = digits.replace(',', '.');
+    }
+    const num = parseFloat(digits);
+    return Number.isFinite(num) ? Math.round(num) : 0;
+  }
+
+  return 0;
 }
 
 function firstTikTokImage(...values) {
@@ -1234,17 +1267,45 @@ function mapItem(entry, context = {}) {
   );
   const resolvedImage = imageUrl(imageId) || findNestedImage(entry);
   const sold = normalizeSoldValue(
+    item?.global_sold_count ??
+    item?.global_sold ??
     item?.historical_sold ??
+    item?.historical_sold_count ??
     item?.total_sold ??
     item?.sold ??
     item?.sold_count ??
     item?.soldCount ??
+    item?.order_count ??
+    item?.sales ??
+    item?.sales_count ??
+    item?.historical_sold_str ??
+    item?.sold_str ??
+    entry?.historical_sold ??
+    entry?.historical_sold_count ??
+    entry?.total_sold ??
+    entry?.sold ??
+    entry?.sold_count ??
+    entry?.item_card?.historical_sold ??
+    entry?.item_card?.sold ??
+    entry?.item_card?.sold_count ??
+    entry?.item_basic?.historical_sold ??
+    entry?.item_basic?.sold ??
+    entry?.item_basic?.sold_count ??
     findNestedField(entry, [
       'historical_sold',
+      'historical_sold_count',
       'total_sold',
       'sold',
       'sold_count',
-      'soldCount'
+      'soldCount',
+      'order_count',
+      'sales',
+      'sales_count',
+      'global_sold_count',
+      'global_sold',
+      'tx_count',
+      'historical_sold_str',
+      'sold_str'
     ]) ??
     0
   );
@@ -1353,6 +1414,8 @@ function mapDetailPayload(payload, expectedProduct) {
     Array.isArray(rawRatingCount) ? rawRatingCount[0] : rawRatingCount
   );
   const rawTotalSold = (
+    item?.global_sold_count ??
+    item?.global_sold ??
     item?.historical_sold ??
     item?.total_sold ??
     root?.historical_sold ??
@@ -1364,7 +1427,7 @@ function mapDetailPayload(payload, expectedProduct) {
     item?.monthly_sold ??
     root?.sold ??
     root?.monthly_sold ??
-    findNestedField(root, ['sold', 'monthly_sold', 'sold_count'])
+    findNestedField(root, ['sold', 'monthly_sold', 'sold_count', 'global_sold_count', 'global_sold', 'tx_count'])
   );
   const sold = normalizeSoldValue(
     rawTotalSold ?? rawRecentSold ?? expectedProduct?.sold ?? null
@@ -1991,9 +2054,25 @@ async function scheduleNextPage() {
     }
     armPageTimeout(searchTimeoutForJob(activeJob));
 
-    chrome.tabs.update(activeJob.tabId, { url: nextUrl }).catch((error) => {
-      void finishJob(false, error?.message || 'Không thể mở trang tìm kiếm Shopee.');
-    });
+    if (nextPage === 0) {
+      chrome.tabs.update(activeJob.tabId, { url: nextUrl }).catch((error) => {
+        void finishJob(false, error?.message || 'Không thể mở trang tìm kiếm Shopee.');
+      });
+    } else {
+      const filter = SHOPEE_SORT_FILTERS[
+        Math.abs(Math.floor(Number(activeJob.filterIndex) || 0)) % SHOPEE_SORT_FILTERS.length
+      ];
+      chrome.tabs.sendMessage(activeJob.tabId, {
+        type: 'REQUEST_SHOPEE_FETCH_PAGE',
+        page: nextPage,
+        keyword: (activeJob.keywords && activeJob.keywords[activeJob.keywordIndex]) || activeJob.keyword,
+        sortBy: filter.sortBy,
+        order: filter.order
+      }).catch(() => {
+        // Fallback to update if content script is somehow disconnected
+        chrome.tabs.update(activeJob.tabId, { url: nextUrl }).catch(() => undefined);
+      });
+    }
   }, delay);
 }
 
@@ -2032,11 +2111,26 @@ async function retryCurrentShopeePage(page, itemCount) {
     void persistActiveJob();
     armPageTimeout(searchTimeoutForJob(activeJob));
 
-    chrome.tabs.update(activeJob.tabId, {
-      url: searchUrlForJob(activeJob, page)
-    }).catch((error) => {
-      void finishJob(false, error?.message || 'Không thể tải lại trang tìm kiếm Shopee.');
-    });
+    if (page === 0) {
+      chrome.tabs.update(activeJob.tabId, {
+        url: searchUrlForJob(activeJob, page)
+      }).catch((error) => {
+        void finishJob(false, error?.message || 'Không thể tải lại trang tìm kiếm Shopee.');
+      });
+    } else {
+      const filter = SHOPEE_SORT_FILTERS[
+        Math.abs(Math.floor(Number(activeJob.filterIndex) || 0)) % SHOPEE_SORT_FILTERS.length
+      ];
+      chrome.tabs.sendMessage(activeJob.tabId, {
+        type: 'REQUEST_SHOPEE_FETCH_PAGE',
+        page: page,
+        keyword: (activeJob.keywords && activeJob.keywords[activeJob.keywordIndex]) || activeJob.keyword,
+        sortBy: filter.sortBy,
+        order: filter.order
+      }).catch(() => {
+        chrome.tabs.update(activeJob.tabId, { url: searchUrlForJob(activeJob, page) }).catch(() => undefined);
+      });
+    }
   }, delay);
   return true;
 }
@@ -2050,13 +2144,24 @@ async function continueAfterNoNewSearchData(message) {
     await persistActiveJob();
   }
 
-  if (activeJob.consecutiveNoNewPages >= 3) {
-    if (activeJob.keywords && activeJob.keywordIndex + 1 < activeJob.keywords.length) {
+  // Use a higher threshold (5) because filter rotation naturally produces
+  // duplicate items across different sort orders.
+  const noNewThreshold = activeJob.platform === 'shopee' ? 5 : 3;
+
+  if (activeJob.consecutiveNoNewPages >= noNewThreshold) {
+    // Step 1: Try the next sort filter before giving up on this keyword.
+    const totalFilters = SHOPEE_SORT_FILTERS.length;
+    const currentFilter = Number(activeJob.filterIndex || 0);
+    if (activeJob.platform === 'shopee' && currentFilter + 1 < totalFilters) {
+      const nextFilter = currentFilter + 1;
+      const filterNames = ['relevance', 'sales', 'price-asc', 'price-desc', 'newest'];
       await logJob(
-        `Keyword "${activeJob.keywords[activeJob.keywordIndex]}" exhausted after ${activeJob.consecutiveNoNewPages} consecutive no-new-items pages. ` +
-        `Switching to next keyword "${activeJob.keywords[activeJob.keywordIndex + 1]}".`
+        `Filter "${filterNames[currentFilter]}" exhausted after ` +
+        `${activeJob.consecutiveNoNewPages} consecutive no-new-items pages. ` +
+        `Switching to filter "${filterNames[nextFilter]}" ` +
+        `(${nextFilter + 1}/${totalFilters}).`
       );
-      activeJob.keywordIndex++;
+      activeJob.filterIndex = nextFilter;
       activeJob.page = 0;
       activeJob.lastNoNewPage = -1;
       activeJob.consecutiveNoNewPages = 0;
@@ -2064,11 +2169,29 @@ async function continueAfterNoNewSearchData(message) {
       await persistActiveJob();
       return goToNextShopeeSearchPage(0);
     }
-    
+
+    // Step 2: Try the next keyword (if comma-separated keywords were provided).
+    if (activeJob.keywords && activeJob.keywordIndex + 1 < activeJob.keywords.length) {
+      await logJob(
+        `Keyword "${activeJob.keywords[activeJob.keywordIndex]}" exhausted ` +
+        `across all filters. ` +
+        `Switching to next keyword "${activeJob.keywords[activeJob.keywordIndex + 1]}".`
+      );
+      activeJob.keywordIndex++;
+      activeJob.filterIndex = 0;
+      activeJob.page = 0;
+      activeJob.lastNoNewPage = -1;
+      activeJob.consecutiveNoNewPages = 0;
+      activeJob.navigationScheduled = false;
+      await persistActiveJob();
+      return goToNextShopeeSearchPage(0);
+    }
+
+    // Step 3: All filters and keywords exhausted — proceed to detail phase.
     await logJob(
       `No new items on ${activeJob.consecutiveNoNewPages} consecutive ` +
-      `${platformLabel(activeJob)} pages. Continuing with ` +
-      `${activeJob.seen.length} collected items.`
+      `${platformLabel(activeJob)} pages (all filters and keywords exhausted). ` +
+      `Continuing with ${activeJob.seen.length} collected items.`
     );
     await beginDetailPhase();
     return;
@@ -2076,6 +2199,56 @@ async function continueAfterNoNewSearchData(message) {
 
   await logJob(message);
   await scheduleNextPage();
+}
+
+async function goToNextShopeeSearchPage(page) {
+  if (!activeJob || activeJob.phase !== 'SEARCH' || activeJob.navigationScheduled) return;
+  clearPageTimeout();
+  activeJob.navigationScheduled = true;
+  activeJob.page = page;
+  activeJob.scheduledPage = page;
+  const runId = activeJob.runId;
+  const nextUrl = searchUrlForJob(activeJob, page);
+  const delay = randomShopeeActionDelay();
+  await persistActiveJob();
+  const filterNames = ['relevance', 'sales', 'price-asc', 'price-desc', 'newest'];
+  const filterLabel = filterNames[activeJob.filterIndex || 0] || 'default';
+  await logJob(
+    `Navigating to Shopee search page ${page} ` +
+    `(filter: ${filterLabel}, keyword: ` +
+    `"${(activeJob.keywords && activeJob.keywords[activeJob.keywordIndex]) || activeJob.keyword}").`
+  );
+  setTimeout(() => {
+    if (
+      !activeJob ||
+      activeJob.runId !== runId ||
+      activeJob.phase !== 'SEARCH' ||
+      activeJob.authPaused ||
+      activeJob.trafficPaused
+    ) return;
+    activeJob.navigationScheduled = false;
+    activeJob.scheduledPage = null;
+    void persistActiveJob();
+    armPageTimeout(searchTimeoutForJob(activeJob));
+    if (page === 0) {
+      chrome.tabs.update(activeJob.tabId, { url: nextUrl }).catch((error) => {
+        void finishJob(false, error?.message || 'Không thể mở trang tìm kiếm Shopee.');
+      });
+    } else {
+      const filter = SHOPEE_SORT_FILTERS[
+        Math.abs(Math.floor(Number(activeJob.filterIndex) || 0)) % SHOPEE_SORT_FILTERS.length
+      ];
+      chrome.tabs.sendMessage(activeJob.tabId, {
+        type: 'REQUEST_SHOPEE_FETCH_PAGE',
+        page: page,
+        keyword: (activeJob.keywords && activeJob.keywords[activeJob.keywordIndex]) || activeJob.keyword,
+        sortBy: filter.sortBy,
+        order: filter.order
+      }).catch(() => {
+        chrome.tabs.update(activeJob.tabId, { url: nextUrl }).catch(() => undefined);
+      });
+    }
+  }, delay);
 }
 
 async function logJob(message) {
@@ -4172,6 +4345,7 @@ async function poll() {
       scheduledPage: null,
       consecutiveNoNewPages: 0,
       lastNoNewPage: null,
+      filterIndex: 0,
       pageNewItemCounts: {},
       pageRetryCounts: {},
       itemImages: {},

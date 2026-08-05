@@ -40,7 +40,12 @@ function isVersionAtLeast(current: string | null, required: string) {
 }
 
 function displaySoldValue(value: unknown) {
-  const candidate = value && typeof value === 'object' && !Array.isArray(value)
+  if (value === null || value === undefined || value === '') return '—'
+  if (typeof value === 'number') {
+    if (value === 0) return '0'
+    return value.toLocaleString('vi-VN')
+  }
+  const candidate = typeof value === 'object' && !Array.isArray(value)
     ? (
       (value as Record<string, unknown>).value ??
       (value as Record<string, unknown>).count ??
@@ -48,10 +53,15 @@ function displaySoldValue(value: unknown) {
       (value as Record<string, unknown>).display_text
     )
     : value
-  const match = String(candidate ?? '').match(
+  const text = String(candidate ?? '').trim()
+  if (!text) return '—'
+  if (/^\d+$/.test(text)) {
+    return Number(text).toLocaleString('vi-VN')
+  }
+  const match = text.match(
     /(\d+(?:[.,]\d+)?\s*(?:k|nghìn|tr|triệu)?\+?)(?:\s*(?:đã bán|sold))?/i
   )
-  return match ? match[1].replace(/\s+/g, '') : '—'
+  return match ? match[1].replace(/\s+/g, '') : text
 }
 
 type JsonSchemaProperty = {
@@ -822,7 +832,22 @@ function RunDetailModal({
   onDownload: (format: 'json' | 'csv') => void
   onClose: () => void
 }) {
-  const [previewImage, setPreviewImage] = useState<string | null>(null)
+  const [galleryState, setGalleryState] = useState<{ images: string[]; index: number } | null>(null)
+
+  useEffect(() => {
+    if (!galleryState) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setGalleryState(null)
+      if (event.key === 'ArrowLeft') {
+        setGalleryState((prev) => prev ? ({ ...prev, index: (prev.index - 1 + prev.images.length) % prev.images.length }) : null)
+      }
+      if (event.key === 'ArrowRight') {
+        setGalleryState((prev) => prev ? ({ ...prev, index: (prev.index + 1) % prev.images.length }) : null)
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [galleryState])
   const [expandedItemIds, setExpandedItemIds] = useState<Record<string, boolean>>({})
   const [reviewPages, setReviewPages] = useState<Record<string, number>>({})
   const records = (detail?.items || []).map((item: any) => item.data || {})
@@ -917,9 +942,11 @@ function RunDetailModal({
                         type="button"
                         onClick={(event) => {
                           event.stopPropagation()
-                          setPreviewImage(String(imageUrl))
+                          const stringImages = review.images.map((img: any) => String(img)).filter(Boolean)
+                          setGalleryState({ images: stringImages, index: imageIndex })
                         }}
-                        title="Bấm để xem ảnh đánh giá"
+                        title="Bấm để xem bộ ảnh đánh giá"
+                        className="cursor-pointer"
                       >
                         <img
                           src={String(imageUrl)}
@@ -931,9 +958,17 @@ function RunDetailModal({
                       </button>
                     ))}
                     {review.images.length > 6 && (
-                      <span className="flex h-14 min-w-14 items-center justify-center rounded-lg border border-gray-200 bg-white px-2 text-xs text-gray-500">
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          const stringImages = review.images.map((img: any) => String(img)).filter(Boolean)
+                          setGalleryState({ images: stringImages, index: 6 })
+                        }}
+                        className="flex h-14 min-w-14 items-center justify-center rounded-lg border border-gray-200 bg-white px-2 text-xs font-semibold text-gray-700 hover:bg-gray-100 cursor-pointer"
+                      >
                         +{review.images.length - 6}
-                      </span>
+                      </button>
                     )}
                   </div>
                 )}
@@ -994,29 +1029,41 @@ function RunDetailModal({
     }
     if (column === 'images' && Array.isArray(value)) {
       if (!value.length) return <span className="text-gray-400">Chưa có ảnh</span>
+      const stringImages = value.map((img) => String(img)).filter(Boolean)
       return (
         <div className="flex items-center gap-1.5 min-w-[16rem]">
-          {value.slice(0, 4).map((imageUrl: unknown, index: number) => (
+          {stringImages.slice(0, 4).map((imageUrl: string, index: number) => (
             <button
-              key={`${String(imageUrl)}-${index}`}
+              key={`${imageUrl}-${index}`}
               type="button"
               onClick={(event) => {
                 event.stopPropagation()
-                setPreviewImage(String(imageUrl))
+                setGalleryState({ images: stringImages, index })
               }}
-              title="Bấm để xem ảnh phóng to"
+              title="Bấm để xem tất cả ảnh sản phẩm"
+              className="cursor-pointer group"
             >
               <img
-                src={String(imageUrl)}
+                src={imageUrl}
                 alt=""
                 referrerPolicy="no-referrer"
                 loading="lazy"
-                className="w-14 h-14 rounded-lg object-cover bg-gray-100 border border-gray-200 hover:opacity-80"
+                className="w-14 h-14 rounded-lg object-cover bg-gray-100 border border-gray-200 group-hover:opacity-80 transition-opacity"
               />
             </button>
           ))}
-          {value.length > 4 && (
-            <span className="text-xs text-gray-500">+{value.length - 4}</span>
+          {stringImages.length > 4 && (
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation()
+                setGalleryState({ images: stringImages, index: 4 })
+              }}
+              title="Xem tất cả bộ ảnh"
+              className="flex h-14 min-w-14 items-center justify-center rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-100 px-2 text-xs font-bold text-blue-700 transition-colors cursor-pointer"
+            >
+              +{stringImages.length - 4}
+            </button>
           )}
         </div>
       )
@@ -1068,7 +1115,7 @@ function RunDetailModal({
         return (
           <button 
             type="button"
-            onClick={(e) => { e.stopPropagation(); setPreviewImage(text); }}
+            onClick={(e) => { e.stopPropagation(); setGalleryState({ images: [text], index: 0 }); }}
             title="Bấm để xem ảnh phóng to trực tiếp" 
             className="inline-block relative group text-left cursor-pointer"
           >
@@ -1274,23 +1321,94 @@ function RunDetailModal({
         )}
       </div>
 
-      {previewImage && (
+      {galleryState && (
         <div 
-          className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[70] flex items-center justify-center p-4"
-          onClick={() => setPreviewImage(null)}
+          className="fixed inset-0 bg-black/85 backdrop-blur-md z-[70] flex flex-col items-center justify-center p-4 select-none"
+          onClick={() => setGalleryState(null)}
         >
           <div 
-            className="relative max-w-5xl max-h-[90vh] flex flex-col items-center justify-center"
+            className="relative w-full max-w-5xl max-h-[92vh] flex flex-col items-center justify-center"
             onClick={(e) => e.stopPropagation()}
           >
-            <img 
-              src={previewImage} 
-              alt="Preview" 
-              className="max-w-full max-h-[82vh] object-contain rounded-2xl shadow-2xl border border-white/10" 
-            />
-            <div className="mt-4 flex items-center gap-4 bg-white/10 backdrop-blur-md px-5 py-2.5 rounded-full border border-white/20 text-white text-xs font-medium">
+            {/* Header with counter & close button */}
+            <div className="mb-3 flex items-center justify-between w-full text-white/90 text-xs px-2">
+              <span className="font-semibold bg-white/10 px-3.5 py-1.5 rounded-full border border-white/15 text-white shadow-xs">
+                Bộ ảnh ({galleryState.index + 1} / {galleryState.images.length})
+              </span>
+              <button 
+                onClick={() => setGalleryState(null)}
+                className="hover:bg-white/15 p-2 rounded-full text-white/80 hover:text-white transition-colors cursor-pointer"
+                title="Đóng (Esc)"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Main Image Container with Prev & Next Arrows */}
+            <div className="relative flex items-center justify-center w-full min-h-[350px]">
+              {galleryState.images.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => setGalleryState((prev) => prev ? ({
+                    ...prev,
+                    index: (prev.index - 1 + prev.images.length) % prev.images.length
+                  }) : null)}
+                  className="absolute left-1 md:left-3 z-10 p-3 rounded-full bg-black/60 hover:bg-black/90 text-white border border-white/20 transition-all cursor-pointer shadow-lg active:scale-95"
+                  title="Ảnh trước (Mũi tên trái)"
+                >
+                  <ChevronLeft size={22} />
+                </button>
+              )}
+
+              <img 
+                src={galleryState.images[galleryState.index]} 
+                alt={`Ảnh ${galleryState.index + 1}`} 
+                referrerPolicy="no-referrer"
+                className="max-w-full max-h-[62vh] object-contain rounded-2xl shadow-2xl border border-white/10 transition-all duration-150" 
+              />
+
+              {galleryState.images.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => setGalleryState((prev) => prev ? ({
+                    ...prev,
+                    index: (prev.index + 1) % prev.images.length
+                  }) : null)}
+                  className="absolute right-1 md:right-3 z-10 p-3 rounded-full bg-black/60 hover:bg-black/90 text-white border border-white/20 transition-all cursor-pointer shadow-lg active:scale-95"
+                  title="Ảnh tiếp theo (Mũi tên phải)"
+                >
+                  <ChevronRight size={22} />
+                </button>
+              )}
+            </div>
+
+            {/* Thumbnail Strip */}
+            {galleryState.images.length > 1 && (
+              <div className="mt-4 flex items-center gap-2 max-w-full overflow-x-auto p-2.5 bg-black/40 backdrop-blur-md rounded-2xl border border-white/15 max-h-24">
+                {galleryState.images.map((imgUrl, idx) => (
+                  <button
+                    key={`${imgUrl}-${idx}`}
+                    type="button"
+                    onClick={() => setGalleryState((prev) => prev ? ({ ...prev, index: idx }) : null)}
+                    className={`relative rounded-xl overflow-hidden shrink-0 border-2 transition-all cursor-pointer ${
+                      idx === galleryState.index ? 'border-blue-500 scale-105 shadow-lg opacity-100' : 'border-transparent opacity-50 hover:opacity-100'
+                    }`}
+                  >
+                    <img
+                      src={imgUrl}
+                      alt=""
+                      referrerPolicy="no-referrer"
+                      className="w-12 h-12 object-cover"
+                    />
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Bottom Actions Bar */}
+            <div className="mt-3 flex items-center gap-4 bg-white/10 backdrop-blur-md px-5 py-2 rounded-full border border-white/20 text-white text-xs font-medium">
               <a 
-                href={previewImage} 
+                href={galleryState.images[galleryState.index]} 
                 target="_blank" 
                 rel="noreferrer"
                 className="hover:underline flex items-center gap-1.5 text-white"
@@ -1299,18 +1417,12 @@ function RunDetailModal({
               </a>
               <span className="text-white/40">•</span>
               <button 
-                onClick={() => setPreviewImage(null)}
-                className="hover:underline text-white/80 hover:text-white"
+                onClick={() => setGalleryState(null)}
+                className="hover:underline text-white/80 hover:text-white cursor-pointer"
               >
                 Đóng
               </button>
             </div>
-            <button 
-              onClick={() => setPreviewImage(null)}
-              className="absolute -top-10 -right-2 text-white/80 hover:text-white text-3xl font-light p-2"
-            >
-              ✕
-            </button>
           </div>
         </div>
       )}

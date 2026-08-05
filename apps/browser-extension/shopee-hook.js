@@ -56,9 +56,9 @@
 
   window.addEventListener('omnicrawl:execute-shopee-search', async (e) => {
     try {
-      const { page, keyword } = e.detail;
+      const { page, keyword, sortBy, order } = e.detail;
       const context = window.__OMNICRAWL_SHOPEE_API_CONTEXT__;
-      console.log('[Shopee Hook] Replaying API for page:', page, context);
+      console.log('[Shopee Hook] Replaying API for page:', page, 'sortBy:', sortBy, 'order:', order, context);
       if (!context || !context.url) {
         console.error('[Shopee Hook] No API context found!');
         return;
@@ -69,6 +69,18 @@
       parsed.searchParams.set('newest', String(page * limit));
       if (keyword) {
         parsed.searchParams.set('keyword', keyword);
+      }
+
+      // Apply filter rotation params: update or remove sortBy/order
+      if (sortBy) {
+        parsed.searchParams.set('sortBy', sortBy);
+      } else {
+        parsed.searchParams.delete('sortBy');
+      }
+      if (order) {
+        parsed.searchParams.set('order', order);
+      } else {
+        parsed.searchParams.delete('order');
       }
 
       // We explicitly call originalFetch here so that it bypasses the hook above 

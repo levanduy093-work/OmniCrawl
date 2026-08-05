@@ -30,7 +30,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message.type === 'REQUEST_SHOPEE_FETCH_PAGE') {
     window.dispatchEvent(new CustomEvent('omnicrawl:execute-shopee-search', {
-      detail: { page: message.page, keyword: message.keyword }
+      detail: {
+        page: message.page,
+        keyword: message.keyword,
+        sortBy: message.sortBy,
+        order: message.order
+      }
     }));
     sendResponse({ ok: true });
     
@@ -38,7 +43,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     // since we are bypassing the DOM.
     setTimeout(() => {
       chrome.runtime.sendMessage({
-        type: 'SHOPEE_DOM_SEARCH',
+        type: 'SHOPEE_DOM_ITEMS',
         items: [] // Empty DOM items, allowing API data to be the primary source
       }).catch(() => undefined);
     }, 500);
@@ -86,6 +91,7 @@ function scrapeRenderedShopeeReviews() {
     const images = [...element.querySelectorAll('img')]
       .map((image) => image.currentSrc || image.src)
       .filter(Boolean)
+      .map((url) => url.replace(/_tn(?=\.\w+$|$|[?#])/i, ''))
       .filter((url, imageIndex, all) => all.indexOf(url) === imageIndex)
       .slice(0, 20);
     reviews.push({
@@ -685,7 +691,7 @@ function scrapeRenderedProductDetail() {
   const images = [metaImage, ...galleryUrls]
     .filter((url) => url && /(?:shopee|susercontent)\.(?:com|vn)|susercontent\.com\/file\//i.test(url))
     .filter((url) => !/(?:badge|icon|avatar|logo)/i.test(url))
-    .map((url) => url.replace(/_tn(?=$|[?#])/, ''))
+    .map((url) => url.replace(/_tn(?=\.\w+$|$|[?#])/i, ''))
     .filter((url, index, all) => url && all.indexOf(url) === index)
     .slice(0, 30);
 
