@@ -491,6 +491,7 @@ function isShopeeLoginError(detail) {
   const payload = detail?.payload;
   return (
     detail?.status === 401 ||
+    payload?.error === 90309999 ||
     payload?.error_msg === 'Login Required' ||
     /login required|please login|đăng nhập/i.test(String(payload?.message || ''))
   );
@@ -500,7 +501,6 @@ function isShopeeTrafficError(detail) {
   const payload = detail?.payload;
   return (
     detail?.status === 403 ||
-    payload?.error === 90309999 ||
     /traffic|too many|risk|suspicious/i.test(
       String(payload?.error_msg || payload?.message || '')
     )
@@ -3273,7 +3273,9 @@ async function processSearchResponse(detail, sender) {
   if (responsePage !== activeJob.page) return;
   const payload = detail?.payload;
   if (isShopeeLoginError(detail)) {
-    await pauseShopeeForAuthentication('API tìm kiếm yêu cầu đăng nhập');
+    activeJob.consecutiveNoNewPages = 999;
+    await persistActiveJob();
+    await continueAfterNoNewSearchData('Shopee yêu cầu đăng nhập. Thử bộ lọc hoặc từ khóa tiếp theo...');
     return;
   }
   if (isShopeeTrafficError(detail)) {
@@ -3774,7 +3776,7 @@ async function processDetailResponse(detail, sender) {
   if (activeJob?.authPaused || activeJob?.trafficPaused) return;
   const payload = detail?.payload;
   if (isShopeeLoginError(detail)) {
-    await pauseShopeeForAuthentication('API chi tiết yêu cầu đăng nhập');
+    await failCurrentDetail('API chi tiết yêu cầu đăng nhập. Bỏ qua sản phẩm này.');
     return;
   }
   if (isShopeeTrafficError(detail)) {
