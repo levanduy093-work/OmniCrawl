@@ -6,12 +6,8 @@ import {
   Settings,
   Search,
   Bot,
-  Package,
-  Download,
   LogOut,
-  Wallet,
   Eye,
-  Users,
   FileJson,
   FileSpreadsheet,
   ChevronLeft,
@@ -150,7 +146,6 @@ function App() {
   const [actors, setActors] = useState([])
   const [runs, setRuns] = useState([])
   const [schedules, setSchedules] = useState([])
-  const [newActorName, setNewActorName] = useState('')
   const [newScheduleActorId, setNewScheduleActorId] = useState('')
   const [newScheduleCron, setNewScheduleCron] = useState('* * * * *')
   const [newScheduleInput, setNewScheduleInput] = useState<Record<string, unknown>>({})
@@ -159,7 +154,6 @@ function App() {
   const [browserAgentConnected, setBrowserAgentConnected] = useState(false)
   const [browserAgentDetected, setBrowserAgentDetected] = useState(false)
   const [browserAgentVersion, setBrowserAgentVersion] = useState<string | null>(null)
-  const [browserAuthStatus, setBrowserAuthStatus] = useState<{ shopeeLoggedIn: boolean; tiktokLoggedIn: boolean }>({ shopeeLoggedIn: false, tiktokLoggedIn: false })
 
   // Log Viewer State
   const [logModalOpen, setLogModalOpen] = useState(false)
@@ -169,8 +163,6 @@ function App() {
   const [runDetail, setRunDetail] = useState<any>(null)
   const [runDetailPage, setRunDetailPage] = useState(1)
   const [runDetailLoading, setRunDetailLoading] = useState(false)
-  const [users, setUsers] = useState<any[]>([])
-  const [newUser, setNewUser] = useState({ email: '', password: '', role: 'USER', tier: 'FREE', credits: 1000 })
 
   const handleLogout = useCallback(() => {
     localStorage.removeItem('token')
@@ -252,9 +244,6 @@ function App() {
           Boolean(event.data.connected) &&
           isVersionAtLeast(version, REQUIRED_BROWSER_AGENT_VERSION)
         )
-        if (event.data.authStatus) {
-          setBrowserAuthStatus(event.data.authStatus)
-        }
       }
     }
     window.addEventListener('message', handleAgentMessage)
@@ -270,19 +259,6 @@ function App() {
       clearInterval(interval)
     }
   }, [token])
-
-  const handleOpenLoginTab = useCallback((url: string) => {
-    window.open(url, '_blank', 'noopener,noreferrer')
-    window.postMessage({
-      source: 'OMNICRAWL_DASHBOARD',
-      type: 'OPEN_TAB',
-      url
-    }, window.location.origin)
-    window.postMessage({
-      source: 'OMNICRAWL_DASHBOARD',
-      type: 'POLL_NOW'
-    }, window.location.origin)
-  }, [])
 
   const triggerRun = async (id: string) => {
     try {
@@ -300,31 +276,6 @@ function App() {
       fetchUser()
     } catch(err: any) {
       alert(`Failed to trigger run: ${err.message}`)
-    }
-  }
-
-  const handleScaffold = async (templateName: string) => {
-    if (!newActorName) {
-      alert('Please enter a name for your new crawler first.');
-      return;
-    }
-    
-    try {
-      const res = await fetch('http://localhost:3001/api/templates/scaffold', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ name: newActorName, template: templateName })
-      });
-      if (!res.ok) {
-        const error = await res.json();
-        throw new Error(error.error || 'Failed to scaffold');
-      }
-      alert(`Crawler ${newActorName} created successfully from template ${templateName}!`);
-      setNewActorName('');
-      setActiveTab('actors');
-      fetchData();
-    } catch (err: any) {
-      alert(`Error: ${err.message}`);
     }
   }
 
@@ -478,42 +429,6 @@ function App() {
     }
   }
 
-  const fetchUsers = useCallback(async () => {
-    if (!isAdminRole(user?.role)) return
-    const res = await fetch('http://localhost:3001/api/admin/users', {
-      headers: { 'Authorization': `Bearer ${token}` }
-    })
-    if (res.ok) setUsers(await res.json())
-  }, [token, user?.role])
-
-  useEffect(() => {
-    if (activeTab === 'users' && isAdminRole(user?.role)) fetchUsers()
-  }, [activeTab, fetchUsers, user?.role])
-
-  const createUser = async () => {
-    const res = await fetch('http://localhost:3001/api/admin/users', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify(newUser)
-    })
-    const data = await res.json()
-    if (!res.ok) return alert(data.error || 'Không thể tạo user')
-    setNewUser({ email: '', password: '', role: 'USER', tier: 'FREE', credits: 1000 })
-    fetchUsers()
-  }
-
-  const updateUser = async (id: string, changes: Record<string, unknown>) => {
-    const res = await fetch(`http://localhost:3001/api/admin/users/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify(changes)
-    })
-    const data = await res.json()
-    if (!res.ok) return alert(data.error || 'Không thể cập nhật user')
-    setUsers((current) => current.map((entry) => entry.id === id ? data : entry))
-    if (id === user?.id) fetchUser()
-  }
-
   // Poll logs if modal is open
   useEffect(() => {
     let interval: ReturnType<typeof setInterval> | undefined;
@@ -567,16 +482,6 @@ function App() {
           )}
         </div>
 
-        {user && isSidebarOpen && (
-          <div className="px-5 mb-4 py-3 bg-[#E8F0FE] rounded-2xl flex items-center justify-between text-blue-800">
-            <div className="flex items-center gap-2 font-medium">
-              <Wallet size={18} />
-              <span>{user.credits}</span>
-            </div>
-            <span className="text-xs font-semibold uppercase tracking-wider">Credits</span>
-          </div>
-        )}
-
         <nav className="flex-1 space-y-1">
           <NavItem 
             icon={<Bot />} 
@@ -599,22 +504,6 @@ function App() {
             onClick={() => setActiveTab('schedules')} 
             collapsed={!isSidebarOpen}
           />
-          <NavItem 
-            icon={<Package />} 
-            label="Marketplace" 
-            active={activeTab === 'marketplace'} 
-            onClick={() => setActiveTab('marketplace')} 
-            collapsed={!isSidebarOpen}
-          />
-          {isAdminRole(user?.role) && (
-            <NavItem
-              icon={<Users />}
-              label="Users"
-              active={activeTab === 'users'}
-              onClick={() => setActiveTab('users')}
-              collapsed={!isSidebarOpen}
-            />
-          )}
         </nav>
         
         <div className="mt-auto pb-4 space-y-1">
@@ -676,60 +565,6 @@ function App() {
                                 : 'Chưa kết nối Extension'}
                           </span>
                         </div>
-
-                        <div className="flex items-center">
-                          {actor.name === 'shopee-scraper' ? (
-                            browserAgentConnected && browserAuthStatus.shopeeLoggedIn ? (
-                              <a
-                                href="https://shopee.vn"
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="inline-flex items-center justify-center gap-1 font-semibold text-emerald-700 bg-emerald-100/90 hover:bg-emerald-200/90 px-2.5 py-1 rounded-full text-[10px] leading-none transition-colors cursor-pointer min-h-[22px]"
-                                title="Đã kết nối - Click để mở trang Shopee"
-                              >
-                                Shopee: Logged In
-                                <ExternalLink size={10} />
-                              </a>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => handleOpenLoginTab('https://shopee.vn/buyer/login')}
-                                className="inline-flex items-center justify-center gap-1 font-medium text-amber-800 bg-amber-100/90 hover:bg-amber-200/90 border border-amber-300/60 px-2.5 py-1 rounded-full text-[10px] leading-none transition-all cursor-pointer shadow-xs active:scale-95 min-h-[22px]"
-                                title="Click để mở tab đăng nhập Shopee trên Chrome"
-                              >
-                                Shopee: Guest Mode
-                                <span className="font-semibold text-blue-600 underline inline-flex items-center gap-0.5 ml-0.5">
-                                  (Mở Tab Login <ExternalLink size={10} />)
-                                </span>
-                              </button>
-                            )
-                          ) : (
-                            browserAgentConnected && browserAuthStatus.tiktokLoggedIn ? (
-                              <a
-                                href="https://www.tiktok.com"
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="inline-flex items-center justify-center gap-1 font-semibold text-emerald-700 bg-emerald-100/90 hover:bg-emerald-200/90 px-2.5 py-1 rounded-full text-[10px] leading-none transition-colors cursor-pointer min-h-[22px]"
-                                title="Đã kết nối - Click để mở trang TikTok"
-                              >
-                                TikTok: Logged In
-                                <ExternalLink size={10} />
-                              </a>
-                            ) : (
-                              <button
-                                type="button"
-                                onClick={() => handleOpenLoginTab('https://www.tiktok.com/login')}
-                                className="inline-flex items-center justify-center gap-1 font-medium text-amber-800 bg-amber-100/90 hover:bg-amber-200/90 border border-amber-300/60 px-2.5 py-1 rounded-full text-[10px] leading-none transition-all cursor-pointer shadow-xs active:scale-95 min-h-[22px]"
-                                title="Click để mở tab đăng nhập TikTok trên Chrome"
-                              >
-                                TikTok: Guest Mode
-                                <span className="font-semibold text-blue-600 underline inline-flex items-center gap-0.5 ml-0.5">
-                                  (Mở Tab Login <ExternalLink size={10} />)
-                                </span>
-                              </button>
-                            )
-                          )}
-                        </div>
                       </div>
                     </div>
                   )}
@@ -750,7 +585,7 @@ function App() {
                     disabled={(actor.name === 'shopee-scraper' || actor.name === 'tiktok-scraper') && !browserAgentConnected}
                     className="w-full flex items-center justify-center gap-2 bg-[#E8F0FE] text-blue-700 font-semibold py-2.5 text-xs rounded-xl hover:bg-blue-100 transition-colors disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed"
                   >
-                    <Play size={14} fill="currentColor" /> Run (10 Credits)
+                    <Play size={14} fill="currentColor" /> Run
                   </button>
                 </div>
               </div>
@@ -918,158 +753,6 @@ function App() {
           </div>
         )}
 
-        {activeTab === 'marketplace' && (
-          <div>
-            <div className="mb-8 flex items-center gap-4">
-              <input
-                type="text"
-                value={newActorName}
-                onChange={(e) => setNewActorName(e.target.value)}
-                placeholder="Enter new crawler name (e.g. my-ecommerce-scraper)"
-                className="flex-1 max-w-md px-4 py-3 bg-white rounded-xl shadow-sm border border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-100"
-              />
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-50 flex flex-col h-full">
-                <div className="w-14 h-14 bg-green-50 rounded-2xl flex items-center justify-center text-green-600 mb-6">
-                  <Package size={28} />
-                </div>
-                <h3 className="text-xl font-medium text-gray-900 mb-2">TypeScript Blank Template</h3>
-                <p className="text-gray-500 mb-8 flex-1">A basic template with TypeScript setup, using standard Node.js libraries. Perfect for simple HTTP scraping.</p>
-                <button 
-                  onClick={() => handleScaffold('template-ts')}
-                  className="w-full flex items-center justify-center gap-2 bg-[#E8F0FE] text-blue-700 font-medium py-3 rounded-full hover:bg-blue-100 transition-colors"
-                >
-                  <Download size={18} /> Create from Template
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {activeTab === 'users' && isAdminRole(user?.role) && (
-          <div className="space-y-6">
-            <div className="bg-white rounded-3xl shadow-sm border border-gray-50 p-6">
-              <h2 className="text-lg font-medium text-gray-900 mb-4">Create user</h2>
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-                <input
-                  type="email"
-                  value={newUser.email}
-                  onChange={(event) => setNewUser({ ...newUser, email: event.target.value })}
-                  placeholder="Email"
-                  className="px-4 py-3 bg-gray-50 rounded-xl border border-gray-200"
-                />
-                <input
-                  type="password"
-                  value={newUser.password}
-                  onChange={(event) => setNewUser({ ...newUser, password: event.target.value })}
-                  placeholder="Password (8+ characters)"
-                  className="px-4 py-3 bg-gray-50 rounded-xl border border-gray-200"
-                />
-                <select
-                  value={newUser.role}
-                  onChange={(event) => setNewUser({ ...newUser, role: event.target.value })}
-                  className="px-4 py-3 bg-gray-50 rounded-xl border border-gray-200"
-                >
-                  <option value="USER">USER</option>
-                  <option value="ADMIN">ADMIN</option>
-                  {user?.role === 'SUPER_ADMIN' && <option value="SUPER_ADMIN">SUPER_ADMIN</option>}
-                </select>
-                <select
-                  value={(newUser as any).tier || 'FREE'}
-                  onChange={(event) => setNewUser({ ...newUser, tier: event.target.value })}
-                  className="px-4 py-3 bg-gray-50 rounded-xl border border-gray-200"
-                >
-                  <option value="FREE">FREE</option>
-                  <option value="BASIC">BASIC</option>
-                  <option value="PRO">PRO</option>
-                  <option value="ENTERPRISE">ENTERPRISE</option>
-                </select>
-                <button onClick={createUser} className="px-5 py-3 bg-blue-600 text-white rounded-xl font-medium">
-                  Create
-                </button>
-              </div>
-            </div>
-
-            <div className="bg-white rounded-3xl shadow-sm border border-gray-50 overflow-hidden">
-              <table className="w-full text-left">
-                <thead className="bg-[#F1F3F5] text-gray-800 font-semibold text-sm border-b border-gray-200">
-                  <tr>
-                    <th className="px-5 py-4">User</th>
-                    <th className="px-5 py-4">Role</th>
-                    <th className="px-5 py-4">Tier</th>
-                    <th className="px-5 py-4">Status</th>
-                    <th className="px-5 py-4">Credits</th>
-                    <th className="px-5 py-4">Usage</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {users.map((entry) => (
-                    <tr key={entry.id} className="hover:bg-blue-50/25 transition-colors group">
-                      <td className="px-5 py-4">
-                        <div className="font-medium text-gray-900">{entry.email}</div>
-                        <div className="text-xs text-gray-400">{entry.id}</div>
-                      </td>
-                      <td className="px-5 py-4">
-                        <select
-                          value={entry.role}
-                          disabled={entry.id === user.id || (entry.role === 'SUPER_ADMIN' && user.role !== 'SUPER_ADMIN')}
-                          onChange={(event) => updateUser(entry.id, { role: event.target.value })}
-                          className="px-3 py-2 rounded-lg border border-gray-200 bg-gray-50 disabled:opacity-50"
-                        >
-                          <option value="USER">USER</option>
-                          <option value="ADMIN">ADMIN</option>
-                          {user?.role === 'SUPER_ADMIN' && <option value="SUPER_ADMIN">SUPER_ADMIN</option>}
-                        </select>
-                      </td>
-                      <td className="px-5 py-4">
-                        <select
-                          value={entry.tier || 'FREE'}
-                          disabled={entry.role === 'SUPER_ADMIN' && user.role !== 'SUPER_ADMIN'}
-                          onChange={(event) => updateUser(entry.id, { tier: event.target.value })}
-                          className="px-3 py-2 rounded-lg border border-gray-200 bg-gray-50 disabled:opacity-50"
-                        >
-                          <option value="FREE">FREE</option>
-                          <option value="BASIC">BASIC</option>
-                          <option value="PRO">PRO</option>
-                          <option value="ENTERPRISE">ENTERPRISE</option>
-                        </select>
-                      </td>
-                      <td className="px-5 py-4">
-                        <select
-                          value={entry.status}
-                          disabled={entry.id === user.id || (entry.role === 'SUPER_ADMIN' && user.role !== 'SUPER_ADMIN')}
-                          onChange={(event) => updateUser(entry.id, { status: event.target.value })}
-                          className="px-3 py-2 rounded-lg border border-gray-200 bg-gray-50 disabled:opacity-50"
-                        >
-                          <option value="ACTIVE">ACTIVE</option>
-                          <option value="SUSPENDED">SUSPENDED</option>
-                        </select>
-                      </td>
-                      <td className="px-5 py-4">
-                        <input
-                          type="number"
-                          min={0}
-                          max={1000000}
-                          defaultValue={entry.credits}
-                          onBlur={(event) => {
-                            const value = Number(event.target.value)
-                            if (value !== entry.credits) updateUser(entry.id, { credits: value })
-                          }}
-                          className="w-28 px-3 py-2 rounded-lg border border-gray-200 bg-gray-50"
-                        />
-                      </td>
-                      <td className="px-5 py-4 text-sm text-gray-500">
-                        {entry._count?.runs ?? 0} runs · {entry._count?.actors ?? 0} crawlers
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
         {activeTab === 'settings' && (
           <div className="bg-white rounded-3xl shadow-sm border border-gray-50 p-8 max-w-2xl">
             <h2 className="text-xl font-medium text-gray-900 mb-6">Account Settings</h2>
@@ -1081,14 +764,6 @@ function App() {
                 <p className="text-xs text-gray-400 mt-2">Email cannot be changed.</p>
               </div>
               
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Available Credits</label>
-                <div className="flex items-center gap-3 bg-[#E8F0FE] text-blue-800 px-4 py-3 rounded-xl w-max font-medium">
-                  <Wallet size={20} />
-                  {user?.credits} Credits
-                </div>
-                <button className="mt-3 text-sm text-blue-600 font-medium hover:underline">Buy more credits</button>
-              </div>
               <div className="flex gap-3">
                 <span className="px-3 py-1 rounded-full bg-violet-100 text-violet-700 text-xs font-semibold">{user?.role}</span>
                 <span className="px-3 py-1 rounded-full bg-emerald-100 text-emerald-700 text-xs font-semibold">{user?.status}</span>

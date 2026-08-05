@@ -34,6 +34,8 @@ const JWT_SECRET = process.env.JWT_SECRET || 'omnicrawl-secret-key-12345';
 const WORKSPACE_ROOT = path.resolve(__dirname, '..', '..', '..');
 const STORAGE_ROOT = path.join(WORKSPACE_ROOT, 'storage');
 const BROWSER_ACTOR_NAMES = ['shopee-scraper', 'tiktok-scraper'];
+const browserAgentHeartbeats = new Map<string, { version: string; seenAt: number }>();
+const BROWSER_AGENT_HEARTBEAT_TTL_MS = 15_000;
 const SHOPEE_UNUSED_OUTPUT_FIELDS = new Set([
   'author',
   'authorId',
@@ -813,6 +815,32 @@ app.post('/api/actors/:id/run', requireAuth, async (req: any, res: any) => {
 });
 
 // --- BROWSER AGENT ROUTES ---
+
+app.get('/api/browser-agent/bootstrap', async (req: any, res) => {
+  const user = await prisma.user.findFirst({
+    where: { status: 'ACTIVE' },
+    orderBy: { createdAt: 'asc' },
+    select: { id: true }
+  });
+  if (!user) return res.status(503).json({ error: 'No active local OmniCrawl user is available' });
+  const token = jwt.sign({ id: user.id, agent: true }, JWT_SECRET, { expiresIn: '12h' });
+  res.json({ apiBase: 'http://localhost:3001', token });
+});
+
+app.post('/api/browser-agent/status', requireAuth, (req: any, res) => {
+  const version = typeof req.body?.version === 'string' ? req.body.version.slice(0, 40) : 'unknown';
+  browserAgentHeartbeats.set(req.user.id, { version, seenAt: Date.now() });
+  res.status(204).send();
+});
+
+app.get('/api/browser-agent/status', requireAuth, (req: any, res) => {
+  const heartbeat = browserAgentHeartbeats.get(req.user.id);
+  const connected = Boolean(heartbeat && Date.now() - heartbeat.seenAt < BROWSER_AGENT_HEARTBEAT_TTL_MS);
+  res.json({
+    connected,
+    version: connected ? heartbeat?.version ?? null : null
+  });
+});
 
 app.get('/api/browser-agent/jobs/next', requireAuth, async (req: any, res: any) => {
   try {
