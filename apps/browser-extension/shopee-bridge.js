@@ -627,7 +627,7 @@ function scrapeRenderedProductDetail() {
     ?.replace(/^(mô tả sản phẩm|product description)\s*/i, '')
     .trim()
     .slice(0, 50000) || '';
-  const ratingMatch = bodyText.slice(0, 12000).match(/(\d(?:[.,]\d)?)\s*(?:\/\s*5|đánh giá|rating)/i);
+  const ratingMatch = bodyText.slice(0, 12000).match(/([1-5](?:[.,]\d)?)\s*(?:\/\s*5|stars?|sao)/i);
   const sold = renderedSoldValue(bodyText.slice(0, 12000));
   const metaImage = document.querySelector('meta[property="og:image"]')?.content ||
                     document.querySelector('meta[name="twitter:image"]')?.content;

@@ -309,29 +309,15 @@ async function api(path, options = {}) {
   return response;
 }
 
-// Filter Rotation: each filter is fully paginated before moving to the next.
-const SHOPEE_SORT_FILTERS = [
-  {}, // Relevance (default)
-  { sortBy: 'sales' },
-  { sortBy: 'price', order: 'asc' },
-  { sortBy: 'price', order: 'desc' },
-  { sortBy: 'ctime' }
-];
-
-function searchUrl(keyword, page, filterIndex) {
+function searchUrl(keyword, page) {
   const url = new URL('https://shopee.vn/search');
   url.searchParams.set('keyword', keyword);
 
-  // Apply sort filter from the rotation list
-  const filter = SHOPEE_SORT_FILTERS[
-    Math.abs(Math.floor(Number(filterIndex) || 0)) % SHOPEE_SORT_FILTERS.length
-  ];
-  if (filter.sortBy) url.searchParams.set('sortBy', filter.sortBy);
-  if (filter.order) url.searchParams.set('order', filter.order);
-
-  // We NEVER set the 'page' parameter on the browser URL for Shopee,
-  // because any page > 0 triggers the login wall in guest mode.
-  // Pagination is handled entirely via the shopee-hook API replay.
+  // We used to suppress the 'page' parameter for guest mode,
+  // but now that we require login, we can safely paginate via URL.
+  if (page > 0) {
+    url.searchParams.set('page', String(page));
+  }
 
   return url.toString();
 }
@@ -540,8 +526,7 @@ async function pauseShopeeForTrafficControl(reason) {
   }
   await logJob(
     `Shopee đang giới hạn lưu lượng${reason ? ` (${reason})` : ''}. ` +
-    'Run đã dừng gửi request và giữ nguyên hàng đợi. Hãy xử lý trang Shopee ' +
-    'hoặc đổi mạng, sau đó mở lại trang chủ để tiếp tục.'
+    'Run đã tạm dừng. Hãy giải quyết Captcha/Xác nhận trên trang Shopee để tự động tiếp tục cào.'
   );
   const windowId = Number(activeJob.windowId);
   if (Number.isInteger(windowId) && windowId > 0) {
@@ -635,7 +620,7 @@ async function resumeShopeeAfterTrafficControl() {
 
 function searchUrlForJob(job, page) {
   const currentKeyword = (job.keywords && job.keywords[job.keywordIndex]) || job.keyword;
-  if (job?.platform !== 'tiktok') return searchUrl(currentKeyword, page, job.filterIndex || 0);
+  if (job?.platform !== 'tiktok') return searchUrl(currentKeyword, page);
   return (
     `https://www.tiktok.com/search?q=${encodeURIComponent(currentKeyword)}` +
     `&omnicrawl_mode=${encodeURIComponent(job.mode || 'videos')}`
@@ -649,15 +634,8 @@ function platformTabPatterns(job) {
 }
 
 async function createCrawlerWindow(job) {
-  const isAllowed = await new Promise((resolve) => {
-    chrome.extension.isAllowedIncognitoAccess(resolve);
-  });
-  if (!isAllowed) {
-    throw new Error('OmniCrawl cần quyền "Allow in Incognito" (Cho phép ở chế độ Ẩn danh) để chạy Tách hồn khỏi xác. Vui lòng mở chrome://extensions, tìm OmniCrawl và bật tùy chọn này lên.');
-  }
-
   const crawlerWindow = await chrome.windows.create({
-    incognito: true,
+    incognito: false,
     url: 'about:blank',
     type: 'normal',
     focused: false,
@@ -669,7 +647,7 @@ async function createCrawlerWindow(job) {
 
   const tab = crawlerWindow.tabs?.[0];
   if (!tab?.id || !crawlerWindow.id) {
-    throw new Error('Không thể tạo cửa sổ Ẩn danh cho Browser Agent.');
+    throw new Error('Không thể tạo cửa sổ Crawler cho Browser Agent.');
   }
   job.tabId = tab.id;
   job.windowId = crawlerWindow.id;
@@ -2054,25 +2032,9 @@ async function scheduleNextPage() {
     }
     armPageTimeout(searchTimeoutForJob(activeJob));
 
-    if (nextPage === 0) {
-      chrome.tabs.update(activeJob.tabId, { url: nextUrl }).catch((error) => {
-        void finishJob(false, error?.message || 'Không thể mở trang tìm kiếm Shopee.');
-      });
-    } else {
-      const filter = SHOPEE_SORT_FILTERS[
-        Math.abs(Math.floor(Number(activeJob.filterIndex) || 0)) % SHOPEE_SORT_FILTERS.length
-      ];
-      chrome.tabs.sendMessage(activeJob.tabId, {
-        type: 'REQUEST_SHOPEE_FETCH_PAGE',
-        page: nextPage,
-        keyword: (activeJob.keywords && activeJob.keywords[activeJob.keywordIndex]) || activeJob.keyword,
-        sortBy: filter.sortBy,
-        order: filter.order
-      }).catch(() => {
-        // Fallback to update if content script is somehow disconnected
-        chrome.tabs.update(activeJob.tabId, { url: nextUrl }).catch(() => undefined);
-      });
-    }
+    chrome.tabs.update(activeJob.tabId, { url: nextUrl }).catch((error) => {
+      void finishJob(false, error?.message || 'Không thể mở trang tìm kiếm Shopee.');
+    });
   }, delay);
 }
 
@@ -2110,27 +2072,9 @@ async function retryCurrentShopeePage(page, itemCount) {
     activeJob.navigationScheduled = false;
     void persistActiveJob();
     armPageTimeout(searchTimeoutForJob(activeJob));
-
-    if (page === 0) {
-      chrome.tabs.update(activeJob.tabId, {
-        url: searchUrlForJob(activeJob, page)
-      }).catch((error) => {
-        void finishJob(false, error?.message || 'Không thể tải lại trang tìm kiếm Shopee.');
-      });
-    } else {
-      const filter = SHOPEE_SORT_FILTERS[
-        Math.abs(Math.floor(Number(activeJob.filterIndex) || 0)) % SHOPEE_SORT_FILTERS.length
-      ];
-      chrome.tabs.sendMessage(activeJob.tabId, {
-        type: 'REQUEST_SHOPEE_FETCH_PAGE',
-        page: page,
-        keyword: (activeJob.keywords && activeJob.keywords[activeJob.keywordIndex]) || activeJob.keyword,
-        sortBy: filter.sortBy,
-        order: filter.order
-      }).catch(() => {
-        chrome.tabs.update(activeJob.tabId, { url: searchUrlForJob(activeJob, page) }).catch(() => undefined);
-      });
-    }
+    chrome.tabs.update(activeJob.tabId, { url: searchUrlForJob(activeJob, page) }).catch((error) => {
+      void finishJob(false, error?.message || 'Không thể tải lại trang tìm kiếm Shopee.');
+    });
   }, delay);
   return true;
 }
@@ -2144,41 +2088,16 @@ async function continueAfterNoNewSearchData(message) {
     await persistActiveJob();
   }
 
-  // Use a higher threshold (5) because filter rotation naturally produces
-  // duplicate items across different sort orders.
-  const noNewThreshold = activeJob.platform === 'shopee' ? 5 : 3;
+  const noNewThreshold = 3;
 
   if (activeJob.consecutiveNoNewPages >= noNewThreshold) {
-    // Step 1: Try the next sort filter before giving up on this keyword.
-    const totalFilters = SHOPEE_SORT_FILTERS.length;
-    const currentFilter = Number(activeJob.filterIndex || 0);
-    if (activeJob.platform === 'shopee' && currentFilter + 1 < totalFilters) {
-      const nextFilter = currentFilter + 1;
-      const filterNames = ['relevance', 'sales', 'price-asc', 'price-desc', 'newest'];
-      await logJob(
-        `Filter "${filterNames[currentFilter]}" exhausted after ` +
-        `${activeJob.consecutiveNoNewPages} consecutive no-new-items pages. ` +
-        `Switching to filter "${filterNames[nextFilter]}" ` +
-        `(${nextFilter + 1}/${totalFilters}).`
-      );
-      activeJob.filterIndex = nextFilter;
-      activeJob.page = 0;
-      activeJob.lastNoNewPage = -1;
-      activeJob.consecutiveNoNewPages = 0;
-      activeJob.navigationScheduled = false;
-      await persistActiveJob();
-      return goToNextShopeeSearchPage(0);
-    }
-
-    // Step 2: Try the next keyword (if comma-separated keywords were provided).
+    // Step 1: Try the next keyword (if comma-separated keywords were provided).
     if (activeJob.keywords && activeJob.keywordIndex + 1 < activeJob.keywords.length) {
       await logJob(
-        `Keyword "${activeJob.keywords[activeJob.keywordIndex]}" exhausted ` +
-        `across all filters. ` +
+        `Keyword "${activeJob.keywords[activeJob.keywordIndex]}" exhausted. ` +
         `Switching to next keyword "${activeJob.keywords[activeJob.keywordIndex + 1]}".`
       );
       activeJob.keywordIndex++;
-      activeJob.filterIndex = 0;
       activeJob.page = 0;
       activeJob.lastNoNewPage = -1;
       activeJob.consecutiveNoNewPages = 0;
@@ -2187,10 +2106,10 @@ async function continueAfterNoNewSearchData(message) {
       return goToNextShopeeSearchPage(0);
     }
 
-    // Step 3: All filters and keywords exhausted — proceed to detail phase.
+    // Step 2: All keywords exhausted — proceed to detail phase.
     await logJob(
       `No new items on ${activeJob.consecutiveNoNewPages} consecutive ` +
-      `${platformLabel(activeJob)} pages (all filters and keywords exhausted). ` +
+      `${platformLabel(activeJob)} pages (all keywords exhausted). ` +
       `Continuing with ${activeJob.seen.length} collected items.`
     );
     await beginDetailPhase();
@@ -2211,11 +2130,9 @@ async function goToNextShopeeSearchPage(page) {
   const nextUrl = searchUrlForJob(activeJob, page);
   const delay = randomShopeeActionDelay();
   await persistActiveJob();
-  const filterNames = ['relevance', 'sales', 'price-asc', 'price-desc', 'newest'];
-  const filterLabel = filterNames[activeJob.filterIndex || 0] || 'default';
   await logJob(
     `Navigating to Shopee search page ${page} ` +
-    `(filter: ${filterLabel}, keyword: ` +
+    `(keyword: ` +
     `"${(activeJob.keywords && activeJob.keywords[activeJob.keywordIndex]) || activeJob.keyword}").`
   );
   setTimeout(() => {
@@ -2230,24 +2147,9 @@ async function goToNextShopeeSearchPage(page) {
     activeJob.scheduledPage = null;
     void persistActiveJob();
     armPageTimeout(searchTimeoutForJob(activeJob));
-    if (page === 0) {
-      chrome.tabs.update(activeJob.tabId, { url: nextUrl }).catch((error) => {
-        void finishJob(false, error?.message || 'Không thể mở trang tìm kiếm Shopee.');
-      });
-    } else {
-      const filter = SHOPEE_SORT_FILTERS[
-        Math.abs(Math.floor(Number(activeJob.filterIndex) || 0)) % SHOPEE_SORT_FILTERS.length
-      ];
-      chrome.tabs.sendMessage(activeJob.tabId, {
-        type: 'REQUEST_SHOPEE_FETCH_PAGE',
-        page: page,
-        keyword: (activeJob.keywords && activeJob.keywords[activeJob.keywordIndex]) || activeJob.keyword,
-        sortBy: filter.sortBy,
-        order: filter.order
-      }).catch(() => {
-        chrome.tabs.update(activeJob.tabId, { url: nextUrl }).catch(() => undefined);
-      });
-    }
+    chrome.tabs.update(activeJob.tabId, { url: nextUrl }).catch((error) => {
+      void finishJob(false, error?.message || 'Không thể mở trang tìm kiếm Shopee.');
+    });
   }, delay);
 }
 
@@ -3035,6 +2937,10 @@ async function maybeBeginDetailAfterShopeeImages() {
 
 async function beginDetailPhase() {
   if (!activeJob || activeJob.phase === 'DETAIL') return;
+  
+  // Set immediately to prevent race conditions (e.g. if called multiple times during the 3s delay)
+  activeJob.phase = 'DETAIL';
+  
   if (!activeJob.includeDetails || !activeJob.products.length) {
     await finishJob(true);
     return;
@@ -3043,7 +2949,47 @@ async function beginDetailPhase() {
   clearTimeout(searchImageReadyTimer);
   searchImageReadyTimer = null;
   await chrome.alarms.clear(SHOPEE_IMAGE_READY_ALARM).catch(() => undefined);
-  activeJob.phase = 'DETAIL';
+
+  const oldWindowId = activeJob.windowId;
+  
+  if (oldWindowId) {
+    activeJob.tabId = null; // Prevent onRemoved from failing the job
+    activeJob.windowId = null;
+    await logJob('Đóng cửa sổ tìm kiếm và chờ 3 giây để làm sạch dữ liệu trước khi chuyển sang ẩn danh...');
+    await chrome.windows.remove(Number(oldWindowId)).catch(() => undefined);
+    await new Promise(resolve => setTimeout(resolve, 3000));
+  }
+
+  const isAllowed = await new Promise((resolve) => {
+    chrome.extension.isAllowedIncognitoAccess(resolve);
+  });
+  if (!isAllowed) {
+    await logJob('OmniCrawl cần quyền "Allow in Incognito" để chạy giai đoạn chi tiết. Vui lòng bật quyền này trong chrome://extensions.');
+    await finishJob(false, 'Thiếu quyền Ẩn danh (Incognito) cho giai đoạn lấy chi tiết.');
+    return;
+  }
+
+  const crawlerWindow = await chrome.windows.create({
+    incognito: true,
+    url: 'about:blank',
+    type: 'normal',
+    focused: false,
+    width: 1100,
+    height: 820,
+    left: 40,
+    top: 40
+  });
+
+  const tab = crawlerWindow.tabs?.[0];
+  if (!tab?.id || !crawlerWindow.id) {
+    await logJob('Không thể tạo cửa sổ Ẩn danh cho giai đoạn chi tiết.');
+    await finishJob(false, 'Lỗi tạo cửa sổ Ẩn danh.');
+    return;
+  }
+
+  activeJob.tabId = tab.id;
+  activeJob.windowId = crawlerWindow.id;
+
   activeJob.navigationScheduled = false;
   activeJob.searchImageReadyScheduled = false;
   activeJob.detailIndex = 0;
@@ -3080,6 +3026,33 @@ async function navigateNextDetail() {
   if (activeJob.detailIndex >= activeJob.products.length) {
     await finishJob(true);
     return;
+  }
+
+  if (activeJob.detailIndex > 0 && activeJob.detailIndex % 40 === 0 && activeJob.lastRotatedIndex !== activeJob.detailIndex) {
+    activeJob.lastRotatedIndex = activeJob.detailIndex;
+    await logJob(`Đã lấy chi tiết ${activeJob.detailIndex} sản phẩm, đang tạo mới cửa sổ ẩn danh để làm mới session...`);
+    const oldWindowId = activeJob.windowId;
+    const crawlerWindow = await chrome.windows.create({
+      incognito: true,
+      url: 'about:blank',
+      type: 'normal',
+      focused: false,
+      width: 1100,
+      height: 820,
+      left: 40,
+      top: 40
+    });
+    
+    const tab = crawlerWindow.tabs?.[0];
+    if (tab?.id && crawlerWindow.id) {
+      activeJob.tabId = tab.id;
+      activeJob.windowId = crawlerWindow.id;
+      if (oldWindowId) {
+        await chrome.windows.remove(Number(oldWindowId)).catch(() => undefined);
+      }
+    }
+    await persistActiveJob();
+    await new Promise((resolve) => setTimeout(resolve, 500));
   }
 
   clearPageTimeout();
@@ -3145,6 +3118,7 @@ async function patchCurrentDetail(detail) {
   activeJob.detailCompleted = projected.completed;
   activeJob.detailFailed = projected.failed;
   activeJob.detailIndex += 1;
+  activeJob.currentDetailRetries = 0;
   activeJob.currentProduct = null;
   activeJob.pendingDetailData = null;
   activeJob.detailSettleScheduled = false;
@@ -3177,6 +3151,21 @@ async function failCurrentDetail(error) {
   if (!activeJob?.currentProduct || activeJob.phase !== 'DETAIL') return;
   const key = String(activeJob.currentProduct.itemId);
   if (activeJob.detailHandledFor === key) return;
+
+  const maxRetries = 1;
+  activeJob.currentDetailRetries = activeJob.currentDetailRetries || 0;
+  
+  if (activeJob.currentDetailRetries < maxRetries) {
+    activeJob.currentDetailRetries += 1;
+    await logJob(`[RETRY] Lỗi cào sản phẩm, có thể do bị chặn. Thử lại lần ${activeJob.currentDetailRetries}/${maxRetries} sau 3 giây...`);
+    activeJob.navigationScheduled = false;
+    await persistActiveJob();
+    setTimeout(() => {
+      navigateNextDetail();
+    }, 3000);
+    return;
+  }
+
   activeJob.detailHandledFor = key;
   clearPageTimeout();
   await persistActiveJob();
@@ -3273,9 +3262,7 @@ async function processSearchResponse(detail, sender) {
   if (responsePage !== activeJob.page) return;
   const payload = detail?.payload;
   if (isShopeeLoginError(detail)) {
-    activeJob.consecutiveNoNewPages = 999;
-    await persistActiveJob();
-    await continueAfterNoNewSearchData('Shopee yêu cầu đăng nhập. Thử bộ lọc hoặc từ khóa tiếp theo...');
+    await pauseShopeeForAuthentication('API tìm kiếm yêu cầu đăng nhập');
     return;
   }
   if (isShopeeTrafficError(detail)) {
@@ -4534,6 +4521,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
+let lastTikTokSessionId = null;
+let cachedTikTokLoggedIn = false;
+let checkingTikTokAuth = false;
+
 async function checkAuthStatuses() {
   try {
     const [shopeeDomainCookies, shopeeUrlCookies, tiktokDomainCookies, tiktokUrlCookies] = await Promise.all([
@@ -4547,18 +4538,32 @@ async function checkAuthStatuses() {
     const allTikTok = [...tiktokDomainCookies, ...tiktokUrlCookies];
 
     const isShopeeLoggedIn = allShopee.some((c) => (
-      ['SPC_U', 'SPC_EC', 'SPC_ST', 'shopee_token', 'shopee_user_id', 'SPC_SI'].includes(c.name) &&
-      Boolean(c.value) && c.value !== '-' && c.value !== '0'
+      ['SPC_EC', 'SPC_ST', 'shopee_token', 'shopee_user_id'].includes(c.name) &&
+      Boolean(c.value) && c.value !== '-' && c.value !== '0' && c.value !== 'deleted'
     ));
 
-    const isTikTokLoggedIn = allTikTok.some((c) => (
-      ['sessionid', 'sessionid_ss', 'sid_tt', 'uid_tt'].includes(c.name) &&
-      Boolean(c.value) && c.value !== '-' && c.value !== '0'
-    ));
+    const currentTikTokSessionId = allTikTok.find(c => c.name === 'sessionid')?.value || null;
+    
+    if (currentTikTokSessionId !== lastTikTokSessionId && !checkingTikTokAuth) {
+      if (!currentTikTokSessionId || currentTikTokSessionId === '-' || currentTikTokSessionId === 'deleted') {
+        cachedTikTokLoggedIn = false;
+        lastTikTokSessionId = currentTikTokSessionId;
+      } else {
+        checkingTikTokAuth = true;
+        fetch('https://www.tiktok.com/passport/web/account/info/', { credentials: 'include' })
+          .then(res => res.json())
+          .then(data => {
+            cachedTikTokLoggedIn = Boolean(data?.data?.user_id);
+            lastTikTokSessionId = currentTikTokSessionId;
+          })
+          .catch(() => {})
+          .finally(() => { checkingTikTokAuth = false; });
+      }
+    }
 
     return {
       shopeeLoggedIn: isShopeeLoggedIn,
-      tiktokLoggedIn: isTikTokLoggedIn
+      tiktokLoggedIn: cachedTikTokLoggedIn
     };
   } catch {
     return { shopeeLoggedIn: false, tiktokLoggedIn: false };
@@ -4616,21 +4621,24 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     )
   ) {
     const url = String(changeInfo.url || tab?.url || '');
-    let isShopeeHome = false;
+    let isSafeShopeePage = false;
     try {
       const parsed = new URL(url);
-      isShopeeHome = (
+      isSafeShopeePage = (
         /(^|\.)shopee\.vn$/i.test(parsed.hostname) &&
-        (parsed.pathname === '/' || parsed.pathname === '')
+        !parsed.pathname.includes('/verify/') &&
+        !parsed.pathname.includes('/buyer/login')
       );
     } catch {
-      isShopeeHome = false;
+      isSafeShopeePage = false;
     }
-    if (isShopeeHome) {
-      enqueueDetailMessage(
-        () => resumeShopeeAfterTrafficControl(),
-        'Không thể tiếp tục run sau khi trang Shopee hoạt động lại.'
-      );
+    if (isSafeShopeePage) {
+      setTimeout(() => {
+        enqueueDetailMessage(
+          () => resumeShopeeAfterTrafficControl(),
+          'Không thể tiếp tục run sau khi trang Shopee hoạt động lại.'
+        );
+      }, 800);
     }
     return;
   }

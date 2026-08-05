@@ -12,7 +12,8 @@ import {
   FileSpreadsheet,
   ChevronLeft,
   ChevronRight,
-  ExternalLink
+  ExternalLink,
+  AlertTriangle
 } from 'lucide-react'
 import Login from './Login'
 import OmniCrawlLogo from './Logo'
@@ -164,6 +165,7 @@ function App() {
   const [browserAgentConnected, setBrowserAgentConnected] = useState(false)
   const [browserAgentDetected, setBrowserAgentDetected] = useState(false)
   const [browserAgentVersion, setBrowserAgentVersion] = useState<string | null>(null)
+  const [authStatus, setAuthStatus] = useState({ shopeeLoggedIn: false, tiktokLoggedIn: false, debugTikTokCookies: '' })
 
   // Log Viewer State
   const [logModalOpen, setLogModalOpen] = useState(false)
@@ -254,6 +256,9 @@ function App() {
           Boolean(event.data.connected) &&
           isVersionAtLeast(version, REQUIRED_BROWSER_AGENT_VERSION)
         )
+        if (event.data.authStatus) {
+          setAuthStatus(event.data.authStatus)
+        }
       }
     }
     window.addEventListener('message', handleAgentMessage)
@@ -556,7 +561,7 @@ function App() {
                   </p>
                   
                   {(actor.name === 'shopee-scraper' || actor.name === 'tiktok-scraper') && (
-                    <div className="mb-3">
+                    <div className="mb-3 flex flex-col gap-2">
                       <div className="rounded-xl border border-gray-200/80 bg-slate-50/70 px-3 py-2 flex items-center justify-between gap-2 min-h-[38px]">
                         <div className="flex items-center gap-1.5 text-xs font-medium text-gray-800">
                           <span className="relative flex h-2 w-2 shrink-0">
@@ -576,17 +581,69 @@ function App() {
                           </span>
                         </div>
                       </div>
+                      
+                      {browserAgentConnected && actor.name === 'shopee-scraper' && (
+                        <div className="rounded-xl border border-gray-200/80 bg-slate-50/70 px-3 py-2 flex items-center justify-between gap-2 min-h-[38px]">
+                          <div className="flex items-center gap-1.5 text-xs font-medium text-gray-800">
+                            <span className="relative flex h-2 w-2 shrink-0">
+                              <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
+                                authStatus.shopeeLoggedIn ? 'bg-emerald-400' : 'bg-red-400'
+                              }`} />
+                              <span className={`relative inline-flex rounded-full h-2 w-2 ${
+                                authStatus.shopeeLoggedIn ? 'bg-emerald-500' : 'bg-red-500'
+                              }`} />
+                            </span>
+                            <span className="text-[11px] leading-none flex items-center">
+                              {authStatus.shopeeLoggedIn ? 'Shopee: Đã đăng nhập' : 'Shopee: Chưa đăng nhập'}
+                            </span>
+                          </div>
+                          {!authStatus.shopeeLoggedIn && (
+                            <a href="https://shopee.vn" target="_blank" rel="noreferrer" className="text-[10px] text-blue-600 font-semibold hover:underline bg-blue-50 px-2 py-1 rounded">Mở Đăng Nhập</a>
+                          )}
+                        </div>
+                      )}
+                      
+                      {browserAgentConnected && actor.name === 'tiktok-scraper' && (
+                        <div className="rounded-xl border border-gray-200/80 bg-slate-50/70 px-3 py-2 flex items-center justify-between gap-2 min-h-[38px]">
+                          <div className="flex items-center gap-1.5 text-xs font-medium text-gray-800">
+                            <span className="relative flex h-2 w-2 shrink-0">
+                              <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
+                                authStatus.tiktokLoggedIn ? 'bg-emerald-400' : 'bg-red-400'
+                              }`} />
+                              <span className={`relative inline-flex rounded-full h-2 w-2 ${
+                                authStatus.tiktokLoggedIn ? 'bg-emerald-500' : 'bg-red-500'
+                              }`} />
+                            </span>
+                            <span className="text-[11px] leading-none flex items-center">
+                              {authStatus.tiktokLoggedIn ? 'TikTok: Đã đăng nhập' : 'TikTok: Chưa đăng nhập'}
+                            </span>
+                          </div>
+                          {!authStatus.tiktokLoggedIn && (
+                            <a href="https://www.tiktok.com/login" target="_blank" rel="noreferrer" className="text-[10px] text-blue-600 font-semibold hover:underline bg-blue-50 px-2 py-1 rounded">Mở Đăng Nhập</a>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
 
                   <ActorInputFields
                     schema={actor.inputSchema}
                     input={runInputs[actor.id] || {}}
+                    actorName={actor.name}
                     onChange={(input) => setRunInputs((previous) => ({
                       ...previous,
                       [actor.id]: input
                     }))}
                   />
+
+                  {((runInputs[actor.id]?.maxItems as number) > 200 || (runInputs[actor.id]?.maxItems === undefined && 200 < 0 /* fallback logic if needed */)) && (
+                    <div className="mt-3 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2 text-amber-800 text-xs shadow-sm">
+                      <AlertTriangle size={16} className="shrink-0 mt-0.5" />
+                      <div>
+                        <strong>Cảnh báo an toàn:</strong> Kéo trên 200 sản phẩm bằng mạng WiFi cá nhân có nguy cơ bị sàn thương mại điện tử chặn IP hoặc yêu cầu xác minh CAPTCHA liên tục. Hãy đảm bảo bạn chia nhỏ số lượng hoặc sử dụng mạng Proxy nếu muốn tiếp tục.
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <div className="pt-3 mt-4 border-t border-gray-100">
@@ -1433,13 +1490,23 @@ function RunDetailModal({
 function ActorInputFields({
   schema,
   input,
-  onChange
+  onChange,
+  actorName
 }: {
   schema?: string | null
   input: Record<string, unknown>
   onChange: (input: Record<string, unknown>) => void
+  actorName?: string
 }) {
   const parsed = parseInputSchema(schema)
+  
+  if (actorName === 'shopee-scraper' || actorName === 'tiktok-scraper') {
+    if (parsed?.properties?.maxItems) {
+      parsed.properties.maxItems.maximum = 200
+      parsed.properties.maxItems.description = (parsed.properties.maxItems.description || '') + ' (Tối đa 200)'
+    }
+  }
+
   const properties = Object.entries(parsed?.properties || {})
   if (properties.length === 0) return null
 

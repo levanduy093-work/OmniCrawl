@@ -429,7 +429,7 @@ app.post('/api/auth/register', async (req, res) => {
   try {
     const existing = await prisma.user.findUnique({ where: { email: normalizedEmail } });
     if (existing) return res.status(400).json({ error: 'Email already exists' });
-    
+
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = await prisma.user.create({
       data: { email: normalizedEmail, password: hashedPassword, credits: 1000 }
@@ -463,10 +463,10 @@ app.post('/api/auth/login', async (req, res) => {
     const user = await prisma.user.findUnique({ where: { email: normalizedEmail } });
     if (!user) return res.status(400).json({ error: 'Invalid credentials' });
     if (user.status !== 'ACTIVE') return res.status(403).json({ error: 'Account is suspended' });
-    
+
     const valid = await bcrypt.compare(password, user.password);
     if (!valid) return res.status(400).json({ error: 'Invalid credentials' });
-    
+
     const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
     res.json({
       token,
@@ -883,8 +883,8 @@ app.get('/api/browser-agent/jobs/next', requireAuth, async (req: any, res: any) 
     const maxReviewsPerProduct = platform === 'shopee'
       ? 0
       : includeDetails && Number.isFinite(maxReviewsValue)
-      ? Math.min(100000, Math.max(0, Math.floor(maxReviewsValue)))
-      : 0;
+        ? Math.min(100000, Math.max(0, Math.floor(maxReviewsValue)))
+        : 0;
     const detailConcurrency = 1;
     await new Dataset(candidate.id).setMetadata({
       source: platform === 'tiktok' ? 'tiktok.com' : 'shopee.vn',
@@ -1274,7 +1274,7 @@ app.get('/api/runs/:id/logs', requireAuth, async (req: any, res) => {
   if (!run) return res.status(404).json({ error: 'Run not found' });
 
   const logFile = path.join(STORAGE_ROOT, 'logs', `${id}.log`);
-  
+
   if (fs.existsSync(logFile)) {
     const logs = fs.readFileSync(logFile, 'utf8');
     res.json({ logs });
@@ -1558,7 +1558,7 @@ app.post('/api/schedules', requireAuth, async (req: any, res: any) => {
   // Verify actor exists and belongs to user or is public
   const actor = await prisma.actor.findUnique({ where: { id: actorId } });
   if (!actor) return res.status(404).json({ error: 'Actor not found' });
-  
+
   if (actor.userId && actor.userId !== req.user.id) {
     return res.status(403).json({ error: 'Unauthorized to use this actor' });
   }
@@ -1632,7 +1632,7 @@ app.post('/api/templates/scaffold', requireAuth, async (req: any, res: any) => {
   if (templateName !== 'template-ts') {
     return res.status(400).json({ error: 'Unsupported template' });
   }
-  
+
   const actualTargetPath = path.join(WORKSPACE_ROOT, 'actors', name);
   const templatePath = path.join(WORKSPACE_ROOT, 'actors', templateName);
 
@@ -1642,7 +1642,7 @@ app.post('/api/templates/scaffold', requireAuth, async (req: any, res: any) => {
 
   try {
     fs.cpSync(templatePath, actualTargetPath, { recursive: true });
-    
+
     const pkgPath = path.join(actualTargetPath, 'package.json');
     const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
     pkg.name = name;
@@ -1662,7 +1662,7 @@ app.post('/api/templates/scaffold', requireAuth, async (req: any, res: any) => {
         userId: req.user.id
       }
     });
-    
+
     exec(`cd ${WORKSPACE_ROOT} && pnpm install && pnpm build`);
 
     res.json({ message: 'Scaffolded successfully', actor });
