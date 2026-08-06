@@ -278,6 +278,27 @@ export class Dataset<TItem = unknown> {
     });
   }
 
+  async deleteData(externalKey: string) {
+    return this.locked(async () => {
+      const item = await prisma.datasetItem.findFirst({
+        where: {
+          runId: this.runId,
+          externalKey: String(externalKey)
+        },
+        select: { id: true }
+      });
+      if (!item) return false;
+      await prisma.$transaction([
+        prisma.datasetItem.delete({ where: { id: item.id } }),
+        prisma.run.update({
+          where: { id: this.runId },
+          data: { itemCount: { decrement: 1 } }
+        })
+      ]);
+      return true;
+    });
+  }
+
   async appendReviews(
     externalKey: string,
     reviews: Array<Record<string, unknown>>,

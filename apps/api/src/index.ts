@@ -1056,8 +1056,13 @@ app.patch('/api/browser-agent/jobs/:id/items/:itemId', requireAuth, async (req: 
       run.actor.name,
       sanitizeDetailPatch(req.body?.detail)
     ) as Record<string, unknown>;
-    const updated = await dataset.updateData(String(req.params.itemId), detail);
-    if (!updated) return res.status(404).json({ error: 'Product was not found in this run' });
+    let updated = true;
+    if (detail.detailStatus === 'FAILED') {
+      await dataset.deleteData(String(req.params.itemId));
+    } else {
+      updated = await dataset.updateData(String(req.params.itemId), detail);
+      if (!updated) return res.status(404).json({ error: 'Product was not found in this run' });
+    }
 
     const completed = Math.max(0, Math.floor(Number(req.body?.progress?.completed) || 0));
     const failed = Math.max(0, Math.floor(Number(req.body?.progress?.failed) || 0));
