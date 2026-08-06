@@ -2971,7 +2971,7 @@ async function beginDetailPhase() {
 
   const crawlerWindow = await chrome.windows.create({
     incognito: true,
-    url: 'about:blank',
+    url: 'https://shopee.vn/',
     type: 'normal',
     focused: false,
     width: 1100,
@@ -2989,6 +2989,9 @@ async function beginDetailPhase() {
 
   activeJob.tabId = tab.id;
   activeJob.windowId = crawlerWindow.id;
+
+  await logJob('Đang chờ 6 giây để trang chủ Shopee tải hoàn tất và thiết lập Cookie...');
+  await new Promise((resolve) => setTimeout(resolve, 6000));
 
   activeJob.navigationScheduled = false;
   activeJob.searchImageReadyScheduled = false;
@@ -3034,7 +3037,7 @@ async function navigateNextDetail() {
     const oldWindowId = activeJob.windowId;
     const crawlerWindow = await chrome.windows.create({
       incognito: true,
-      url: 'about:blank',
+      url: 'https://shopee.vn/',
       type: 'normal',
       focused: false,
       width: 1100,
@@ -3052,7 +3055,8 @@ async function navigateNextDetail() {
       }
     }
     await persistActiveJob();
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await logJob('Đang chờ 6 giây để trang chủ Shopee tải hoàn tất và thiết lập Cookie...');
+    await new Promise((resolve) => setTimeout(resolve, 6000));
   }
 
   clearPageTimeout();
