@@ -23,22 +23,79 @@ const MAX_DETAIL_CONCURRENCY = 1;
 const MAX_SHOPEE_DETAIL_ATTEMPTS = 2;
 const SPARSE_DETAIL_RECHECK_MS = 850;
 const MAX_DETAIL_READY_PROBES = 12;
-const SHOPEE_NAVIGATION_GAP_MIN_MS = 6000;
-const SHOPEE_NAVIGATION_GAP_MAX_MS = 10000;
+const SHOPEE_NAVIGATION_GAP_MIN_MS = 8000;
+const SHOPEE_NAVIGATION_GAP_MAX_MS = 15000;
 const DETAIL_DEADLINE_ALARM_PREFIX = 'omnicrawl-detail-deadline:';
 const DETAIL_READY_ALARM_PREFIX = 'omnicrawl-detail-ready:';
 const SHOPEE_IMAGE_READY_ALARM = 'omnicrawl-shopee-image-ready';
+const SHOPEE_WARMUP_PRODUCT_DWELL_ALARM = 'omnicrawl-shopee-warmup-product-dwell';
 const MAX_SHOPEE_IMAGE_READY_ROUNDS = 15;
+const SHOPEE_INCOGNITO_WARMUP_PRODUCT_DWELL_MS = 5000;
+
+// Anti-ban constants
+const SHOPEE_DETAIL_COOLDOWN_MIN_MS = 2000;
+const SHOPEE_DETAIL_COOLDOWN_MAX_MS = 5000;
+const SHOPEE_ERROR_BACKOFF_BASE_MS = 3000;
+const SHOPEE_ERROR_BACKOFF_MAX_MS = 30000;
+const SHOPEE_PROGRESSIVE_DELAY_PER_10_ITEMS_MS = 1000;
+const SHOPEE_PROGRESSIVE_DELAY_CAP_MS = 10000;
+const SHOPEE_MAX_REQUESTS_PER_MINUTE = 8;
+const shopeeRequestTimestamps = [];
 
 function waitFor(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function randomShopeeActionDelay() {
-  return SHOPEE_NAVIGATION_GAP_MIN_MS + Math.floor(
+  const baseDelay = SHOPEE_NAVIGATION_GAP_MIN_MS + Math.floor(
     Math.random() *
     (SHOPEE_NAVIGATION_GAP_MAX_MS - SHOPEE_NAVIGATION_GAP_MIN_MS + 1)
   );
+  const progressiveDelay = shopeeProgressiveDelay();
+  return baseDelay + progressiveDelay;
+}
+
+function shopeeProgressiveDelay() {
+  if (!activeJob) return 0;
+  const completed = Number(activeJob.detailCompleted || 0) +
+    Number(activeJob.detailFailed || 0);
+  const extra = Math.floor(completed / 10) * SHOPEE_PROGRESSIVE_DELAY_PER_10_ITEMS_MS;
+  return Math.min(extra, SHOPEE_PROGRESSIVE_DELAY_CAP_MS);
+}
+
+function shopeeErrorBackoff(consecutiveErrors) {
+  if (!consecutiveErrors || consecutiveErrors <= 0) return 0;
+  const delay = Math.min(
+    SHOPEE_ERROR_BACKOFF_BASE_MS * Math.pow(1.5, consecutiveErrors - 1),
+    SHOPEE_ERROR_BACKOFF_MAX_MS
+  );
+  const jitter = Math.floor(Math.random() * delay * 0.3);
+  return Math.round(delay + jitter);
+}
+
+function randomDetailCooldown() {
+  return SHOPEE_DETAIL_COOLDOWN_MIN_MS + Math.floor(
+    Math.random() *
+    (SHOPEE_DETAIL_COOLDOWN_MAX_MS - SHOPEE_DETAIL_COOLDOWN_MIN_MS + 1)
+  );
+}
+
+async function shopeeRateLimitGuard() {
+  const now = Date.now();
+  const oneMinuteAgo = now - 60000;
+  while (shopeeRequestTimestamps.length > 0 && shopeeRequestTimestamps[0] < oneMinuteAgo) {
+    shopeeRequestTimestamps.shift();
+  }
+  if (shopeeRequestTimestamps.length >= SHOPEE_MAX_REQUESTS_PER_MINUTE) {
+    const oldest = shopeeRequestTimestamps[0];
+    const waitMs = Math.max(0, oldest + 60000 - now) + 1000 + Math.floor(Math.random() * 2000);
+    await logJob(
+      `Rate limit guard: ${shopeeRequestTimestamps.length} requests in the last minute; ` +
+      `pausing for ${Math.round(waitMs / 1000)}s.`
+    );
+    await waitFor(waitMs);
+  }
+  shopeeRequestTimestamps.push(Date.now());
 }
 
 function waitForShopeeNavigationSlot(runId, itemId, worker) {
@@ -169,6 +226,7 @@ const stateReady = Promise.all([
     activeJob.trafficPausedAt = Number(activeJob.trafficPausedAt || 0);
     activeJob.trafficResumeInProgress = false;
     activeJob.lastShopeeNavigationAt = Number(activeJob.lastShopeeNavigationAt || 0);
+    activeJob.consecutiveDetailErrors = Number(activeJob.consecutiveDetailErrors || 0);
   }
 });
 
@@ -526,11 +584,41 @@ async function pauseShopeeForTrafficControl(reason) {
   }
   await logJob(
     `Shopee đang giới hạn lưu lượng${reason ? ` (${reason})` : ''}. ` +
-    'Run đã tạm dừng. Hãy giải quyết Captcha/Xác nhận trên trang Shopee để tự động tiếp tục cào.'
+    'Run đã tạm dừng. Hãy xử lý CAPTCHA/xác nhận, rồi dán lại link sản phẩm đang crawl vào thanh địa chỉ của tab crawl và nhấn Enter.'
   );
   const windowId = Number(activeJob.windowId);
   if (Number.isInteger(windowId) && windowId > 0) {
+    const tabId = Number(activeJob.tabId);
+    if (Number.isInteger(tabId) && tabId > 0) {
+      await chrome.tabs.update(tabId, { active: true }).catch(() => undefined);
+    }
     await chrome.windows.update(windowId, { focused: true }).catch(() => undefined);
+  }
+}
+
+function isCurrentShopeeProductUrl(value) {
+  if (!activeJob?.currentProduct?.itemId) return false;
+  try {
+    const url = new URL(String(value || ''));
+    if (!/(^|\.)shopee\.vn$/i.test(url.hostname)) return false;
+    const itemId = String(activeJob.currentProduct.itemId).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(
+      `(?:-i\\.\\d+\\.${itemId}(?:$|[/?])|/product/\\d+/${itemId}(?:$|/))`
+    ).test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function isShopeeProductPageUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return (
+      /(^|\.)shopee\.vn$/i.test(url.hostname) &&
+      (/\-i\.\d+\.\d+(?:$|[/?])/.test(url.pathname) || /\/product\/\d+(?:\/\d+)?(?:$|\/)/.test(url.pathname))
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -596,6 +684,15 @@ async function resumeShopeeAfterTrafficControl() {
   await logJob(
     'Trang Shopee đã hoạt động lại; tiếp tục từ hàng đợi đã tạm dừng.'
   );
+  if (activeJob.shopeeWarmupInProgress) {
+    activeJob.shopeeWarmupAwaitingUser = true;
+    activeJob.shopeeWarmupProductConfirmed = false;
+    await persistActiveJob();
+    await logJob(
+      'User đã giải quyết kiểm tra Shopee trong bước warm-up; hãy tự mở một sản phẩm trên trang chủ để tiếp tục.'
+    );
+    return;
+  }
   if (activeJob.phase === 'SEARCH') {
     activeJob.navigationScheduled = false;
     activeJob.scheduledPage = null;
@@ -610,10 +707,7 @@ async function resumeShopeeAfterTrafficControl() {
   if (activeJob.phase === 'DETAIL' && activeJob.currentProduct) {
     activeJob.detailHandledFor = null;
     activeJob.reviewRequestedFor = null;
-    await waitFor(randomShopeeActionDelay());
-    await chrome.tabs.update(activeJob.tabId, {
-      url: activeJob.currentProduct.url
-    });
+    await logJob('Đã nhận tab crawl đang mở lại sản phẩm sau CAPTCHA; tiếp tục nhận dữ liệu trang hiện tại.');
     armPageTimeout(DETAIL_TIMEOUT_MS);
   }
 }
@@ -631,6 +725,63 @@ function platformTabPatterns(job) {
   return job?.platform === 'tiktok'
     ? ['https://*.tiktok.com/*']
     : ['https://shopee.vn/*', 'https://*.shopee.vn/*'];
+}
+
+async function createFreshShopeeDetailTab(productUrl) {
+  if (!activeJob?.windowId) return null;
+  const detailTab = await chrome.tabs.create({
+    windowId: Number(activeJob.windowId),
+    url: productUrl,
+    active: true
+  });
+  if (!detailTab?.id) return null;
+  activeJob.tabId = detailTab.id;
+  await persistActiveJob();
+  return detailTab;
+}
+
+async function beginShopeeManualWarmup(tabId, reason, continuation) {
+  if (!activeJob || activeJob.platform !== 'shopee') return;
+  activeJob.shopeeWarmupInProgress = true;
+  activeJob.shopeeWarmupAwaitingUser = true;
+  activeJob.shopeeWarmupProductConfirmed = false;
+  activeJob.shopeeWarmupContinuation = continuation;
+  activeJob.shopeeWarmupTabId = tabId;
+  await chrome.alarms.clear(SHOPEE_WARMUP_PRODUCT_DWELL_ALARM).catch(() => undefined);
+  await persistActiveJob();
+  await chrome.tabs.update(tabId, { active: true }).catch(() => undefined);
+  if (activeJob.windowId) {
+    await chrome.windows.update(Number(activeJob.windowId), { focused: true }).catch(() => undefined);
+  }
+  await logJob(
+    `${reason}: hãy tự chọn một sản phẩm trực tiếp trên trang kết quả tìm kiếm Shopee. ` +
+    'Sau khi tab này tải xong sản phẩm, OmniCrawl sẽ chờ 5 giây rồi tự mở tab crawl chi tiết.'
+  );
+}
+
+async function continueAfterShopeeManualWarmup() {
+  if (!activeJob?.shopeeWarmupInProgress || !activeJob.shopeeWarmupProductConfirmed) return;
+  const warmupTabId = Number(activeJob.shopeeWarmupTabId);
+  const tab = Number.isInteger(warmupTabId) && warmupTabId > 0
+    ? await chrome.tabs.get(warmupTabId).catch(() => null)
+    : null;
+  if (!isShopeeProductPageUrl(tab?.url)) {
+    activeJob.shopeeWarmupAwaitingUser = true;
+    activeJob.shopeeWarmupProductConfirmed = false;
+    await persistActiveJob();
+    await logJob('Warm-up: tab 1 không còn ở trang sản phẩm; đang chờ bạn click lại một sản phẩm trên trang chủ.');
+    return;
+  }
+  activeJob.shopeeWarmupInProgress = false;
+  activeJob.shopeeWarmupAwaitingUser = false;
+  activeJob.shopeeWarmupProductConfirmed = false;
+  activeJob.shopeeWarmupTabId = null;
+  activeJob.shopeeWarmupContinuation = null;
+  activeJob.pendingFreshDetailTab = true;
+  activeJob.tabId = null;
+  await persistActiveJob();
+  await logJob('Warm-up hoàn tất: mở tab crawl mới trực tiếp bằng link sản phẩm trong hàng đợi.');
+  await navigateNextDetail();
 }
 
 async function createCrawlerWindow(job) {
@@ -2615,6 +2766,7 @@ async function assignNextShopeeProduct(worker) {
   try {
     const runId = activeJob.runId;
     const itemId = String(product.itemId);
+    await shopeeRateLimitGuard();
     if (!await waitForShopeeNavigationSlot(runId, itemId, worker)) return;
     await chrome.tabs.update(worker.tabId, { url: product.url });
     armDetailWorkerDeadline(worker);
@@ -2654,6 +2806,15 @@ async function patchShopeeDetailWorker(worker, detail) {
   };
   activeJob.detailCompleted = projected.completed;
   activeJob.detailFailed = projected.failed;
+
+  // Anti-ban: cooldown between detail completions
+  const cooldown = randomDetailCooldown();
+  await logJob(
+    `Anti-ban cooldown: waiting ${Math.round(cooldown / 1000)}s before next product.`
+  );
+  await waitFor(cooldown);
+  if (!activeJob || activeJob.authPaused || activeJob.trafficPaused) return;
+
   await assignNextShopeeProduct(worker);
 }
 
@@ -2663,6 +2824,8 @@ async function completeShopeeDetailWorker(worker, detail) {
   if (worker.detailHandledFor === key) return;
   worker.detailHandledFor = key;
   clearDetailWorkerTimer(worker);
+  // Reset consecutive error counter on success
+  activeJob.consecutiveDetailErrors = 0;
   await persistActiveJob();
   await patchShopeeDetailWorker(worker, { ...detail, detailStatus: 'COMPLETED' });
 }
@@ -2731,6 +2894,19 @@ async function failShopeeDetailWorker(worker, error) {
   worker.detailHandledFor = key;
   clearDetailWorkerTimer(worker);
   if (await requeueShopeeDetailWorker(worker, error)) return;
+
+  // Anti-ban: exponential backoff on consecutive errors
+  activeJob.consecutiveDetailErrors = Number(activeJob.consecutiveDetailErrors || 0) + 1;
+  const backoff = shopeeErrorBackoff(activeJob.consecutiveDetailErrors);
+  if (backoff > 0) {
+    await logJob(
+      `Anti-ban backoff: ${activeJob.consecutiveDetailErrors} consecutive error(s); ` +
+      `waiting ${Math.round(backoff / 1000)}s before next product.`
+    );
+    await waitFor(backoff);
+    if (!activeJob || activeJob.authPaused || activeJob.trafficPaused) return;
+  }
+
   await persistActiveJob();
   await patchShopeeDetailWorker(worker, {
     detailStatus: 'FAILED',
@@ -2994,7 +3170,7 @@ async function beginDetailPhase() {
 
   const crawlerWindow = await chrome.windows.create({
     incognito: true,
-    url: 'https://shopee.vn/',
+    url: searchUrlForJob(activeJob, 0),
     type: 'normal',
     focused: false,
     width: 1100,
@@ -3012,9 +3188,6 @@ async function beginDetailPhase() {
 
   activeJob.tabId = tab.id;
   activeJob.windowId = crawlerWindow.id;
-
-  await logJob('Đang chờ 6 giây để trang chủ Shopee tải hoàn tất và thiết lập Cookie...');
-  await new Promise((resolve) => setTimeout(resolve, 6000));
 
   activeJob.navigationScheduled = false;
   activeJob.searchImageReadyScheduled = false;
@@ -3044,7 +3217,7 @@ async function beginDetailPhase() {
       : `Starting ${platformLabel(activeJob)} detail and review crawl for ` +
       `${activeJob.products.length} items.`
   );
-  await navigateNextDetail();
+  await beginShopeeManualWarmup(tab.id, 'Warm-up cửa sổ ẩn danh mới', 'INITIAL');
 }
 
 async function navigateNextDetail() {
@@ -3060,7 +3233,7 @@ async function navigateNextDetail() {
     const oldWindowId = activeJob.windowId;
     const crawlerWindow = await chrome.windows.create({
       incognito: true,
-      url: 'https://shopee.vn/',
+      url: searchUrlForJob(activeJob, 0),
       type: 'normal',
       focused: false,
       width: 1100,
@@ -3070,16 +3243,18 @@ async function navigateNextDetail() {
     });
 
     const tab = crawlerWindow.tabs?.[0];
-    if (tab?.id && crawlerWindow.id) {
-      activeJob.tabId = tab.id;
-      activeJob.windowId = crawlerWindow.id;
-      if (oldWindowId) {
-        await chrome.windows.remove(Number(oldWindowId)).catch(() => undefined);
-      }
+    if (!tab?.id || !crawlerWindow.id) {
+      await finishJob(false, 'Không thể tạo cửa sổ ẩn danh mới để tiếp tục lấy chi tiết Shopee.');
+      return;
+    }
+    activeJob.tabId = tab.id;
+    activeJob.windowId = crawlerWindow.id;
+    if (oldWindowId) {
+      await chrome.windows.remove(Number(oldWindowId)).catch(() => undefined);
     }
     await persistActiveJob();
-    await logJob('Đang chờ 6 giây để trang chủ Shopee tải hoàn tất và thiết lập Cookie...');
-    await new Promise((resolve) => setTimeout(resolve, 6000));
+    await beginShopeeManualWarmup(tab.id, `Warm-up sau ${activeJob.detailIndex} sản phẩm`, 'ROTATION');
+    return;
   }
 
   clearPageTimeout();
@@ -3099,6 +3274,27 @@ async function navigateNextDetail() {
   activeJob.reviewDomFinal = false;
   activeJob.reviewDomRetryRounds = 0;
   activeJob.reviewPageReloads = 0;
+  const needsFreshDetailTab = Boolean(activeJob.pendingFreshDetailTab);
+  if (needsFreshDetailTab) {
+    activeJob.navigationScheduled = true;
+    await persistActiveJob();
+    try {
+      const detailTab = await createFreshShopeeDetailTab(product.url);
+      if (!detailTab?.id) {
+        throw new Error('Không thể tạo tab mới cho giai đoạn lấy chi tiết Shopee.');
+      }
+      activeJob.pendingFreshDetailTab = false;
+      activeJob.navigationScheduled = false;
+      await persistActiveJob();
+      await logJob(
+        `Đã mở tab crawl mới trực tiếp ở sản phẩm ${activeJob.detailIndex + 1}/${activeJob.products.length}.`
+      );
+      armPageTimeout(DETAIL_TIMEOUT_MS);
+    } catch (error) {
+      void failCurrentDetail(error?.message || 'Không thể mở tab crawl Shopee.');
+    }
+    return;
+  }
   activeJob.navigationScheduled = true;
   const runId = activeJob.runId;
   const productIndex = activeJob.detailIndex;
@@ -4617,13 +4813,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const blockedUrl = String(message.url || '');
         if (/\/verify\/traffic\/error/i.test(blockedUrl)) {
           if (activeJob.phase === 'DETAIL') {
-            const worker = shopeeDetailWorker(sender.tab?.id);
-            const reason = 'Phiên ẩn danh bị Shopee traffic-control; không dùng cookie hoặc đăng nhập tài khoản để tiếp tục.';
-            if (worker) {
-              void failShopeeDetailWorker(worker, reason).catch(() => undefined);
-            } else {
-              void failCurrentDetail(reason).catch(() => undefined);
-            }
+            void pauseShopeeForTrafficControl(
+              'Shopee yêu cầu CAPTCHA/xác nhận trong cửa sổ chi tiết; hãy tự giải rồi hệ thống sẽ tiếp tục.'
+            ).catch(() => undefined);
           } else {
             void pauseShopeeForTrafficControl('Shopee hiển thị traffic error khi tìm kiếm bằng phiên thường.').catch(() => undefined);
           }
@@ -4633,12 +4825,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               if (!retried) finishJob(false, 'Shopee chặn trang tìm kiếm.');
             }).catch(() => undefined);
           } else {
-            const worker = shopeeDetailWorker(sender.tab?.id);
-            if (worker) {
-              void failShopeeDetailWorker(worker, 'Trang bị chặn (Yêu cầu đăng nhập/CAPTCHA).').catch(() => undefined);
-            } else {
-              void failCurrentDetail('Trang bị chặn (Yêu cầu đăng nhập/CAPTCHA).').catch(() => undefined);
-            }
+            void pauseShopeeForTrafficControl(
+              'Shopee yêu cầu đăng nhập/CAPTCHA trong cửa sổ chi tiết; hãy tự giải rồi hệ thống sẽ tiếp tục.'
+            ).catch(() => undefined);
           }
         }
       } else {
@@ -4759,6 +4948,21 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status !== 'complete') return;
   if (
+    activeJob?.shopeeWarmupInProgress &&
+    activeJob.shopeeWarmupAwaitingUser &&
+    Number(activeJob.shopeeWarmupTabId) === Number(tabId) &&
+    isShopeeProductPageUrl(tab?.url || changeInfo.url)
+  ) {
+    activeJob.shopeeWarmupAwaitingUser = false;
+    activeJob.shopeeWarmupProductConfirmed = true;
+    void persistActiveJob();
+    void logJob('Warm-up: đã xác nhận tab 1 mở sản phẩm từ trang chủ; chờ 5 giây trước khi tạo tab crawl.');
+    chrome.alarms.create(SHOPEE_WARMUP_PRODUCT_DWELL_ALARM, {
+      when: Date.now() + SHOPEE_INCOGNITO_WARMUP_PRODUCT_DWELL_MS
+    });
+    return;
+  }
+  if (
     activeJob?.trafficPaused &&
     (
       Number(activeJob.tabId) === Number(tabId) ||
@@ -4777,7 +4981,13 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     } catch {
       isSafeShopeePage = false;
     }
-    if (isSafeShopeePage) {
+    const isWarmup = Boolean(activeJob.shopeeWarmupInProgress);
+    const isManualDetailRetry = (
+      activeJob.phase === 'DETAIL' &&
+      !isWarmup &&
+      isCurrentShopeeProductUrl(url)
+    );
+    if (isSafeShopeePage && (isWarmup || isManualDetailRetry || activeJob.phase === 'SEARCH')) {
       setTimeout(() => {
         enqueueDetailMessage(
           () => resumeShopeeAfterTrafficControl(),
@@ -4861,6 +5071,13 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     enqueueSearchMessage(
       () => maybeBeginDetailAfterShopeeImages(),
       'Không thể kiểm tra độ phủ ảnh sản phẩm Shopee.'
+    );
+    return;
+  }
+  if (alarm.name === SHOPEE_WARMUP_PRODUCT_DWELL_ALARM) {
+    enqueueDetailMessage(
+      () => continueAfterShopeeManualWarmup(),
+      'Không thể tiếp tục sau khi tab warm-up đã mở sản phẩm Shopee.'
     );
     return;
   }

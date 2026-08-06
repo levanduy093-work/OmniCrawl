@@ -628,6 +628,14 @@ function scrapeRenderedProductDetail() {
     .trim()
     .slice(0, 50000) || '';
   const ratingMatch = bodyText.slice(0, 12000).match(/([1-5](?:[.,]\d)?)\s*(?:\/\s*5|stars?|sao)/i);
+  const headerText = bodyText.slice(0, 12000);
+  const ratingCountMatch = (
+    headerText.match(/(\d+(?:[.,]\d+)?\s*(?:k|nghìn)?)\s*(?:ratings?|đánh giá|lượt đánh giá)/i) ||
+    headerText.match(/(?:ratings?|đánh giá|lượt đánh giá)\s*[:(]?\s*(\d+(?:[.,]\d+)?\s*(?:k|nghìn)?)/i)
+  );
+  const ratingCount = ratingCountMatch
+    ? compactReviewCount(ratingCountMatch[1])
+    : null;
   const sold = renderedSoldValue(bodyText.slice(0, 12000));
   const metaImage = document.querySelector('meta[property="og:image"]')?.content ||
                     document.querySelector('meta[name="twitter:image"]')?.content;
@@ -701,6 +709,7 @@ function scrapeRenderedProductDetail() {
     title,
     description,
     rating: ratingMatch ? Number(ratingMatch[1].replace(',', '.')) : null,
+    ratingCount,
     sold: sold || null,
     images,
     _galleryComplete: false

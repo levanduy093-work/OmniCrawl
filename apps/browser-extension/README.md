@@ -19,6 +19,14 @@ When the Shopee option
 collected product in sequence and captures description, rating, stock, shop,
 images, attributes, and variations. It stores the product's average rating and
 total rating count, but never requests, paginates, or stores customer comments.
+When a fresh Incognito window is created for detail collection, its first tab
+opens the Shopee search page using the job keyword. The user opens one search
+result in that first tab; it is not navigated from the queued detail link.
+After the product URL is confirmed and remains open for five seconds,
+OmniCrawl creates a separate tab in that same window for the queued
+product-detail links. If Shopee shows a login or CAPTCHA page during this step
+or detail collection, the queue pauses and the user must resolve it in the
+visible Incognito window before the run resumes.
 Product galleries are accepted only from image lists scoped to the current
 Shopee `itemId`. The rendered-page fallback stays inside the product header and
 rejects links to other product IDs, so recommendation images are not mixed in.

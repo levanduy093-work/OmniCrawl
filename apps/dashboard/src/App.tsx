@@ -20,7 +20,7 @@ import Login from './Login'
 import OmniCrawlLogo from './Logo'
 import './App.css'
 
-const REQUIRED_BROWSER_AGENT_VERSION = '0.11.12'
+const REQUIRED_BROWSER_AGENT_VERSION = '0.11.20'
 
 type ProxyConfig = {
   enabled: boolean
