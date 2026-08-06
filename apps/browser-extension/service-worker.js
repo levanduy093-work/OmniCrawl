@@ -3292,14 +3292,36 @@ async function failCurrentDetail(error) {
 
   const maxRetries = 2;
   activeJob.currentDetailRetries = activeJob.currentDetailRetries || 0;
+  const pageUnavailable = /page\s+unavailable|something went wrong/i.test(String(error || ''));
 
   if (activeJob.currentDetailRetries < maxRetries) {
     activeJob.currentDetailRetries += 1;
-    await logJob(`[RETRY] Lỗi cào sản phẩm, có thể do bị chặn. Thử lại lần ${activeJob.currentDetailRetries}/${maxRetries} sau 3 giây...`);
+    await logJob(
+      pageUnavailable
+        ? `[RETRY] Shopee hiển thị Page Unavailable. Thử lại lần ${activeJob.currentDetailRetries}/${maxRetries} bằng phiên tab khác.`
+        : `[RETRY] Lỗi cào sản phẩm, có thể do bị chặn. Thử lại lần ${activeJob.currentDetailRetries}/${maxRetries} sau 3 giây...`
+    );
     activeJob.navigationScheduled = false;
     await persistActiveJob();
 
-    setTimeout(() => {
+    setTimeout(async () => {
+      if (!activeJob?.currentProduct || activeJob.phase !== 'DETAIL') return;
+      if (pageUnavailable && activeJob.currentDetailRetries === 1) {
+        try {
+          const rotated = await rotateShopeeCrawlerWindow('Shopee Page Unavailable');
+          if (rotated) {
+            await logJob('[RETRY] Đã chuyển phiên từ tab ẩn danh sang tab thường (hoặc ngược lại) rồi mở lại sản phẩm.');
+            await navigateNextDetail();
+            return;
+          }
+        } catch (rotationError) {
+          await logJob(
+            `[RETRY] Không thể đổi phiên tab sau Page Unavailable: ${
+              rotationError?.message || String(rotationError)
+            }`
+          );
+        }
+      }
       if (activeJob.currentDetailRetries >= 2) {
         const oldTabId = activeJob.tabId;
         const productUrl = (activeJob.currentProduct?.url || '').split('?')[0];
@@ -3320,7 +3342,7 @@ async function failCurrentDetail(error) {
           navigateNextDetail();
         });
       } else {
-        navigateNextDetail();
+        await navigateNextDetail();
       }
     }, 3000);
     return;
@@ -4512,6 +4534,7 @@ async function poll() {
       pageNewItemCounts: {},
       pageRetryCounts: {},
       itemImages: {},
+      useIncognito: true,
       searchImageReadyRounds: 0,
       searchImageReadyScheduled: false,
       pageDeadline: Date.now() + searchTimeoutForJob(job)
@@ -4697,6 +4720,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             error instanceof Error ? error.message : 'Không thể xử lý dữ liệu.'
           ).catch(() => undefined);
         });
+      }
+    } else if (
+      message.type === 'SHOPEE_PAGE_UNAVAILABLE' &&
+      activeJob?.platform === 'shopee' &&
+      activeJob.phase === 'DETAIL'
+    ) {
+      const worker = shopeeDetailWorker(sender.tab?.id);
+      const error = 'Shopee hiển thị Page Unavailable.';
+      if (worker) {
+        enqueueDetailMessage(
+          () => failShopeeDetailWorker(worker, error),
+          'Không thể thử lại tab Shopee bị Page Unavailable.'
+        );
+      } else if (Number(sender.tab?.id) === Number(activeJob.tabId)) {
+        void failCurrentDetail(error).catch(() => undefined);
       }
     } else if (message.type === 'SHOPEE_DOM_ITEMS' || message.type === 'TIKTOK_DOM_ITEMS') {
       enqueueSearchMessage(

@@ -278,10 +278,20 @@ function sanitizeDetailPatch(value: any) {
   const status = value?.detailStatus === 'FAILED' ? 'FAILED' : 'COMPLETED';
   if (status === 'FAILED') {
     return {
+      itemId: text(value?.itemId, 200),
+      shopId: text(value?.shopId, 200),
+      title: text(value?.title, 2000),
+      url: text(value?.url, 4000),
+      image: text(value?.image, 4000),
+      price: text(value?.price, 200),
+      rating: number(value?.rating),
+      ratingCount: number(value?.ratingCount),
+      sold: soldValue(value?.sold),
+      shopName: text(value?.shopName, 1000),
       detailStatus: status,
       detailError: text(value?.detailError, 1000),
       detailCrawledAt: new Date().toISOString()
-    };
+    } as Record<string, unknown>;
   }
   const detail: Record<string, unknown> = {
     description: text(value?.description, 50_000),
@@ -1058,7 +1068,10 @@ app.patch('/api/browser-agent/jobs/:id/items/:itemId', requireAuth, async (req: 
     ) as Record<string, unknown>;
     let updated = true;
     if (detail.detailStatus === 'FAILED') {
-      await dataset.deleteData(String(req.params.itemId));
+      updated = await dataset.moveDataToFailedProducts(
+        String(req.params.itemId),
+        detail
+      );
     } else {
       updated = await dataset.updateData(String(req.params.itemId), detail);
       if (!updated) return res.status(404).json({ error: 'Product was not found in this run' });
@@ -1311,19 +1324,43 @@ app.get('/api/runs/:id/items', requireAuth, async (req: any, res: any) => {
   if (!run) return res.status(404).json({ error: 'Run not found' });
 
   const whereClause: any = { runId: run.id };
-  if (filterStatus) {
+  if (filterStatus && filterStatus !== 'FAILED') {
     whereClause.data = { path: ['detailStatus'], equals: filterStatus };
   }
 
-  const totalCount = filterStatus ? await prisma.datasetItem.count({ where: whereClause }) : run.itemCount;
+  const failedProducts = Array.isArray((run.outputMetadata as any)?.failedProducts)
+    ? (run.outputMetadata as any).failedProducts
+      .filter((entry: any) => entry && typeof entry === 'object' && !Array.isArray(entry))
+      .sort((left: any, right: any) => Number(left.position || 0) - Number(right.position || 0))
+    : [];
+  const totalCount = filterStatus === 'FAILED'
+    ? failedProducts.length
+    : filterStatus
+      ? await prisma.datasetItem.count({ where: whereClause })
+      : run.itemCount;
 
-  const items = await prisma.datasetItem.findMany({
-    where: whereClause,
-    orderBy: { position: 'asc' },
-    skip: (page - 1) * pageSize,
-    take: pageSize,
-    select: { id: true, position: true, data: true, createdAt: true }
-  });
+  const items = filterStatus === 'FAILED'
+    ? failedProducts
+      .slice((page - 1) * pageSize, page * pageSize)
+      .map((failed: any, index: number) => ({
+        id: `failed:${String(failed.externalKey || index)}`,
+        position: Number(failed.position || index),
+        createdAt: failed.failedAt || run.finishedAt || run.createdAt,
+        data: compactActorRecord(run.actor.name, {
+          ...(failed.data && typeof failed.data === 'object' ? failed.data : {}),
+          detailStatus: 'FAILED',
+          detailError: String(
+            failed?.data?.detailError || failed.detailError || 'Không lấy được chi tiết sản phẩm.'
+          )
+        })
+      }))
+    : await prisma.datasetItem.findMany({
+      where: whereClause,
+      orderBy: { position: 'asc' },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+      select: { id: true, position: true, data: true, createdAt: true }
+    });
   res.json({
     run: {
       id: run.id,
@@ -1351,7 +1388,7 @@ app.get('/api/runs/:id/items', requireAuth, async (req: any, res: any) => {
       total: totalCount,
       totalPages: Math.max(1, Math.ceil(totalCount / pageSize))
     },
-    items: items.map((item) => ({
+    items: items.map((item: any) => ({
       id: item.id,
       position: item.position,
       createdAt: item.createdAt,
@@ -1378,11 +1415,16 @@ app.get('/api/runs/:id/export', requireAuth, async (req: any, res: any) => {
   if (format === 'jsonl') {
     res.type('application/x-ndjson');
     let cursor = -1;
+    const { failedProducts: _failedProducts, ...exportMetadata } = (
+      run.outputMetadata && typeof run.outputMetadata === 'object' && !Array.isArray(run.outputMetadata)
+        ? run.outputMetadata as Record<string, unknown>
+        : {}
+    );
     const lineage = {
       _runId: run.id,
       _actor: run.actor.name,
       _createdAt: run.createdAt,
-      ...(run.outputMetadata ? { _metadata: run.outputMetadata } : {})
+      ...(Object.keys(exportMetadata).length ? { _metadata: exportMetadata } : {})
     };
     
     while (true) {

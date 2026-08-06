@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "OmniCrawl Browser Agent",
-  "version": "0.11.22",
+  "version": "0.11.23",
   "description": "Runs OmniCrawl jobs inside your authenticated browser without exporting cookies.",
   "permissions": ["tabs", "windows", "storage", "alarms", "cookies", "proxy", "webRequest", "webRequestAuthProvider"],
   "host_permissions": [

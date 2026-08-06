@@ -6,6 +6,28 @@ window.addEventListener('omnicrawl:shopee-response', (event) => {
   }).catch(() => undefined);
 });
 
+let pageUnavailableReported = false;
+
+function reportShopeePageUnavailable() {
+  if (pageUnavailableReported || !location.pathname.includes('/product/')) return;
+  const pageText = (document.body?.innerText || document.body?.textContent || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!/page\s+unavailable/i.test(pageText) || !/something\s+went\s+wrong/i.test(pageText)) return;
+  pageUnavailableReported = true;
+  chrome.runtime.sendMessage({
+    type: 'SHOPEE_PAGE_UNAVAILABLE',
+    url: location.href
+  }).catch(() => undefined);
+}
+
+document.addEventListener('DOMContentLoaded', reportShopeePageUnavailable, { once: true });
+new MutationObserver(reportShopeePageUnavailable).observe(document.documentElement, {
+  childList: true,
+  subtree: true,
+  characterData: true
+});
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'REQUEST_SHOPEE_SEARCH_RESCAN') {
     void rescanRenderedShopeeProducts(Number(message.round || 0))
