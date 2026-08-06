@@ -175,6 +175,7 @@ function App() {
   const [runDetail, setRunDetail] = useState<any>(null)
   const [runDetailPage, setRunDetailPage] = useState(1)
   const [runDetailLoading, setRunDetailLoading] = useState(false)
+  const [runDetailStatus, setRunDetailStatus] = useState<string | undefined>(undefined)
 
   const handleLogout = useCallback(() => {
     localStorage.removeItem('token')
@@ -398,10 +399,11 @@ function App() {
     fetchLogs(id);
   }
 
-  const fetchRunDetail = useCallback(async (id: string, page = 1) => {
+  const fetchRunDetail = useCallback(async (id: string, page = 1, status?: string) => {
     setRunDetailLoading(true)
     try {
-      const res = await fetch(`http://localhost:3001/api/runs/${id}/items?page=${page}&pageSize=25`, {
+      const qs = status ? `&status=${status}` : '';
+      const res = await fetch(`http://localhost:3001/api/runs/${id}/items?page=${page}&pageSize=25${qs}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       })
       const data = await res.json()
@@ -419,12 +421,14 @@ function App() {
     setRunDetailOpen(true)
     setRunDetail(null)
     setRunDetailPage(1)
+    setRunDetailStatus(undefined)
     fetchRunDetail(id, 1)
   }
 
-  const downloadRunOutput = async (id: string, format: 'json' | 'csv') => {
+  const downloadRunOutput = async (id: string, format: 'json' | 'jsonl', status?: 'COMPLETED' | 'FAILED') => {
     try {
-      const res = await fetch(`http://localhost:3001/api/runs/${id}/export?format=${format}`, {
+      const qs = status ? `&status=${status}` : '';
+      const res = await fetch(`http://localhost:3001/api/runs/${id}/export?format=${format}${qs}`, {
         headers: { 'Authorization': `Bearer ${token}` }
       })
       if (!res.ok) {
@@ -845,8 +849,16 @@ function App() {
           detail={runDetail}
           loading={runDetailLoading}
           page={runDetailPage}
-          onPageChange={(page) => runDetail?.run?.id && fetchRunDetail(runDetail.run.id, page)}
-          onDownload={(format) => runDetail?.run?.id && downloadRunOutput(runDetail.run.id, format)}
+          status={runDetailStatus}
+          onStatusChange={(status) => {
+             setRunDetailStatus(status)
+             if (runDetail?.run?.id) {
+               setRunDetailPage(1)
+               fetchRunDetail(runDetail.run.id, 1, status)
+             }
+          }}
+          onPageChange={(page) => runDetail?.run?.id && fetchRunDetail(runDetail.run.id, page, runDetailStatus)}
+          onDownload={(format, status) => runDetail?.run?.id && downloadRunOutput(runDetail.run.id, format, status)}
           onClose={() => setRunDetailOpen(false)}
         />
       )}
@@ -885,8 +897,10 @@ function RunDetailModal({
   detail: any
   loading: boolean
   page: number
+  status?: string
+  onStatusChange: (status?: string) => void
   onPageChange: (page: number) => void
-  onDownload: (format: 'json' | 'csv') => void
+  onDownload: (format: 'json' | 'jsonl', status?: 'COMPLETED' | 'FAILED') => void
   onClose: () => void
 }) {
   const [galleryState, setGalleryState] = useState<{ images: string[]; index: number } | null>(null)
@@ -1198,34 +1212,47 @@ function RunDetailModal({
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
       <div className="bg-white w-full max-w-[94vw] h-[90vh] rounded-3xl shadow-2xl flex flex-col overflow-hidden">
-        <div className="flex justify-between items-start gap-4 p-6 border-b border-gray-100">
-          <div>
-            <div className="flex items-center gap-3">
-              <h2 className="text-xl font-semibold text-gray-900">Run data</h2>
-              {detail?.run?.status && (
-                <span className={`px-3 py-1 rounded-full text-xs font-semibold ${
-                  detail.run.status === 'SUCCESS'
-                    ? 'bg-green-100 text-green-700'
-                    : detail.run.status === 'PARTIAL'
-                      ? 'bg-amber-100 text-amber-700'
-                      : detail.run.status === 'FAILED'
-                        ? 'bg-red-100 text-red-700'
-                        : 'bg-gray-100 text-gray-700'
-                }`}>
-                  {detail.run.status}
-                </span>
-              )}
+        <div className="flex flex-col border-b border-gray-100">
+          <div className="flex justify-between items-start gap-4 p-6 pb-4">
+            <div>
+              <div className="flex items-center gap-3">
+                <h2 className="text-xl font-semibold text-gray-900">Run data</h2>
+                {detail?.run?.status && (
+                  <span className={`px-3 py-1 rounded-full text-xs font-semibold ${
+                    detail.run.status === 'SUCCESS'
+                      ? 'bg-green-100 text-green-700'
+                      : detail.run.status === 'PARTIAL'
+                        ? 'bg-amber-100 text-amber-700'
+                        : detail.run.status === 'FAILED'
+                          ? 'bg-red-100 text-red-700'
+                          : 'bg-gray-100 text-gray-700'
+                  }`}>
+                    {detail.run.status}
+                  </span>
+                )}
+              </div>
+              <p className="mt-1 text-xs font-mono text-gray-400">{detail?.run?.id}</p>
             </div>
-            <p className="mt-1 text-xs font-mono text-gray-400">{detail?.run?.id}</p>
+            <div className="flex items-center gap-2">
+              <button onClick={() => onDownload('jsonl')} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-purple-50 text-purple-700 text-sm font-medium" title="Tải JSON Lines">
+                <FileJson size={16} /> JSONL
+              </button>
+              <button onClick={onClose} className="ml-2 text-gray-400 hover:text-gray-800 text-2xl">×</button>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <button onClick={() => onDownload('json')} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-50 text-blue-700 text-sm font-medium">
-              <FileJson size={16} /> JSON
+          <div className="flex items-center gap-6 px-6">
+            <button 
+              onClick={() => onStatusChange(undefined)} 
+              className={`pb-3 text-sm font-medium border-b-2 transition-colors ${!status ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+            >
+              Tất cả sản phẩm
             </button>
-            <button onClick={() => onDownload('csv')} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-50 text-emerald-700 text-sm font-medium">
-              <FileSpreadsheet size={16} /> CSV
+            <button 
+              onClick={() => onStatusChange('FAILED')} 
+              className={`pb-3 text-sm font-medium border-b-2 transition-colors ${status === 'FAILED' ? 'border-red-600 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+            >
+              Sản phẩm lỗi
             </button>
-            <button onClick={onClose} className="ml-2 text-gray-400 hover:text-gray-800 text-2xl">×</button>
           </div>
         </div>
 

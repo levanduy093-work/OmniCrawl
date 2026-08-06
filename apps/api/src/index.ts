@@ -1314,14 +1314,22 @@ app.get('/api/runs/:id/items', requireAuth, async (req: any, res: any) => {
     100,
     Math.max(1, Number.parseInt(String(req.query.pageSize || '25'), 10) || 25)
   );
+  const filterStatus = req.query.status ? String(req.query.status) : undefined;
   const run = await prisma.run.findFirst({
     where: { id: req.params.id, userId: req.user.id },
     include: { actor: true }
   });
   if (!run) return res.status(404).json({ error: 'Run not found' });
 
+  const whereClause: any = { runId: run.id };
+  if (filterStatus) {
+    whereClause.data = { path: ['detailStatus'], equals: filterStatus };
+  }
+
+  const totalCount = filterStatus ? await prisma.datasetItem.count({ where: whereClause }) : run.itemCount;
+
   const items = await prisma.datasetItem.findMany({
-    where: { runId: run.id },
+    where: whereClause,
     orderBy: { position: 'asc' },
     skip: (page - 1) * pageSize,
     take: pageSize,
@@ -1351,8 +1359,8 @@ app.get('/api/runs/:id/items', requireAuth, async (req: any, res: any) => {
     pagination: {
       page,
       pageSize,
-      total: run.itemCount,
-      totalPages: Math.max(1, Math.ceil(run.itemCount / pageSize))
+      total: totalCount,
+      totalPages: Math.max(1, Math.ceil(totalCount / pageSize))
     },
     items: items.map((item) => ({
       id: item.id,
@@ -1364,10 +1372,11 @@ app.get('/api/runs/:id/items', requireAuth, async (req: any, res: any) => {
 });
 
 app.get('/api/runs/:id/export', requireAuth, async (req: any, res: any) => {
-  const format = String(req.query.format || 'json').toLowerCase();
-  if (!['json', 'csv'].includes(format)) {
-    return res.status(400).json({ error: 'Format must be json or csv' });
+  const format = String(req.query.format || 'jsonl').toLowerCase();
+  if (format !== 'jsonl') {
+    return res.status(400).json({ error: 'Format must be jsonl' });
   }
+  const filterStatus = req.query.status ? String(req.query.status) : undefined;
   const run = await prisma.run.findFirst({
     where: { id: req.params.id, userId: req.user.id },
     include: { actor: true }
@@ -1376,25 +1385,17 @@ app.get('/api/runs/:id/export', requireAuth, async (req: any, res: any) => {
 
   const filename = `omnicrawl-${run.actor.name}-${run.id}.${format}`;
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  if (format === 'json') {
-    res.type('application/json');
-    const envelope = {
-      schemaVersion: '2.0',
-      kind: RUN_OUTPUT_KIND,
-      runId: run.id,
-      actor: { id: run.actor.id, name: run.actor.name, version: run.actor.version },
-      status: run.status,
-      createdAt: run.createdAt,
-      updatedAt: run.updatedAt,
-      completedAt: run.finishedAt,
-      stats: { itemCount: run.itemCount },
-      metadata: run.outputMetadata ?? {},
-      error: run.outputError
-    };
-    const prefix = JSON.stringify(envelope, null, 2).replace(/\n}$/, ',\n  "items": [\n');
-    res.write(prefix);
+
+  if (format === 'jsonl') {
+    res.type('application/x-ndjson');
     let cursor = -1;
-    let first = true;
+    const lineage = {
+      _runId: run.id,
+      _actor: run.actor.name,
+      _createdAt: run.createdAt,
+      ...(run.outputMetadata ? { _metadata: run.outputMetadata } : {})
+    };
+    
     while (true) {
       const batch = await prisma.datasetItem.findMany({
         where: { runId: run.id, position: { gt: cursor } },
@@ -1404,60 +1405,23 @@ app.get('/api/runs/:id/export', requireAuth, async (req: any, res: any) => {
       });
       if (!batch.length) break;
       for (const item of batch) {
-        res.write(
-          `${first ? '' : ',\n'}    ${JSON.stringify(
-            compactActorRecord(run.actor.name, item.data)
-          )}`
-        );
-        first = false;
+        const compacted = compactActorRecord(run.actor.name, item.data);
+        const record = compacted && typeof compacted === 'object' && !Array.isArray(compacted)
+          ? compacted as Record<string, unknown>
+          : { value: compacted };
+          
+        if (filterStatus && record.detailStatus !== filterStatus && record.status !== filterStatus) {
+          cursor = item.position;
+          continue;
+        }
+
+        const finalRecord = { ...record, ...lineage };
+        res.write(JSON.stringify(finalRecord) + '\n');
         cursor = item.position;
       }
     }
-    return res.end('\n  ]\n}');
+    return res.end();
   }
-
-  const schemaColumns = outputSchemaColumns(
-    compactActorOutputSchema(run.actor.name, run.actor.outputSchema)
-  );
-  const sample = schemaColumns.length === 0
-    ? await prisma.datasetItem.findMany({
-      where: { runId: run.id },
-      orderBy: { position: 'asc' },
-      take: 100,
-      select: { data: true }
-    })
-    : [];
-  const records = sample.map((item) => {
-    const compacted = compactActorRecord(run.actor.name, item.data);
-    return compacted && typeof compacted === 'object' && !Array.isArray(compacted)
-      ? compacted as Record<string, unknown>
-      : { value: compacted };
-  });
-  const columns = Array.from(new Set([
-    ...schemaColumns,
-    ...records.flatMap((record) => Object.keys(record))
-  ]));
-  res.type('text/csv; charset=utf-8');
-  res.write(`\uFEFF${columns.map(csvCell).join(',')}\r\n`);
-  let cursor = -1;
-  while (true) {
-    const batch = await prisma.datasetItem.findMany({
-      where: { runId: run.id, position: { gt: cursor } },
-      orderBy: { position: 'asc' },
-      take: 1000,
-      select: { position: true, data: true }
-    });
-    if (!batch.length) break;
-    for (const item of batch) {
-      const compacted = compactActorRecord(run.actor.name, item.data);
-      const record = compacted && typeof compacted === 'object' && !Array.isArray(compacted)
-        ? compacted as Record<string, unknown>
-        : { value: compacted };
-      res.write(`${columns.map((column) => csvCell(record[column])).join(',')}\r\n`);
-      cursor = item.position;
-    }
-  }
-  return res.end();
 });
 
 // Stop a run
