@@ -33,6 +33,15 @@ function sendToBackground(message) {
   }
 }
 
+function reportProxyConfiguration(result) {
+  window.postMessage({
+    source: 'OMNICRAWL_EXTENSION',
+    type: 'PROXY_CONFIGURATION',
+    ok: Boolean(result?.ok),
+    message: typeof result?.message === 'string' ? result.message : ''
+  }, DASHBOARD_ORIGIN);
+}
+
 window.addEventListener('message', (event) => {
   if (event.source !== window || event.origin !== DASHBOARD_ORIGIN) return;
   const message = event.data;
@@ -42,8 +51,25 @@ window.addEventListener('message', (event) => {
     sendToBackground({
       type: 'CONFIGURE',
       token: message.token,
+      proxyConfig: message.proxyConfig,
       apiBase: 'http://localhost:3001'
-    }).then(() => reportStatus(true)).catch(() => reportStatus(false));
+    }).then((result) => {
+      if (!result?.ok) {
+        reportProxyConfiguration({
+          ok: false,
+          message: result?.message || 'Browser Agent từ chối cấu hình proxy.'
+        });
+        return reportStatus(false);
+      }
+      reportProxyConfiguration(result);
+      return reportStatus(true);
+    }).catch((error) => {
+      reportProxyConfiguration({
+        ok: false,
+        message: error instanceof Error ? error.message : 'Không thể kết nối Browser Agent.'
+      });
+      return reportStatus(false);
+    });
   }
 
   if (message.type === 'PING') {

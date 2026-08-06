@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, Fragment } from 'react'
+import { createPortal } from 'react-dom'
 import {
   Play,
   Activity,
@@ -9,17 +10,70 @@ import {
   LogOut,
   Eye,
   FileJson,
-  FileSpreadsheet,
   ChevronLeft,
   ChevronRight,
   ExternalLink,
-  AlertTriangle
+  AlertTriangle,
+  Globe
 } from 'lucide-react'
 import Login from './Login'
 import OmniCrawlLogo from './Logo'
 import './App.css'
 
-const REQUIRED_BROWSER_AGENT_VERSION = '0.11.10'
+const REQUIRED_BROWSER_AGENT_VERSION = '0.11.12'
+
+type ProxyConfig = {
+  enabled: boolean
+  scheme: 'http' | 'https' | 'socks4' | 'socks5'
+  host: string
+  port: string
+  username: string
+  password: string
+}
+
+const DEFAULT_PROXY_CONFIG: ProxyConfig = {
+  enabled: false,
+  scheme: 'http',
+  host: '',
+  port: '',
+  username: '',
+  password: ''
+}
+
+function readProxyConfig(): ProxyConfig {
+  try {
+    const saved = localStorage.getItem('omnicrawl_proxy_config')
+    if (!saved) return DEFAULT_PROXY_CONFIG
+    const parsed = JSON.parse(saved)
+    const scheme = ['http', 'https', 'socks4', 'socks5'].includes(parsed?.scheme)
+      ? parsed.scheme
+      : DEFAULT_PROXY_CONFIG.scheme
+    return {
+      enabled: Boolean(parsed?.enabled),
+      scheme,
+      host: typeof parsed?.host === 'string' ? parsed.host : '',
+      port: typeof parsed?.port === 'string' || typeof parsed?.port === 'number' ? String(parsed.port) : '',
+      username: typeof parsed?.username === 'string' ? parsed.username : '',
+      password: typeof parsed?.password === 'string' ? parsed.password : ''
+    }
+  } catch {
+    return DEFAULT_PROXY_CONFIG
+  }
+}
+
+function proxyValidationError(config: ProxyConfig): string | null {
+  if (!config.enabled) return null
+  const host = config.host.trim()
+  if (!host) return 'Nhập hostname hoặc IP của proxy trước khi bật.'
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(host) || /[/?#@\s]/.test(host)) {
+    return 'Host chỉ được nhập hostname hoặc IP, không gồm http://, port hay thông tin đăng nhập.'
+  }
+  const port = Number(config.port)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return 'Port phải là số nguyên từ 1 đến 65535.'
+  }
+  return null
+}
 
 function isVersionAtLeast(current: string | null, required: string) {
   if (!current) return false
@@ -167,6 +221,38 @@ function App() {
   const [browserAgentVersion, setBrowserAgentVersion] = useState<string | null>(null)
   const [authStatus, setAuthStatus] = useState({ shopeeLoggedIn: false, tiktokLoggedIn: false, debugTikTokCookies: '' })
 
+  const [proxyConfig, setProxyConfig] = useState<ProxyConfig>(readProxyConfig)
+  const [proxyDraft, setProxyDraft] = useState<ProxyConfig>(readProxyConfig)
+  const [showProxyModal, setShowProxyModal] = useState(false)
+  const [proxyError, setProxyError] = useState<string | null>(null)
+  const [proxyApplyStatus, setProxyApplyStatus] = useState('')
+
+  useEffect(() => {
+    localStorage.setItem('omnicrawl_proxy_config', JSON.stringify(proxyConfig))
+  }, [proxyConfig])
+
+  const openProxySettings = useCallback(() => {
+    setProxyDraft(proxyConfig)
+    setProxyError(null)
+    setShowProxyModal(true)
+  }, [proxyConfig])
+
+  const saveProxySettings = useCallback(() => {
+    const error = proxyValidationError(proxyDraft)
+    if (error) {
+      setProxyError(error)
+      return
+    }
+    setProxyError(null)
+    setProxyApplyStatus('Đang áp dụng cấu hình trong Browser Agent…')
+    setProxyConfig({
+      ...proxyDraft,
+      host: proxyDraft.host.trim(),
+      port: proxyDraft.port.trim(),
+      username: proxyDraft.username.trim()
+    })
+  }, [proxyDraft])
+
   // Log Viewer State
   const [logModalOpen, setLogModalOpen] = useState(false)
   const [activeLogRunId, setActiveLogRunId] = useState<string | null>(null)
@@ -245,11 +331,10 @@ function App() {
       return
     }
     const handleAgentMessage = (event: MessageEvent) => {
-      if (
-        event.origin === window.location.origin &&
-        event.data?.source === 'OMNICRAWL_EXTENSION' &&
-        event.data?.type === 'STATUS'
-      ) {
+      if (event.origin !== window.location.origin || event.data?.source !== 'OMNICRAWL_EXTENSION') {
+        return
+      }
+      if (event.data?.type === 'STATUS') {
         const version = typeof event.data.version === 'string' ? event.data.version : null
         setBrowserAgentDetected(true)
         setBrowserAgentVersion(version)
@@ -261,12 +346,23 @@ function App() {
           setAuthStatus(event.data.authStatus)
         }
       }
+      if (event.data?.type === 'PROXY_CONFIGURATION') {
+        const message = typeof event.data.message === 'string' ? event.data.message : ''
+        if (event.data.ok) {
+          setProxyError(null)
+          setProxyApplyStatus(message || 'Cấu hình proxy đã được Browser Agent áp dụng.')
+        } else {
+          setProxyApplyStatus('')
+          setProxyError(message || 'Browser Agent không thể áp dụng cấu hình proxy.')
+        }
+      }
     }
     window.addEventListener('message', handleAgentMessage)
     const configure = () => window.postMessage({
       source: 'OMNICRAWL_DASHBOARD',
       type: 'CONFIGURE',
-      token
+      token,
+      proxyConfig
     }, window.location.origin)
     configure()
     const interval = setInterval(configure, 3000)
@@ -274,7 +370,7 @@ function App() {
       window.removeEventListener('message', handleAgentMessage)
       clearInterval(interval)
     }
-  }, [token])
+  }, [token, proxyConfig])
 
   const triggerRun = async (id: string) => {
     try {
@@ -535,13 +631,30 @@ function App() {
       <main className="flex-1 p-6 overflow-y-auto">
         <header className="flex justify-between items-center mb-8">
           <h1 className="text-2xl font-semibold text-gray-900 capitalize">{activeTab}</h1>
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
-            <input 
-              type="text" 
-              placeholder="Search anything..." 
-              className="pl-10 pr-4 py-2 text-sm bg-white rounded-full w-72 shadow-sm border border-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-100 transition-shadow"
-            />
+          <div className="flex items-center space-x-4">
+            <button
+              type="button"
+              onClick={openProxySettings}
+              aria-haspopup="dialog"
+              aria-expanded={showProxyModal}
+              title={proxyApplyStatus || 'Cấu hình proxy cho Browser Agent'}
+              className={`relative z-10 cursor-pointer flex items-center space-x-2 px-3 py-1.5 rounded-md border text-sm font-medium transition-colors ${
+                proxyConfig.enabled
+                  ? 'bg-blue-50 border-blue-200 text-blue-700 hover:bg-blue-100'
+                  : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              <Globe size={16} />
+              <span>Proxy: {proxyConfig.enabled ? 'ON' : 'OFF'}</span>
+            </button>
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
+              <input
+                type="text"
+                placeholder="Search anything..."
+                className="pl-10 pr-4 py-2 text-sm bg-white rounded-full w-72 shadow-sm border border-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-100 transition-shadow"
+              />
+            </div>
           </div>
         </header>
 
@@ -827,7 +940,7 @@ function App() {
         {activeTab === 'settings' && (
           <div className="bg-white rounded-3xl shadow-sm border border-gray-50 p-8 max-w-2xl">
             <h2 className="text-xl font-medium text-gray-900 mb-6">Account Settings</h2>
-            
+
             <div className="space-y-6">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">Email Address</label>
@@ -882,6 +995,150 @@ function App() {
           </div>
         </div>
       )}
+      {/* Proxy Settings Modal */}
+      {showProxyModal && createPortal(
+        <div
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-gray-900/50 p-4"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setShowProxyModal(false)
+          }}
+        >
+          <form
+            className="bg-white rounded-xl shadow-xl w-full max-w-md min-h-[400px] flex flex-col relative"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="proxy-settings-title"
+            onSubmit={(event) => {
+              event.preventDefault()
+              saveProxySettings()
+            }}
+          >
+            <div className="flex justify-between items-center px-6 py-4 border-b border-gray-100 bg-gray-50/50">
+              <h2 id="proxy-settings-title" className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                <Globe size={20} className="text-blue-600" /> Proxy Settings
+              </h2>
+              <button
+                type="button"
+                onClick={() => setShowProxyModal(false)}
+                className="text-gray-400 hover:text-gray-600 transition-colors p-1"
+                aria-label="Đóng cài đặt proxy"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto space-y-4">
+              {proxyError && (
+                <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {proxyError}
+                </p>
+              )}
+              {proxyApplyStatus && !proxyError && (
+                <p role="status" className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-700">
+                  {proxyApplyStatus}
+                </p>
+              )}
+              <div className="flex items-center justify-between p-4 bg-gray-50 rounded-xl border border-gray-100">
+                <div>
+                  <h3 className="font-medium text-gray-900 text-sm">Enable Proxy</h3>
+                  <p className="text-xs text-gray-500 mt-0.5">Route extension traffic through proxy</p>
+                </div>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="sr-only peer"
+                    checked={proxyDraft.enabled}
+                    onChange={(e) => setProxyDraft({ ...proxyDraft, enabled: e.target.checked })}
+                  />
+                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                </label>
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <div className="col-span-1">
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Scheme</label>
+                  <select
+                    value={proxyDraft.scheme}
+                    onChange={(e) => setProxyDraft({ ...proxyDraft, scheme: e.target.value as ProxyConfig['scheme'] })}
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  >
+                    <option value="http">HTTP</option>
+                    <option value="https">HTTPS</option>
+                    <option value="socks4">SOCKS4</option>
+                    <option value="socks5">SOCKS5</option>
+                  </select>
+                </div>
+                <div className="col-span-2">
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Host</label>
+                  <input
+                    type="text"
+                    placeholder="proxy.example.com"
+                    value={proxyDraft.host}
+                    onChange={(e) => setProxyDraft({ ...proxyDraft, host: e.target.value })}
+                    className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Port</label>
+                <input
+                  type="text"
+                  placeholder="8080"
+                  inputMode="numeric"
+                  value={proxyDraft.port}
+                  onChange={(e) => setProxyDraft({ ...proxyDraft, port: e.target.value })}
+                  className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+
+              <div className="pt-2">
+                <h4 className="text-xs font-semibold text-gray-900 mb-3 uppercase tracking-wider">Authentication (Optional)</h4>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Username</label>
+                    <input
+                      type="text"
+                      placeholder="Username"
+                      value={proxyDraft.username}
+                      onChange={(e) => setProxyDraft({ ...proxyDraft, username: e.target.value })}
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Password</label>
+                    <input
+                      type="password"
+                      placeholder="Password"
+                      value={proxyDraft.password}
+                      onChange={(e) => setProxyDraft({ ...proxyDraft, password: e.target.value })}
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="px-6 py-4 border-t border-gray-100 bg-gray-50 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setShowProxyModal(false)}
+                className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                Hủy
+              </button>
+              <button
+                type="submit"
+                className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
+              >
+                {proxyDraft.enabled ? 'Lưu và bật proxy' : 'Lưu cấu hình'}
+              </button>
+            </div>
+          </form>
+        </div>,
+        document.body
+      )}
     </div>
   )
 }
@@ -890,6 +1147,8 @@ function RunDetailModal({
   detail,
   loading,
   page,
+  status,
+  onStatusChange,
   onPageChange,
   onDownload,
   onClose
@@ -1510,6 +1769,7 @@ function RunDetailModal({
           </div>
         </div>
       )}
+
     </div>
   )
 }
