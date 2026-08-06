@@ -762,13 +762,6 @@ app.post('/api/actors/:id/run', requireAuth, async (req: any, res: any) => {
       return res.status(400).json({ error: 'Search keyword is required' });
     }
     const run = await prisma.$transaction(async (tx) => {
-      const debit = await tx.user.updateMany({
-        where: { id: req.user.id, credits: { gte: 10 } },
-        data: { credits: { decrement: 10 } }
-      });
-      if (debit.count !== 1) {
-        throw new Error('INSUFFICIENT_CREDITS');
-      }
       return tx.run.create({
         // Keep the run invisible to workers until its input is durable.
         data: { actorId: actor.id, userId: req.user.id, status: 'CREATING' }
@@ -782,16 +775,10 @@ app.post('/api/actors/:id/run', requireAuth, async (req: any, res: any) => {
         input
       );
     } catch (storageError) {
-      await prisma.$transaction([
-        prisma.run.update({
-          where: { id: run.id },
-          data: { status: 'FAILED', finishedAt: new Date() }
-        }),
-        prisma.user.update({
-          where: { id: req.user.id },
-          data: { credits: { increment: 10 } }
-        })
-      ]);
+      await prisma.run.update({
+        where: { id: run.id },
+        data: { status: 'FAILED', finishedAt: new Date() }
+      });
       throw storageError;
     }
 
@@ -802,13 +789,10 @@ app.post('/api/actors/:id/run', requireAuth, async (req: any, res: any) => {
       }
     });
 
-    res.json({ message: 'Run scheduled. Deducted 10 credits.', run: queuedRun });
+    res.json({ message: 'Run scheduled.', run: queuedRun });
   } catch (err: any) {
     if (err.name === 'ActorInputValidationError') {
       return res.status(400).json({ error: err.message });
-    }
-    if (err.message === 'INSUFFICIENT_CREDITS') {
-      return res.status(403).json({ error: 'Insufficient credits. You need at least 10 credits to run.' });
     }
     res.status(500).json({ error: err.message });
   }

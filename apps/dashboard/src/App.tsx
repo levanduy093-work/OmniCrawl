@@ -20,7 +20,7 @@ import Login from './Login'
 import OmniCrawlLogo from './Logo'
 import './App.css'
 
-const REQUIRED_BROWSER_AGENT_VERSION = '0.11.21'
+const REQUIRED_BROWSER_AGENT_VERSION = '0.11.22'
 
 type ProxyConfig = {
   enabled: boolean
@@ -787,6 +787,8 @@ function App() {
                   <th className="px-6 py-4">Status</th>
                   <th className="px-6 py-4">Items</th>
                   <th className="px-6 py-4">Created At</th>
+                  <th className="px-6 py-4">Finished At</th>
+                  <th className="px-6 py-4">Duration</th>
                   <th className="px-6 py-4 text-right">Actions</th>
                 </tr>
               </thead>
@@ -813,6 +815,17 @@ function App() {
                     </td>
                     <td className="px-6 py-5 text-gray-700">{run.itemCount ?? 0}</td>
                     <td className="px-6 py-5 text-gray-500">{new Date(run.createdAt).toLocaleString()}</td>
+                    <td className="px-6 py-5 text-gray-500">{run.finishedAt ? new Date(run.finishedAt).toLocaleString() : '-'}</td>
+                    <td className="px-6 py-5 text-gray-500">
+                      {run.finishedAt ? (() => {
+                        const ms = new Date(run.finishedAt).getTime() - new Date(run.createdAt).getTime();
+                        if (ms < 0) return '-';
+                        const totalSeconds = Math.floor(ms / 1000);
+                        const mins = Math.floor(totalSeconds / 60);
+                        const secs = totalSeconds % 60;
+                        return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+                      })() : '-'}
+                    </td>
                     <td className="px-6 py-4">
                       <div className="flex items-center justify-end gap-2" onClick={(e) => e.stopPropagation()}>
                         <button onClick={() => openRunDetail(run.id)} className="inline-flex items-center justify-center gap-1.5 h-8 px-3 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 text-xs font-medium transition-colors">

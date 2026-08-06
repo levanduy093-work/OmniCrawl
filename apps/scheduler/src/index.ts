@@ -58,14 +58,6 @@ cron.schedule('* * * * *', async () => {
             });
             if (claim.count !== 1) return null;
 
-            const debit = await tx.user.updateMany({
-              where: { id: schedule.userId!, credits: { gte: 10 } },
-              data: { credits: { decrement: 10 } }
-            });
-            if (debit.count !== 1) {
-              throw new Error('INSUFFICIENT_CREDITS');
-            }
-
             return tx.run.create({
               data: {
                 actorId: schedule.actorId,
@@ -94,25 +86,16 @@ cron.schedule('* * * * *', async () => {
               }
             });
           } catch (storageError) {
-            await prisma.$transaction([
-              prisma.run.update({
-                where: { id: createdRun.id },
-                data: { status: 'FAILED', finishedAt: new Date() }
-              }),
-              prisma.user.update({
-                where: { id: schedule.userId! },
-                data: { credits: { increment: 10 } }
-              })
-            ]);
+            await prisma.run.update({
+              where: { id: createdRun.id },
+              data: { status: 'FAILED', finishedAt: new Date() }
+            });
             throw storageError;
           }
-          console.log(`[Scheduler] Triggered run and deducted 10 credits.`);
+          console.log(`[Scheduler] Triggered run for schedule ${schedule.id}.`);
         }
       } catch (err) {
-        if (err instanceof Error && err.message === 'INSUFFICIENT_CREDITS') {
-          console.log(`[Scheduler] Skipping schedule ${schedule.id}: insufficient credits (User: ${schedule.userId})`);
-          continue;
-        }
+
         console.error(`[Scheduler] Failed to trigger schedule ${schedule.id}`, err);
       }
     }

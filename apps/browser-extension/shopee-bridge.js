@@ -766,9 +766,17 @@ function reportBlockedPage() {
     location.pathname.includes('/verify/') ||
     location.pathname.includes('/buyer/login')
   ) {
+    // `/verify/traffic/error` can be a traffic-control page or a normal
+    // "Login Required" page.  Tell the worker which user-facing recovery is
+    // appropriate; it must never attempt to work around either one.
+    const pageText = String(document.body?.innerText || '').slice(0, 4000);
+    const blockedKind = /login required|log\s*in\s*to\s*continue|not logged in|đăng nhập/i.test(pageText)
+      ? 'LOGIN_REQUIRED'
+      : 'TRAFFIC_CONTROL';
     chrome.runtime.sendMessage({
       type: 'SHOPEE_BLOCKED',
-      url: location.href
+      url: location.href,
+      blockedKind
     }).catch(() => undefined);
   }
 }
@@ -777,4 +785,33 @@ if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', reportBlockedPage, { once: true });
 } else {
   reportBlockedPage();
+}
+
+async function simulateHumanInteraction() {
+  if (
+    location.pathname.includes('/verify/') ||
+    location.pathname.includes('/buyer/login')
+  ) {
+    return;
+  }
+  const steps = 2 + Math.floor(Math.random() * 3);
+  for (let i = 0; i < steps; i++) {
+    const yOffset = (Math.random() - 0.5) * 600;
+    window.scrollBy({ top: yOffset, behavior: 'smooth' });
+    const event = new MouseEvent('mousemove', {
+      view: window,
+      bubbles: true,
+      cancelable: true,
+      clientX: Math.floor(Math.random() * window.innerWidth),
+      clientY: Math.floor(Math.random() * window.innerHeight)
+    });
+    document.dispatchEvent(event);
+    await new Promise(r => setTimeout(r, 400 + Math.random() * 800));
+  }
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', simulateHumanInteraction, { once: true });
+} else {
+  simulateHumanInteraction();
 }
