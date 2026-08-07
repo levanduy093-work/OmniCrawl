@@ -14,7 +14,16 @@ import {
   ChevronRight,
   ExternalLink,
   AlertTriangle,
-  Globe
+  Globe,
+  Shield,
+  Plus,
+  Trash2,
+  RefreshCw,
+  Upload,
+  CheckCircle,
+  XCircle,
+  Zap,
+  CircleDot
 } from 'lucide-react'
 import Login from './Login'
 import OmniCrawlLogo from './Logo'
@@ -203,10 +212,24 @@ function App() {
   }, [activeTab]);
 
   useEffect(() => {
-    if (activeTab === 'users' && user && !isAdminRole(user.role)) {
+    if ((activeTab === 'users' || activeTab === 'proxies') && user && !isAdminRole(user.role)) {
       setActiveTab('actors')
     }
   }, [activeTab, user])
+
+  // Proxy Manager State
+  const [proxyGroups, setProxyGroups] = useState<any[]>([])
+  const [proxyStats, setProxyStats] = useState<any>(null)
+  const [proxyLoading, setProxyLoading] = useState(false)
+  const [proxyImportGroupId, setProxyImportGroupId] = useState('')
+  const [proxyImportText, setProxyImportText] = useState('')
+  const [proxyImportCountry, setProxyImportCountry] = useState('VN')
+  const [proxyImportIsRotating, setProxyImportIsRotating] = useState(false)
+  const [proxyImportResult, setProxyImportResult] = useState<any>(null)
+  const [showProxyImport, setShowProxyImport] = useState(false)
+  const [newGroupName, setNewGroupName] = useState('')
+  const [proxyChecking, setProxyChecking] = useState(false)
+  const [proxyCheckResult, setProxyCheckResult] = useState<any>(null)
   
   const [actors, setActors] = useState([])
   const [runs, setRuns] = useState([])
@@ -281,6 +304,21 @@ function App() {
     }
   }, [handleLogout, token])
 
+  const fetchProxyData = useCallback(async () => {
+    if (!token || !user || !isAdminRole(user.role)) return
+    try {
+      const headers = { 'Authorization': `Bearer ${token}` }
+      const [groupsRes, statsRes] = await Promise.all([
+        fetch('http://localhost:3001/api/proxies', { headers }),
+        fetch('http://localhost:3001/api/proxies/stats', { headers })
+      ])
+      if (groupsRes.ok) setProxyGroups(await groupsRes.json())
+      if (statsRes.ok) setProxyStats(await statsRes.json())
+    } catch (err) {
+      console.error('Failed to fetch proxy data', err)
+    }
+  }, [token, user])
+
   const fetchData = useCallback(async () => {
     try {
       const headers = { 'Authorization': `Bearer ${token}` }
@@ -311,6 +349,121 @@ function App() {
       fetchUser()
     }
   }, [fetchData, fetchUser, token])
+
+  useEffect(() => {
+    if (activeTab === 'proxies') fetchProxyData()
+  }, [activeTab, fetchProxyData])
+
+  const createProxyGroup = useCallback(async () => {
+    if (!newGroupName.trim()) return
+    try {
+      await fetch('http://localhost:3001/api/proxies/groups', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newGroupName.trim() })
+      })
+      setNewGroupName('')
+      fetchProxyData()
+    } catch {}
+  }, [newGroupName, token, fetchProxyData])
+
+  const deleteProxyGroup = useCallback(async (groupId: string) => {
+    if (!confirm('Xóa nhóm proxy này và tất cả proxy bên trong?')) return
+    try {
+      await fetch(`http://localhost:3001/api/proxies/groups/${groupId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      fetchProxyData()
+    } catch {}
+  }, [token, fetchProxyData])
+
+  const toggleProxyGroup = useCallback(async (groupId: string, enabled: boolean) => {
+    try {
+      await fetch(`http://localhost:3001/api/proxies/groups/${groupId}`, {
+        method: 'PATCH',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled })
+      })
+      fetchProxyData()
+    } catch {}
+  }, [token, fetchProxyData])
+
+  const deleteProxy = useCallback(async (proxyId: string) => {
+    try {
+      await fetch(`http://localhost:3001/api/proxies/${proxyId}`, {
+        method: 'DELETE',
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      fetchProxyData()
+    } catch {}
+  }, [token, fetchProxyData])
+
+  const toggleProxy = useCallback(async (proxyId: string, enabled: boolean) => {
+    try {
+      await fetch(`http://localhost:3001/api/proxies/${proxyId}`, {
+        method: 'PATCH',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled })
+      })
+      fetchProxyData()
+    } catch {}
+  }, [token, fetchProxyData])
+
+  const resetProxy = useCallback(async (proxyId: string) => {
+    try {
+      await fetch(`http://localhost:3001/api/proxies/${proxyId}`, {
+        method: 'PATCH',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ resetStatus: true })
+      })
+      fetchProxyData()
+    } catch {}
+  }, [token, fetchProxyData])
+
+  const importProxies = useCallback(async () => {
+    if (!proxyImportGroupId || !proxyImportText.trim()) return
+    setProxyLoading(true)
+    setProxyImportResult(null)
+    try {
+      const res = await fetch('http://localhost:3001/api/proxies/import', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          groupId: proxyImportGroupId,
+          text: proxyImportText,
+          country: proxyImportCountry || null,
+          isRotating: proxyImportIsRotating
+        })
+      })
+      if (res.ok) {
+        const result = await res.json()
+        setProxyImportResult(result)
+        setProxyImportText('')
+        fetchProxyData()
+      }
+    } catch {} finally {
+      setProxyLoading(false)
+    }
+  }, [proxyImportGroupId, proxyImportText, proxyImportCountry, proxyImportIsRotating, token, fetchProxyData])
+
+  const runProxyHealthCheck = useCallback(async () => {
+    setProxyChecking(true)
+    setProxyCheckResult(null)
+    try {
+      const res = await fetch('http://localhost:3001/api/proxies/check', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      })
+      if (res.ok) {
+        const result = await res.json()
+        setProxyCheckResult(result)
+        fetchProxyData()
+      }
+    } catch {} finally {
+      setProxyChecking(false)
+    }
+  }, [token, fetchProxyData])
 
   // Poll data in background every 5 seconds to update statuses
   useEffect(() => {
@@ -619,6 +772,15 @@ function App() {
             onClick={() => setActiveTab('schedules')} 
             collapsed={!isSidebarOpen}
           />
+          {isAdminRole(user?.role) && (
+            <NavItem 
+              icon={<Shield />} 
+              label="Proxies" 
+              active={activeTab === 'proxies'} 
+              onClick={() => setActiveTab('proxies')} 
+              collapsed={!isSidebarOpen}
+            />
+          )}
         </nav>
         
         <div className="mt-auto pb-4 space-y-1">
@@ -947,6 +1109,268 @@ function App() {
                 </tbody>
               </table>
             </div>
+          </div>
+        )}
+
+        {activeTab === 'proxies' && isAdminRole(user?.role) && (
+          <div className="space-y-6 max-w-[1280px]">
+            {/* Stats Cards */}
+            {proxyStats && (
+              <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+                {[
+                  { label: 'Tổng', value: proxyStats.total, color: 'bg-gray-100 text-gray-700' },
+                  { label: 'Alive', value: proxyStats.alive, color: 'bg-emerald-50 text-emerald-700' },
+                  { label: 'Dead', value: proxyStats.dead, color: 'bg-red-50 text-red-700' },
+                  { label: 'Slow', value: proxyStats.slow, color: 'bg-amber-50 text-amber-700' },
+                  { label: 'Unknown', value: proxyStats.unknown, color: 'bg-gray-50 text-gray-500' },
+                  { label: 'Disabled', value: proxyStats.disabled, color: 'bg-gray-50 text-gray-400' },
+                  { label: 'Avg Latency', value: `${proxyStats.avgLatencyMs}ms`, color: 'bg-blue-50 text-blue-700' }
+                ].map((stat) => (
+                  <div key={stat.label} className={`${stat.color} rounded-xl px-4 py-3 text-center`}>
+                    <div className="text-2xl font-bold">{stat.value}</div>
+                    <div className="text-xs font-medium mt-0.5">{stat.label}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Actions Bar */}
+            <div className="flex flex-wrap gap-3 items-center">
+              <div className="flex gap-2 items-center flex-1">
+                <input
+                  type="text"
+                  placeholder="Tên nhóm proxy mới..."
+                  value={newGroupName}
+                  onChange={(e) => setNewGroupName(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && createProxyGroup()}
+                  className="rounded-lg border border-gray-200 px-3 py-2 text-sm w-60 focus:outline-none focus:ring-2 focus:ring-blue-200"
+                />
+                <button
+                  onClick={createProxyGroup}
+                  disabled={!newGroupName.trim()}
+                  className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-40 transition-colors"
+                >
+                  <Plus size={16} /> Tạo nhóm
+                </button>
+              </div>
+              <button
+                onClick={() => setShowProxyImport(!showProxyImport)}
+                className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-violet-700 bg-violet-50 border border-violet-200 rounded-lg hover:bg-violet-100 transition-colors"
+              >
+                <Upload size={16} /> Import Proxy
+              </button>
+              <button
+                onClick={runProxyHealthCheck}
+                disabled={proxyChecking}
+                className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 disabled:opacity-50 transition-colors"
+              >
+                <RefreshCw size={16} className={proxyChecking ? 'animate-spin' : ''} />
+                {proxyChecking ? 'Đang check...' : 'Health Check'}
+              </button>
+              <button
+                onClick={fetchProxyData}
+                className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
+              >
+                <RefreshCw size={16} /> Refresh
+              </button>
+            </div>
+
+            {proxyCheckResult && (
+              <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+                Health check xong: <strong>{proxyCheckResult.alive}</strong> alive, <strong>{proxyCheckResult.slow}</strong> slow, <strong>{proxyCheckResult.dead}</strong> dead
+              </div>
+            )}
+
+            {/* Import Panel */}
+            {showProxyImport && (
+              <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
+                <h3 className="text-sm font-semibold text-gray-900 mb-4 flex items-center gap-2">
+                  <Upload size={16} className="text-violet-600" /> Import Proxy hàng loạt
+                </h3>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Nhóm proxy</label>
+                    <select
+                      value={proxyImportGroupId}
+                      onChange={(e) => setProxyImportGroupId(e.target.value)}
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    >
+                      <option value="">Chọn nhóm...</option>
+                      {proxyGroups.map((g: any) => (
+                        <option key={g.id} value={g.id}>{g.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Quốc gia</label>
+                    <input
+                      type="text"
+                      placeholder="VN, US, ..."
+                      value={proxyImportCountry}
+                      onChange={(e) => setProxyImportCountry(e.target.value)}
+                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div className="flex items-end">
+                    <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={proxyImportIsRotating}
+                        onChange={(e) => setProxyImportIsRotating(e.target.checked)}
+                        className="rounded border-gray-300"
+                      />
+                      Rotating gateway
+                    </label>
+                  </div>
+                </div>
+                <textarea
+                  value={proxyImportText}
+                  onChange={(e) => setProxyImportText(e.target.value)}
+                  placeholder={`Mỗi dòng 1 proxy. Hỗ trợ format:\nhost:port:user:pass\nhttp://user:pass@host:port\nhost:port\nuser:pass@host:port`}
+                  rows={6}
+                  className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-blue-500 mb-3"
+                />
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={importProxies}
+                    disabled={proxyLoading || !proxyImportGroupId || !proxyImportText.trim()}
+                    className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-violet-600 rounded-lg hover:bg-violet-700 disabled:opacity-40 transition-colors"
+                  >
+                    <Upload size={16} /> {proxyLoading ? 'Đang import...' : 'Import'}
+                  </button>
+                  {proxyImportResult && (
+                    <span className="text-sm text-gray-600">
+                      ✅ {proxyImportResult.imported} imported, ⏭️ {proxyImportResult.skipped} trùng, ❌ {proxyImportResult.failed} lỗi
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Proxy Groups */}
+            {proxyGroups.length === 0 && (
+              <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-12 text-center">
+                <Shield size={48} className="mx-auto text-gray-300 mb-4" />
+                <h3 className="text-lg font-medium text-gray-500">Chưa có nhóm proxy nào</h3>
+                <p className="text-sm text-gray-400 mt-1">Tạo nhóm proxy và import danh sách proxy dân cư để bắt đầu</p>
+              </div>
+            )}
+
+            {proxyGroups.map((group: any) => (
+              <div key={group.id} className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+                <div className="flex items-center justify-between px-6 py-4 bg-gray-50/80 border-b border-gray-100">
+                  <div className="flex items-center gap-3">
+                    <CircleDot size={18} className={group.enabled ? 'text-emerald-500' : 'text-gray-300'} />
+                    <h3 className="font-semibold text-gray-900">{group.name}</h3>
+                    <span className="text-xs text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full">
+                      {group._count?.proxies || group.proxies?.length || 0} proxies
+                    </span>
+                    {group.isDefault && (
+                      <span className="text-xs text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full font-medium">Default</span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => toggleProxyGroup(group.id, !group.enabled)}
+                      className={`px-3 py-1 text-xs rounded-lg font-medium transition-colors ${
+                        group.enabled
+                          ? 'text-emerald-700 bg-emerald-50 hover:bg-emerald-100'
+                          : 'text-gray-500 bg-gray-100 hover:bg-gray-200'
+                      }`}
+                    >
+                      {group.enabled ? 'Enabled' : 'Disabled'}
+                    </button>
+                    <button
+                      onClick={() => deleteProxyGroup(group.id)}
+                      className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                      title="Xóa nhóm"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                </div>
+
+                {group.proxies?.length > 0 ? (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-xs text-gray-500 font-medium uppercase tracking-wider">
+                          <th className="px-4 py-2.5 text-left">Status</th>
+                          <th className="px-4 py-2.5 text-left">Host</th>
+                          <th className="px-4 py-2.5 text-left">Port</th>
+                          <th className="px-4 py-2.5 text-left">Protocol</th>
+                          <th className="px-4 py-2.5 text-left">User</th>
+                          <th className="px-4 py-2.5 text-left">Country</th>
+                          <th className="px-4 py-2.5 text-right">Latency</th>
+                          <th className="px-4 py-2.5 text-right">Success</th>
+                          <th className="px-4 py-2.5 text-right">Fails</th>
+                          <th className="px-4 py-2.5 text-center">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-50">
+                        {group.proxies.map((proxy: any) => (
+                          <tr key={proxy.id} className={`hover:bg-gray-50/50 ${!proxy.enabled ? 'opacity-50' : ''}`}>
+                            <td className="px-4 py-2">
+                              {proxy.status === 'ALIVE' && <span className="inline-flex items-center gap-1 text-emerald-600"><CheckCircle size={14} /> Alive</span>}
+                              {proxy.status === 'DEAD' && <span className="inline-flex items-center gap-1 text-red-500"><XCircle size={14} /> Dead</span>}
+                              {proxy.status === 'SLOW' && <span className="inline-flex items-center gap-1 text-amber-500"><Zap size={14} /> Slow</span>}
+                              {proxy.status === 'UNKNOWN' && <span className="inline-flex items-center gap-1 text-gray-400"><CircleDot size={14} /> Unknown</span>}
+                            </td>
+                            <td className="px-4 py-2 font-mono text-xs">{proxy.host}</td>
+                            <td className="px-4 py-2 font-mono text-xs">{proxy.port}</td>
+                            <td className="px-4 py-2">
+                              <span className="px-1.5 py-0.5 rounded text-xs bg-gray-100">{proxy.protocol}</span>
+                            </td>
+                            <td className="px-4 py-2 font-mono text-xs text-gray-500">{proxy.username || '—'}</td>
+                            <td className="px-4 py-2 text-xs">{proxy.country || '—'}</td>
+                            <td className="px-4 py-2 text-right text-xs">
+                              {proxy.lastLatencyMs != null ? `${proxy.lastLatencyMs}ms` : '—'}
+                            </td>
+                            <td className="px-4 py-2 text-right text-xs text-emerald-600">{proxy.successCount}</td>
+                            <td className="px-4 py-2 text-right text-xs text-red-500">{proxy.failCount}</td>
+                            <td className="px-4 py-2">
+                              <div className="flex items-center justify-center gap-1">
+                                <button
+                                  onClick={() => toggleProxy(proxy.id, !proxy.enabled)}
+                                  className={`p-1 rounded transition-colors ${
+                                    proxy.enabled
+                                      ? 'text-emerald-500 hover:bg-emerald-50'
+                                      : 'text-gray-400 hover:bg-gray-100'
+                                  }`}
+                                  title={proxy.enabled ? 'Disable' : 'Enable'}
+                                >
+                                  {proxy.enabled ? <CheckCircle size={15} /> : <XCircle size={15} />}
+                                </button>
+                                {(proxy.status === 'DEAD' || proxy.status === 'SLOW') && (
+                                  <button
+                                    onClick={() => resetProxy(proxy.id)}
+                                    className="p-1 text-blue-400 hover:bg-blue-50 rounded transition-colors"
+                                    title="Reset status"
+                                  >
+                                    <RefreshCw size={15} />
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => deleteProxy(proxy.id)}
+                                  className="p-1 text-red-400 hover:bg-red-50 rounded transition-colors"
+                                  title="Xóa proxy"
+                                >
+                                  <Trash2 size={15} />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="px-6 py-8 text-center text-sm text-gray-400">
+                    Chưa có proxy nào trong nhóm này. Dùng nút Import để thêm.
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
         )}
 

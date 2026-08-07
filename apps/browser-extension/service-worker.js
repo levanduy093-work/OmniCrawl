@@ -99,6 +99,57 @@ async function shopeeRateLimitGuard() {
   shopeeRequestTimestamps.push(Date.now());
 }
 
+// --- Proxy PAC Configuration ---
+const PROXY_PAC_SCRIPT = `function FindProxyForURL(url, host) {
+  if (shExpMatch(host, "*.shopee.vn") || host === "shopee.vn") {
+    return "PROXY 127.0.0.1:8888";
+  }
+  return "DIRECT";
+}`;
+
+async function enableShopeeProxy() {
+  try {
+    await chrome.proxy.settings.set({
+      value: {
+        mode: 'pac_script',
+        pacScript: { data: PROXY_PAC_SCRIPT }
+      },
+      scope: 'regular'
+    });
+    console.log('[OmniCrawl] Shopee proxy enabled → localhost:8888');
+  } catch (error) {
+    console.warn('[OmniCrawl] Failed to set proxy:', error);
+  }
+}
+
+async function disableShopeeProxy() {
+  try {
+    await chrome.proxy.settings.set({
+      value: { mode: 'direct' },
+      scope: 'regular'
+    });
+    console.log('[OmniCrawl] Shopee proxy disabled → DIRECT');
+  } catch (error) {
+    console.warn('[OmniCrawl] Failed to clear proxy:', error);
+  }
+}
+
+// Handle proxy auth challenges from upstream residential proxies
+chrome.webRequest.onAuthRequired.addListener(
+  (details, callbackFn) => {
+    // Only handle proxy auth, not site auth
+    if (!details.isProxy) {
+      callbackFn({});
+      return;
+    }
+    // The local proxy server handles upstream auth, so this shouldn't fire normally.
+    // If it does, cancel to avoid infinite loops.
+    callbackFn({ cancel: true });
+  },
+  { urls: ['<all_urls>'] },
+  ['asyncBlocking']
+);
+
 function waitForShopeeNavigationSlot(runId, itemId, worker) {
   const task = shopeeNavigationQueue
     .catch(() => undefined)
@@ -2296,6 +2347,8 @@ async function finishJob(success, error) {
   } catch {
     // The dashboard can still stop or delete a run if the local API disappears.
   } finally {
+    // Disable proxy when job ends
+    await disableShopeeProxy();
     const crawlerWindowIds = new Set(
       [
         job.windowId,
@@ -4540,6 +4593,10 @@ async function poll() {
       pageDeadline: Date.now() + searchTimeoutForJob(job)
     };
     await persistActiveJob();
+    // Enable proxy for Shopee crawling jobs
+    if (activeJob.platform === 'shopee') {
+      await enableShopeeProxy();
+    }
     const {
       tab,
       windowId,

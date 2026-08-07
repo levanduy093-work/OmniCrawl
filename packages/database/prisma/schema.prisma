@@ -118,3 +118,38 @@ model Webhook {
   
   actor       Actor    @relation(fields: [actorId], references: [id])
 }
+
+model ProxyGroup {
+  id        String   @id @default(cuid())
+  name      String
+  isDefault Boolean  @default(false)
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  proxies   Proxy[]
+}
+
+model Proxy {
+  id            String      @id @default(cuid())
+  groupId       String
+  protocol      String      @default("http") // http, https, socks5
+  host          String
+  port          Int
+  username      String?
+  password      String?
+  country       String?
+  isRotating    Boolean     @default(false) // true = rotating gateway
+  enabled       Boolean     @default(true)
+  status        String      @default("UNKNOWN") // UNKNOWN, ALIVE, DEAD, SLOW
+  lastCheckedAt DateTime?
+  lastLatencyMs Int?
+  failCount     Int         @default(0)
+  successCount  Int         @default(0)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  group         ProxyGroup  @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@unique([host, port, username])
+  @@index([groupId, enabled, status])
+}

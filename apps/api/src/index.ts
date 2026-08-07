@@ -22,6 +22,11 @@ import {
   getShopeeSession,
   startShopeeConnection
 } from './shopeeSessionManager';
+import {
+  startProxyServer,
+  checkAllProxies,
+  getProxyStats
+} from './proxy-server';
 
 dotenv.config({ path: path.resolve(__dirname, '..', '..', '..', '.env'), quiet: true });
 
@@ -1666,6 +1671,284 @@ app.post('/api/templates/scaffold', requireAuth, async (req: any, res: any) => {
   }
 });
 
+// --- PROXY MANAGEMENT ROUTES ---
+
+function parseProxyString(line: string) {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith('#')) return null;
+
+  // Format: protocol://user:pass@host:port
+  const urlMatch = trimmed.match(
+    /^(https?|socks5):\/\/(?:([^:@]+):([^@]+)@)?([^:]+):(\d+)$/i
+  );
+  if (urlMatch) {
+    return {
+      protocol: urlMatch[1].toLowerCase(),
+      username: urlMatch[2] || null,
+      password: urlMatch[3] || null,
+      host: urlMatch[4],
+      port: parseInt(urlMatch[5], 10)
+    };
+  }
+
+  // Format: host:port:user:pass
+  const colonParts = trimmed.split(':');
+  if (colonParts.length === 4) {
+    return {
+      protocol: 'http',
+      host: colonParts[0],
+      port: parseInt(colonParts[1], 10),
+      username: colonParts[2] || null,
+      password: colonParts[3] || null
+    };
+  }
+
+  // Format: host:port
+  if (colonParts.length === 2) {
+    return {
+      protocol: 'http',
+      host: colonParts[0],
+      port: parseInt(colonParts[1], 10),
+      username: null,
+      password: null
+    };
+  }
+
+  // Format: user:pass@host:port
+  const atMatch = trimmed.match(/^([^:@]+):([^@]+)@([^:]+):(\d+)$/);
+  if (atMatch) {
+    return {
+      protocol: 'http',
+      username: atMatch[1],
+      password: atMatch[2],
+      host: atMatch[3],
+      port: parseInt(atMatch[4], 10)
+    };
+  }
+
+  return null;
+}
+
+// List all proxy groups with proxies
+app.get('/api/proxies', requireAuth, requireAdmin, async (_req: any, res: any) => {
+  const groups = await prisma.proxyGroup.findMany({
+    orderBy: { createdAt: 'desc' },
+    include: {
+      proxies: {
+        orderBy: { createdAt: 'desc' }
+      },
+      _count: { select: { proxies: true } }
+    }
+  });
+  res.json(groups);
+});
+
+// Create proxy group
+app.post('/api/proxies/groups', requireAuth, requireAdmin, async (req: any, res: any) => {
+  const name = String(req.body?.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Group name is required' });
+  const isDefault = Boolean(req.body?.isDefault);
+
+  if (isDefault) {
+    await prisma.proxyGroup.updateMany({
+      where: { isDefault: true },
+      data: { isDefault: false }
+    });
+  }
+
+  const group = await prisma.proxyGroup.create({
+    data: { name, isDefault },
+    include: { proxies: true, _count: { select: { proxies: true } } }
+  });
+  res.status(201).json(group);
+});
+
+// Update proxy group
+app.patch('/api/proxies/groups/:id', requireAuth, requireAdmin, async (req: any, res: any) => {
+  const group = await prisma.proxyGroup.findUnique({ where: { id: req.params.id } });
+  if (!group) return res.status(404).json({ error: 'Group not found' });
+
+  const data: any = {};
+  if (req.body?.name !== undefined) data.name = String(req.body.name).trim();
+  if (req.body?.enabled !== undefined) data.enabled = Boolean(req.body.enabled);
+  if (req.body?.isDefault === true) {
+    await prisma.proxyGroup.updateMany({
+      where: { isDefault: true },
+      data: { isDefault: false }
+    });
+    data.isDefault = true;
+  }
+
+  const updated = await prisma.proxyGroup.update({
+    where: { id: req.params.id },
+    data,
+    include: { proxies: true, _count: { select: { proxies: true } } }
+  });
+  res.json(updated);
+});
+
+// Delete proxy group
+app.delete('/api/proxies/groups/:id', requireAuth, requireAdmin, async (req: any, res: any) => {
+  const group = await prisma.proxyGroup.findUnique({ where: { id: req.params.id } });
+  if (!group) return res.status(404).json({ error: 'Group not found' });
+  await prisma.proxyGroup.delete({ where: { id: req.params.id } });
+  res.json({ success: true });
+});
+
+// Add single proxy
+app.post('/api/proxies', requireAuth, requireAdmin, async (req: any, res: any) => {
+  const groupId = String(req.body?.groupId || '');
+  const group = await prisma.proxyGroup.findUnique({ where: { id: groupId } });
+  if (!group) return res.status(400).json({ error: 'Invalid group' });
+
+  const protocol = String(req.body?.protocol || 'http').toLowerCase();
+  const host = String(req.body?.host || '').trim();
+  const port = parseInt(String(req.body?.port || ''), 10);
+  if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
+    return res.status(400).json({ error: 'Valid host and port are required' });
+  }
+
+  try {
+    const proxy = await prisma.proxy.create({
+      data: {
+        groupId,
+        protocol,
+        host,
+        port,
+        username: req.body?.username || null,
+        password: req.body?.password || null,
+        country: req.body?.country || null,
+        isRotating: Boolean(req.body?.isRotating)
+      }
+    });
+    res.status(201).json(proxy);
+  } catch (err: any) {
+    if (err?.code === 'P2002') {
+      return res.status(409).json({ error: 'Proxy with this host:port:username already exists' });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk import proxies
+app.post('/api/proxies/import', requireAuth, requireAdmin, async (req: any, res: any) => {
+  const groupId = String(req.body?.groupId || '');
+  const group = await prisma.proxyGroup.findUnique({ where: { id: groupId } });
+  if (!group) return res.status(400).json({ error: 'Invalid group' });
+
+  const text = String(req.body?.text || '');
+  const lines = text.split(/[\r\n]+/).filter(Boolean);
+  const country = req.body?.country || null;
+  const isRotating = Boolean(req.body?.isRotating);
+
+  let imported = 0;
+  let skipped = 0;
+  let failed = 0;
+
+  for (const line of lines) {
+    const parsed = parseProxyString(line);
+    if (!parsed || !parsed.host || !Number.isInteger(parsed.port)) {
+      failed++;
+      continue;
+    }
+    try {
+      await prisma.proxy.create({
+        data: {
+          groupId,
+          protocol: parsed.protocol,
+          host: parsed.host,
+          port: parsed.port,
+          username: parsed.username,
+          password: parsed.password,
+          country,
+          isRotating
+        }
+      });
+      imported++;
+    } catch (err: any) {
+      if (err?.code === 'P2002') {
+        skipped++; // Duplicate
+      } else {
+        failed++;
+      }
+    }
+  }
+
+  res.json({ imported, skipped, failed, total: lines.length });
+});
+
+// Delete proxy
+app.delete('/api/proxies/:id', requireAuth, requireAdmin, async (req: any, res: any) => {
+  const proxy = await prisma.proxy.findUnique({ where: { id: req.params.id } });
+  if (!proxy) return res.status(404).json({ error: 'Proxy not found' });
+  await prisma.proxy.delete({ where: { id: req.params.id } });
+  res.json({ success: true });
+});
+
+// Toggle proxy enable/disable or reset status
+app.patch('/api/proxies/:id', requireAuth, requireAdmin, async (req: any, res: any) => {
+  const proxy = await prisma.proxy.findUnique({ where: { id: req.params.id } });
+  if (!proxy) return res.status(404).json({ error: 'Proxy not found' });
+
+  const data: any = {};
+  if (req.body?.enabled !== undefined) data.enabled = Boolean(req.body.enabled);
+  if (req.body?.resetStatus) {
+    data.status = 'UNKNOWN';
+    data.failCount = 0;
+    data.enabled = true;
+  }
+
+  const updated = await prisma.proxy.update({
+    where: { id: req.params.id },
+    data
+  });
+  res.json(updated);
+});
+
+// Bulk delete proxies
+app.post('/api/proxies/bulk-delete', requireAuth, requireAdmin, async (req: any, res: any) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : [];
+  if (!ids.length) return res.status(400).json({ error: 'No proxy IDs provided' });
+  const result = await prisma.proxy.deleteMany({ where: { id: { in: ids } } });
+  res.json({ deleted: result.count });
+});
+
+// Bulk enable/disable proxies
+app.post('/api/proxies/bulk-toggle', requireAuth, requireAdmin, async (req: any, res: any) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : [];
+  const enabled = Boolean(req.body?.enabled);
+  if (!ids.length) return res.status(400).json({ error: 'No proxy IDs provided' });
+  const result = await prisma.proxy.updateMany({
+    where: { id: { in: ids } },
+    data: { enabled }
+  });
+  res.json({ updated: result.count });
+});
+
+// Health check all proxies
+app.post('/api/proxies/check', requireAuth, requireAdmin, async (_req: any, res: any) => {
+  try {
+    const results = await checkAllProxies();
+    res.json(results);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get proxy stats
+app.get('/api/proxies/stats', requireAuth, requireAdmin, async (_req: any, res: any) => {
+  try {
+    const stats = await getProxyStats();
+    res.json(stats);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- START SERVERS ---
+
 app.listen(PORT, () => {
   console.log(`Core API Server running on http://localhost:${PORT}`);
+  // Start the local proxy server alongside the API
+  startProxyServer();
 });
