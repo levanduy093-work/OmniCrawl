@@ -101,7 +101,12 @@ async function shopeeRateLimitGuard() {
 
 // --- Proxy PAC Configuration ---
 const PROXY_PAC_SCRIPT = `function FindProxyForURL(url, host) {
-  if (shExpMatch(host, "*.shopee.vn") || host === "shopee.vn") {
+  if (
+    shExpMatch(host, "*.shopee.vn") || host === "shopee.vn" ||
+    shExpMatch(host, "*.shopeemobile.com") || host === "shopeemobile.com" ||
+    shExpMatch(host, "*.susercontent.com") || host === "susercontent.com" ||
+    shExpMatch(host, "*.shopee.com") || host === "shopee.com"
+  ) {
     return "PROXY 127.0.0.1:8888";
   }
   return "DIRECT";
@@ -124,11 +129,9 @@ async function enableShopeeProxy() {
 
 async function disableShopeeProxy() {
   try {
-    await chrome.proxy.settings.set({
-      value: { mode: 'direct' },
-      scope: 'regular'
-    });
-    console.log('[OmniCrawl] Shopee proxy disabled → DIRECT');
+    // Clear the extension regular proxy setting to restore user's default/system configuration
+    await chrome.proxy.settings.clear({ scope: 'regular' });
+    console.log('[OmniCrawl] Shopee proxy disabled → cleared proxy override');
   } catch (error) {
     console.warn('[OmniCrawl] Failed to clear proxy:', error);
   }

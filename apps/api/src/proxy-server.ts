@@ -11,7 +11,7 @@ const PROXY_REQUEST_TIMEOUT_MS = 30_000;
 
 // Per-proxy rate limiting
 const proxyRequestTimestamps = new Map<string, number[]>();
-const MAX_REQUESTS_PER_PROXY_PER_MINUTE = 15;
+const MAX_REQUESTS_PER_STATIC_PROXY_PER_MINUTE = 300;
 
 interface ProxyEntry {
   id: string;
@@ -63,12 +63,13 @@ async function refreshProxyCache(): Promise<ProxyEntry[]> {
   return cachedProxies;
 }
 
-function isProxyRateLimited(proxyId: string): boolean {
+function isProxyRateLimited(proxy: ProxyEntry): boolean {
+  if (proxy.isRotating) return false;
   const now = Date.now();
-  const timestamps = proxyRequestTimestamps.get(proxyId) || [];
+  const timestamps = proxyRequestTimestamps.get(proxy.id) || [];
   const recentTimestamps = timestamps.filter(t => now - t < 60_000);
-  proxyRequestTimestamps.set(proxyId, recentTimestamps);
-  return recentTimestamps.length >= MAX_REQUESTS_PER_PROXY_PER_MINUTE;
+  proxyRequestTimestamps.set(proxy.id, recentTimestamps);
+  return recentTimestamps.length >= MAX_REQUESTS_PER_STATIC_PROXY_PER_MINUTE;
 }
 
 function recordProxyRequest(proxyId: string) {
@@ -79,7 +80,7 @@ function recordProxyRequest(proxyId: string) {
 
 function selectProxy(proxies: ProxyEntry[]): ProxyEntry | null {
   // Filter out rate-limited proxies
-  const available = proxies.filter(p => !isProxyRateLimited(p.id));
+  const available = proxies.filter(p => !isProxyRateLimited(p));
   if (available.length === 0) return null;
 
   // Weighted random: prefer low-latency, high-success proxies
@@ -166,10 +167,12 @@ function handleConnect(
     const proxies = await refreshProxyCache();
     if (proxies.length === 0) {
       // No proxies available: connect directly
-      console.log(`[ProxyServer] CONNECT ${targetHost} → DIRECT (no proxies)`);
+      console.log(`[ProxyServer] CONNECT ${targetHost} → DIRECT (no configured proxies)`);
       const upstream = net.connect(port, hostname, () => {
         clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-        upstream.write(head);
+        if (head && head.length > 0) {
+          upstream.write(head);
+        }
         upstream.pipe(clientSocket);
         clientSocket.pipe(upstream);
       });
@@ -181,16 +184,10 @@ function handleConnect(
 
     const proxy = selectProxy(proxies);
     if (!proxy) {
-      console.log(`[ProxyServer] CONNECT ${targetHost} → DIRECT (all proxies rate-limited)`);
-      const upstream = net.connect(port, hostname, () => {
-        clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-        upstream.write(head);
-        upstream.pipe(clientSocket);
-        clientSocket.pipe(upstream);
-      });
-      upstream.on('error', () => {
-        clientSocket.destroy();
-      });
+      // DO NOT fall back to DIRECT when proxies are configured to prevent leaking the real IP!
+      console.warn(`[ProxyServer] CONNECT ${targetHost} → 503 (all ${proxies.length} proxies are rate-limited or busy)`);
+      clientSocket.write('HTTP/1.1 503 Service Unavailable\r\n\r\nAll configured proxies are currently busy or rate-limited.');
+      clientSocket.destroy();
       return;
     }
 
@@ -211,31 +208,36 @@ function handleConnect(
 
     upstreamSocket.setTimeout(PROXY_REQUEST_TIMEOUT_MS);
 
-    let responseBuffer = '';
-    let tunnelEstablished = false;
+    let buffer = Buffer.alloc(0);
+    let established = false;
 
-    upstreamSocket.on('data', (chunk) => {
-      if (tunnelEstablished) {
-        clientSocket.write(chunk);
-        return;
-      }
-      responseBuffer += chunk.toString();
-      const headerEnd = responseBuffer.indexOf('\r\n\r\n');
-      if (headerEnd === -1) return;
+    const onUpstreamData = (chunk: Buffer) => {
+      if (established) return;
+      buffer = Buffer.concat([buffer, chunk]);
+      const headerEndIndex = buffer.indexOf('\r\n\r\n');
+      if (headerEndIndex === -1) return;
 
-      const statusLine = responseBuffer.substring(0, responseBuffer.indexOf('\r\n'));
-      const statusCode = parseInt(statusLine.split(' ')[1], 10);
+      established = true;
+      // Remove temporary data listener so pipe() does not duplicate packets!
+      upstreamSocket.off('data', onUpstreamData);
+
+      const headerStr = buffer.subarray(0, headerEndIndex).toString('latin1');
+      const statusCode = parseInt(headerStr.split(' ')[1], 10);
 
       if (statusCode === 200) {
-        tunnelEstablished = true;
         const latency = Date.now() - startTime;
         void recordProxyResult(proxy.id, true, latency);
         clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-        
-        // Forward any remaining data after the header
-        const remaining = responseBuffer.substring(headerEnd + 4);
+
+        // Forward any binary payload that arrived after the HTTP 200 header
+        const remaining = buffer.subarray(headerEndIndex + 4);
         if (remaining.length > 0) {
           clientSocket.write(remaining);
+        }
+
+        // Forward initial head data if provided
+        if (head && head.length > 0) {
+          upstreamSocket.write(head);
         }
 
         upstreamSocket.pipe(clientSocket);
@@ -247,12 +249,14 @@ function handleConnect(
         clientSocket.destroy();
         upstreamSocket.destroy();
       }
-    });
+    };
+
+    upstreamSocket.on('data', onUpstreamData);
 
     upstreamSocket.on('error', (err) => {
       void recordProxyResult(proxy.id, false);
       console.error(`[ProxyServer] Upstream proxy error: ${err.message}`);
-      if (!tunnelEstablished) {
+      if (!established) {
         clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
       }
       clientSocket.destroy();
@@ -261,7 +265,7 @@ function handleConnect(
     upstreamSocket.on('timeout', () => {
       void recordProxyResult(proxy.id, false);
       console.error(`[ProxyServer] Upstream proxy timeout for ${targetHost}`);
-      if (!tunnelEstablished) {
+      if (!established) {
         clientSocket.write('HTTP/1.1 504 Gateway Timeout\r\n\r\n');
       }
       upstreamSocket.destroy();
@@ -422,13 +426,22 @@ export async function checkAllProxies() {
 
 function checkSingleProxy(proxy: ProxyEntry): Promise<boolean> {
   return new Promise((resolve) => {
+    let resolved = false;
+    const finish = (result: boolean) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timeout);
+      socket.destroy();
+      resolve(result);
+    };
+
     const timeout = setTimeout(() => {
-      resolve(false);
+      finish(false);
     }, HEALTH_CHECK_TIMEOUT_MS);
 
-    // Try a CONNECT to httpbin.org:443 through the proxy
+    // Try a CONNECT to shopee.vn:443 through the proxy
     const socket = net.connect(proxy.port, proxy.host, () => {
-      let connectReq = `CONNECT httpbin.org:443 HTTP/1.1\r\nHost: httpbin.org:443\r\n`;
+      let connectReq = `CONNECT shopee.vn:443 HTTP/1.1\r\nHost: shopee.vn:443\r\n`;
       const auth = proxyAuthHeader(proxy);
       if (auth) {
         connectReq += `Proxy-Authorization: ${auth}\r\n`;
@@ -437,27 +450,23 @@ function checkSingleProxy(proxy: ProxyEntry): Promise<boolean> {
       socket.write(connectReq);
     });
 
-    let responseData = '';
+    let buffer = Buffer.alloc(0);
     socket.on('data', (chunk) => {
-      responseData += chunk.toString();
-      if (responseData.includes('\r\n\r\n')) {
-        const statusLine = responseData.split('\r\n')[0];
+      buffer = Buffer.concat([buffer, chunk]);
+      const headerEndIndex = buffer.indexOf('\r\n\r\n');
+      if (headerEndIndex !== -1) {
+        const statusLine = buffer.subarray(0, headerEndIndex).toString('latin1').split('\r\n')[0];
         const statusCode = parseInt(statusLine.split(' ')[1], 10);
-        clearTimeout(timeout);
-        socket.destroy();
-        resolve(statusCode === 200);
+        finish(statusCode === 200);
       }
     });
 
     socket.on('error', () => {
-      clearTimeout(timeout);
-      resolve(false);
+      finish(false);
     });
 
     socket.on('timeout', () => {
-      clearTimeout(timeout);
-      socket.destroy();
-      resolve(false);
+      finish(false);
     });
 
     socket.setTimeout(HEALTH_CHECK_TIMEOUT_MS);

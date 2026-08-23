@@ -830,7 +830,15 @@ function App() {
                       <Bot size={18} />
                     </div>
                     <div>
-                      <h3 className="text-base font-semibold text-gray-900">{actor.name}</h3>
+                      <div className="flex items-center gap-2">
+                        <h3 className="text-base font-semibold text-gray-900">{actor.name}</h3>
+                        {actor.name === 'tiktok-scraper' && (
+                          <span className="px-2 py-0.5 text-[10px] font-semibold bg-amber-100/90 text-amber-800 border border-amber-300/80 rounded-full flex items-center gap-1.5 shadow-2xs">
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>
+                            Chưa hoạt động tốt
+                          </span>
+                        )}
+                      </div>
                       <span className="text-[11px] text-gray-400 font-mono">v1.0.0</span>
                     </div>
                   </div>
@@ -900,6 +908,20 @@ function App() {
                           {!authStatus.tiktokLoggedIn && (
                             <a href="https://www.tiktok.com/login" target="_blank" rel="noreferrer" className="text-[10px] text-blue-600 font-semibold hover:underline bg-blue-50 px-2 py-1 rounded">Mở Đăng Nhập</a>
                           )}
+                        </div>
+                      )}
+
+                      {actor.name === 'tiktok-scraper' && (
+                        <div className="rounded-xl border border-amber-200/90 bg-amber-50/75 p-2.5 flex items-start gap-2 text-amber-900 shadow-2xs">
+                          <AlertTriangle size={15} className="shrink-0 mt-0.5 text-amber-600" />
+                          <div className="text-xs">
+                            <div className="font-semibold text-amber-800">
+                              Trạng thái: Chưa hoạt động ổn định (Beta)
+                            </div>
+                            <p className="text-[11px] text-amber-700 mt-0.5 leading-relaxed">
+                              TikTok Scraper hiện có thể gặp gián đoạn hoặc thiếu dữ liệu do cơ chế chống crawl của TikTok. Đang được nâng cấp.
+                            </p>
+                          </div>
                         </div>
                       )}
                     </div>
