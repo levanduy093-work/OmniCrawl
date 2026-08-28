@@ -376,52 +376,57 @@ function handleRequest(
 
 // --- Health Check ---
 export async function checkAllProxies() {
-  const proxies = await prisma.proxy.findMany({
-    where: { enabled: true },
-    select: { id: true, protocol: true, host: true, port: true, username: true, password: true, isRotating: true, lastLatencyMs: true, failCount: true, successCount: true }
-  });
+  try {
+    const proxies = await prisma.proxy.findMany({
+      where: { enabled: true },
+      select: { id: true, protocol: true, host: true, port: true, username: true, password: true, isRotating: true, lastLatencyMs: true, failCount: true, successCount: true }
+    });
 
-  console.log(`[ProxyServer] Health checking ${proxies.length} proxies...`);
-  const results = { alive: 0, dead: 0, slow: 0 };
+    console.log(`[ProxyServer] Health checking ${proxies.length} proxies...`);
+    const results = { alive: 0, dead: 0, slow: 0 };
 
-  for (const proxy of proxies) {
-    try {
-      const startTime = Date.now();
-      const isAlive = await checkSingleProxy(proxy);
-      const latency = Date.now() - startTime;
+    for (const proxy of proxies) {
+      try {
+        const startTime = Date.now();
+        const isAlive = await checkSingleProxy(proxy);
+        const latency = Date.now() - startTime;
 
-      if (isAlive) {
-        const status = latency > 5000 ? 'SLOW' : 'ALIVE';
-        if (status === 'SLOW') results.slow++;
-        else results.alive++;
-        await prisma.proxy.update({
-          where: { id: proxy.id },
-          data: {
-            status,
-            lastCheckedAt: new Date(),
-            lastLatencyMs: latency,
-            failCount: 0
-          }
-        });
-      } else {
+        if (isAlive) {
+          const status = latency > 5000 ? 'SLOW' : 'ALIVE';
+          if (status === 'SLOW') results.slow++;
+          else results.alive++;
+          await prisma.proxy.update({
+            where: { id: proxy.id },
+            data: {
+              status,
+              lastCheckedAt: new Date(),
+              lastLatencyMs: latency,
+              failCount: 0
+            }
+          });
+        } else {
+          results.dead++;
+          await prisma.proxy.update({
+            where: { id: proxy.id },
+            data: {
+              status: 'DEAD',
+              lastCheckedAt: new Date(),
+              failCount: { increment: 1 }
+            }
+          });
+        }
+      } catch {
         results.dead++;
-        await prisma.proxy.update({
-          where: { id: proxy.id },
-          data: {
-            status: 'DEAD',
-            lastCheckedAt: new Date(),
-            failCount: { increment: 1 }
-          }
-        });
       }
-    } catch {
-      results.dead++;
     }
-  }
 
-  lastCacheRefreshAt = 0; // Invalidate cache
-  console.log(`[ProxyServer] Health check done: ${results.alive} alive, ${results.slow} slow, ${results.dead} dead`);
-  return results;
+    lastCacheRefreshAt = 0; // Invalidate cache
+    console.log(`[ProxyServer] Health check done: ${results.alive} alive, ${results.slow} slow, ${results.dead} dead`);
+    return results;
+  } catch (error) {
+    console.error('[ProxyServer] Error during proxy health checks:', error);
+    return { alive: 0, dead: 0, slow: 0 };
+  }
 }
 
 function checkSingleProxy(proxy: ProxyEntry): Promise<boolean> {
@@ -483,10 +488,11 @@ export function startProxyServer() {
     console.log(`[ProxyServer] Configure your browser to use this proxy for shopee.vn traffic`);
   });
 
-  // Periodic health check
-  setInterval(() => {
+  // Periodic health check (unref so timer does not block graceful shutdown)
+  const healthCheckTimer = setInterval(() => {
     void checkAllProxies();
   }, HEALTH_CHECK_INTERVAL_MS);
+  healthCheckTimer.unref();
 
   // Initial proxy cache load
   void refreshProxyCache().then((proxies) => {
