@@ -3185,63 +3185,45 @@ async function beginDetailPhase() {
   searchImageReadyTimer = null;
   await chrome.alarms.clear(SHOPEE_IMAGE_READY_ALARM).catch(() => undefined);
 
+  const oldWindowId = activeJob.windowId;
+  if (oldWindowId) {
+    activeJob.tabId = null;
+    activeJob.windowId = null;
+    await persistActiveJob();
+    await chrome.windows.remove(Number(oldWindowId)).catch(() => undefined);
+  }
+
   if (activeJob.platform === 'shopee') {
-    const currentTabId = Number(activeJob.tabId);
-    const currentWindowId = Number(activeJob.windowId);
-    const currentTab = Number.isInteger(currentTabId) && currentTabId > 0
-      ? await chrome.tabs.get(currentTabId).catch(() => null)
-      : null;
-    const currentWindow = Number.isInteger(currentWindowId) && currentWindowId > 0
-      ? await chrome.windows.get(currentWindowId).catch(() => null)
-      : null;
-    if (!currentTab?.id || !currentWindow?.id) {
-      const crawlerWindow = await chrome.windows.create({
-        incognito: false,
-        url: 'about:blank',
-        type: 'normal',
-        focused: false,
-        width: 1100,
-        height: 820,
-        left: 40,
-        top: 40
-      });
-      const tab = crawlerWindow.tabs?.[0];
-      if (!tab?.id || !crawlerWindow.id) {
-        await finishJob(false, 'Không thể tạo cửa sổ profile thường để lấy chi tiết Shopee.');
-        return;
-      }
-      activeJob.tabId = tab.id;
-      activeJob.windowId = crawlerWindow.id;
-    } else {
-      await logJob(
-        'Giữ phiên Chrome thường đã dùng để tìm kiếm để API detail tiếp tục dùng cookie đăng nhập hiện có.'
-      );
-    }
-  } else {
-    const oldWindowId = activeJob.windowId;
-    if (oldWindowId) {
-      activeJob.tabId = null;
-      activeJob.windowId = null;
-      await chrome.windows.remove(Number(oldWindowId)).catch(() => undefined);
-    }
-    const crawlerWindow = await chrome.windows.create({
-      incognito: true,
-      url: 'about:blank',
-      type: 'normal',
-      focused: false,
-      width: 1100,
-      height: 820,
-      left: 40,
-      top: 40
+    const incognitoAllowed = await new Promise((resolve) => {
+      chrome.extension.isAllowedIncognitoAccess(resolve);
     });
-    const tab = crawlerWindow.tabs?.[0];
-    if (!tab?.id || !crawlerWindow.id) {
-      await finishJob(false, 'Không thể tạo cửa sổ lấy chi tiết.');
+    if (!incognitoAllowed) {
+      await logJob(
+        'Không thể bắt đầu detail: Browser Agent chưa được bật Allow in Incognito tại chrome://extensions.'
+      );
+      await finishJob(false, 'Thiếu quyền Allow in Incognito để lấy detail Shopee.');
       return;
     }
-    activeJob.tabId = tab.id;
-    activeJob.windowId = crawlerWindow.id;
   }
+
+  await waitFor(SHOPEE_INCOGNITO_REOPEN_DELAY_MS);
+  const crawlerWindow = await chrome.windows.create({
+    incognito: true,
+    url: 'about:blank',
+    type: 'normal',
+    focused: false,
+    width: 1100,
+    height: 820,
+    left: 40,
+    top: 40
+  });
+  const tab = crawlerWindow.tabs?.[0];
+  if (!tab?.id || !crawlerWindow.id) {
+    await finishJob(false, 'Không thể tạo cửa sổ ẩn danh để lấy chi tiết.');
+    return;
+  }
+  activeJob.tabId = tab.id;
+  activeJob.windowId = crawlerWindow.id;
 
   activeJob.navigationScheduled = false;
   activeJob.searchImageReadyScheduled = false;
@@ -3283,7 +3265,7 @@ async function beginDetailPhase() {
 
 async function recreateShopeeDetailWindow(reason = 'bắt đầu batch chi tiết mới') {
   if (!activeJob) return false;
-  await logJob(`[Session] Đang mở cửa sổ profile thường mới: ${reason}.`);
+  await logJob(`[Incognito] Đang mở cửa sổ ẩn danh mới: ${reason}.`);
   const oldWindowId = activeJob.windowId;
   if (oldWindowId) {
     activeJob.tabId = null;
@@ -3292,7 +3274,7 @@ async function recreateShopeeDetailWindow(reason = 'bắt đầu batch chi tiế
   }
   await waitFor(SHOPEE_INCOGNITO_REOPEN_DELAY_MS);
   const crawlerWindow = await chrome.windows.create({
-    incognito: false,
+    incognito: true,
     url: 'about:blank',
     type: 'normal',
     focused: false,
@@ -3304,7 +3286,7 @@ async function recreateShopeeDetailWindow(reason = 'bắt đầu batch chi tiế
 
   const tab = crawlerWindow.tabs?.[0];
   if (!tab?.id || !crawlerWindow.id) {
-    await finishJob(false, 'Không thể tạo cửa sổ profile thường mới để tiếp tục lấy chi tiết Shopee.');
+    await finishJob(false, 'Không thể tạo cửa sổ ẩn danh mới để tiếp tục lấy chi tiết Shopee.');
     return false;
   }
   activeJob.tabId = tab.id;
@@ -3333,12 +3315,12 @@ async function recoverShopeeBlockedDetail(reason = 'Shopee yêu cầu đăng nh�
     activeJob.detailHandledFor = itemId;
     await persistActiveJob();
     await logJob(
-      `[Session] Sản phẩm ${itemId} vẫn gặp Login Required sau ` +
-      `${MAX_SHOPEE_BLOCKED_WINDOW_RETRIES} lần mở lại phiên thường; đánh dấu lỗi và tiếp tục sản phẩm kế tiếp.`
+      `[Incognito] Sản phẩm ${itemId} vẫn gặp Login Required sau ` +
+      `${MAX_SHOPEE_BLOCKED_WINDOW_RETRIES} cửa sổ ẩn danh mới; đánh dấu lỗi và tiếp tục sản phẩm kế tiếp.`
     );
     await patchCurrentDetail({
       detailStatus: 'FAILED',
-      detailError: `${reason}. Đã thử lại ${MAX_SHOPEE_BLOCKED_WINDOW_RETRIES} lần bằng profile thường.`
+      detailError: `${reason}. Đã thử lại ${MAX_SHOPEE_BLOCKED_WINDOW_RETRIES} cửa sổ ẩn danh mới.`
     });
     return;
   }
@@ -3349,8 +3331,8 @@ async function recoverShopeeBlockedDetail(reason = 'Shopee yêu cầu đăng nh�
   activeJob.pendingDetailData = null;
   await persistActiveJob();
   await logJob(
-    `[Session] Phát hiện Login Required khi lấy detail sản phẩm ${itemId}. ` +
-    `Đóng cửa sổ hiện tại và retry bằng profile thường mới ` +
+    `[Incognito] Phát hiện Login Required khi lấy detail sản phẩm ${itemId}. ` +
+    `Đóng cửa sổ hiện tại và retry bằng cửa sổ ẩn danh mới ` +
     `(${attempts + 1}/${MAX_SHOPEE_BLOCKED_WINDOW_RETRIES}).`
   );
 
@@ -3369,6 +3351,20 @@ async function navigateNextDetail() {
   if (activeJob.detailIndex >= activeJob.products.length) {
     await finishJob(true);
     return;
+  }
+
+  if (activeJob.platform === 'shopee') {
+    const currentWindowId = Number(activeJob.windowId);
+    const currentWindow = Number.isInteger(currentWindowId) && currentWindowId > 0
+      ? await chrome.windows.get(currentWindowId).catch(() => null)
+      : null;
+    if (!currentWindow?.incognito) {
+      await logJob(
+        '[Incognito] Phát hiện detail đang trỏ vào profile thường; đóng cửa sổ sai và tạo lại cửa sổ ẩn danh.'
+      );
+      const reopened = await recreateShopeeDetailWindow('sửa context detail không phải ẩn danh');
+      if (!reopened) return;
+    }
   }
 
   if (
@@ -3550,7 +3546,7 @@ async function failCurrentDetail(error) {
         try {
           const reopened = await recreateShopeeDetailWindow('Shopee Page Unavailable');
           if (reopened) {
-            await logJob('[RETRY] Đã thay cửa sổ profile thường và chuẩn bị mở lại sản phẩm.');
+            await logJob('[RETRY] Đã thay cửa sổ ẩn danh và chuẩn bị mở lại sản phẩm.');
             await navigateNextDetail();
             return;
           }
@@ -3574,7 +3570,7 @@ async function failCurrentDetail(error) {
             activeJob.tabId = newTab.id;
             await persistActiveJob();
             await chrome.tabs.remove(oldTabId).catch(() => undefined);
-            await logJob(`[RETRY] Lần thứ ${activeJob.currentDetailRetries}: đã thay tab chi tiết bị lỗi trong cùng cửa sổ profile thường.`);
+            await logJob(`[RETRY] Lần thứ ${activeJob.currentDetailRetries}: đã thay tab chi tiết bị lỗi trong cùng cửa sổ ẩn danh.`);
           } else {
             navigateNextDetail();
           }
@@ -5445,6 +5441,29 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 async function resumePersistedActiveJob() {
   if (!activeJob || !config) return;
   chrome.alarms.create('omnicrawl-poll', { periodInMinutes: 0.5 });
+  if (
+    activeJob.platform === 'shopee' &&
+    activeJob.phase === 'DETAIL' &&
+    !activeJob.detailWorkers?.length
+  ) {
+    const currentWindowId = Number(activeJob.windowId);
+    const currentWindow = Number.isInteger(currentWindowId) && currentWindowId > 0
+      ? await chrome.windows.get(currentWindowId).catch(() => null)
+      : null;
+    if (!currentWindow?.incognito) {
+      clearPageTimeout();
+      activeJob.navigationScheduled = false;
+      activeJob.detailHandledFor = null;
+      activeJob.detailRecoveryInProgress = false;
+      await persistActiveJob();
+      await logJob(
+        '[Recovery] Job detail cũ đang nằm trong profile thường; chuyển bắt buộc sang cửa sổ ẩn danh.'
+      );
+      const reopened = await recreateShopeeDetailWindow('khôi phục job vào đúng context ẩn danh');
+      if (reopened) await navigateNextDetail();
+      return;
+    }
+  }
   if (activeJob.platform === 'shopee' && activeJob.trafficPaused) {
     const windowId = Number(activeJob.windowId);
     if (Number.isInteger(windowId) && windowId > 0) {

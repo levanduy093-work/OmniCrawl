@@ -30,35 +30,34 @@ When the Shopee option
 collected product in sequence and captures description, rating, stock, shop,
 images, attributes, and variations. It stores the product's average rating and
 total rating count, but never requests, paginates, or stores customer comments.
-Shopee uses a regular-profile window for both product-list and detail phases, so
-same-origin PDP requests retain the Shopee account already signed in to Chrome.
+Shopee uses the signed-in regular profile only for the product-list phase. When
+the list is complete, the agent closes that window, waits three seconds and
+opens a dedicated Incognito window for product detail. Detail links are opened
+sequentially in that Incognito window; after every 40 processed products, the
+window is closed and replaced with a fresh Incognito window.
 For every product, the agent actively requests the structured PDP endpoints and
 retries with a bounded budget. It marks an item `COMPLETED` only when the
 structured payload contains usable price and catalogue fields; rendered-page
 data is supplemental and remains `PARTIAL` if those endpoints stay unavailable.
-If the site shows a login or CAPTCHA page during search or detail
-collection, the queue pauses without discarding its unfinished work. A
-`Login Required` page, including one served at `/verify/traffic/error`, opens a
-focused login popup in the same browser context as the current phase; the user
-signs in manually and the queue resumes only after the session is valid. A
-genuine traffic-control or CAPTCHA page remains paused until the user resolves
-it manually in the visible browser tab.
+If list collection requires authentication, the queue pauses and opens a login
+popup in the regular profile. If an Incognito detail redirects to
+`/verify/traffic/error` with `Login Required`, the agent closes that Incognito
+window, opens a fresh one and retries the unfinished product with a bounded
+retry budget. A genuine traffic-control or CAPTCHA page remains paused until
+the user resolves it manually in the visible browser tab.
 Product galleries are accepted only from image lists scoped to the current
 Shopee `itemId`. The rendered-page fallback stays inside the product header and
 rejects links to other product IDs, so recommendation images are not mixed in.
 A failure on one product is recorded and the remaining products continue.
-If Shopee expires the authenticated session, the run pauses without discarding
-its queue, opens a focused login popup, and resumes the same tabs after login.
 Shopee search-page and product-page navigations use a single action coordinator.
 External navigations are separated by a 3–6 second gap and capped at 30
 requests per minute. Search pages scroll downward in small viewport-sized steps
 so lazy-loaded cards and images can stabilize before the crawler advances.
 Shopee login challenges and `/verify/traffic/error` are handled separately.
 A traffic-control response pauses without retrying and preserves the unfinished
-queue. After the user resolves the Shopee page manually and opens a normal
-Shopee page, the same queue resumes through the global coordinator. A broken
-detail tab can be recreated in the same regular profile with bounded retries;
-the crawler does not switch browser contexts to bypass site controls.
+queue. After the user resolves the Shopee page manually, the same queue resumes
+through the global coordinator. Detail navigation is guarded so a restored or
+stale job cannot continue inside a regular-profile window.
 
 If a product page displays `The product doesn't exist` (or its Vietnamese
 equivalent), the agent treats it as a permanent `NOT_FOUND` result. It stores

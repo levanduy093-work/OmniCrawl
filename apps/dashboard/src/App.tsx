@@ -28,7 +28,7 @@ import Login from './Login'
 import OmniCrawlLogo from './Logo'
 import './App.css'
 
-const REQUIRED_BROWSER_AGENT_VERSION = '0.13.2'
+const REQUIRED_BROWSER_AGENT_VERSION = '0.13.3'
 const BROWSER_ACTOR_NAMES = ['shopee-scraper', 'shopee-shop-scraper', 'tiktok-scraper']
 const SHOPEE_ACTOR_NAMES = ['shopee-scraper', 'shopee-shop-scraper']
 
