@@ -44,6 +44,77 @@
 
   const originalFetch = window.fetch;
 
+  const shopeeDetailCandidates = (itemId, shopId) => {
+    const query = new URLSearchParams({
+      item_id: String(itemId),
+      shop_id: String(shopId)
+    });
+    const legacyQuery = new URLSearchParams({
+      itemid: String(itemId),
+      shopid: String(shopId)
+    });
+    return [
+      `/api/v4/pdp/get_pc?${query.toString()}`,
+      `/api/v4/pdp/get_rw?${query.toString()}`,
+      `/api/v4/item/get?${legacyQuery.toString()}`
+    ];
+  };
+
+  window.addEventListener('omnicrawl:execute-shopee-detail', async (event) => {
+    const itemId = String(event.detail?.itemId || '');
+    const shopId = String(event.detail?.shopId || '');
+    const requestId = String(event.detail?.requestId || '');
+    if (!itemId || !shopId) {
+      emit({
+        kind: 'detail-request',
+        requestId,
+        status: 0,
+        payload: { error: 'MISSING_PRODUCT_IDS' }
+      });
+      return;
+    }
+
+    let lastError = '';
+    for (const candidate of shopeeDetailCandidates(itemId, shopId)) {
+      try {
+        const url = new URL(candidate, location.origin).toString();
+        const response = await originalFetch.call(window, url, {
+          method: 'GET',
+          credentials: 'include',
+          headers: {
+            accept: 'application/json',
+            'x-api-source': 'pc'
+          }
+        });
+        const payload = await response.clone().json();
+        emit({
+          kind: 'detail',
+          url,
+          status: response.status,
+          payload,
+          requestedByOmniCrawl: true,
+          requestId
+        });
+        if (response.ok && (!payload?.error || payload.error === 0)) return;
+        lastError = String(payload?.error_msg || payload?.message || payload?.error || response.status);
+        if (
+          response.status === 401 ||
+          payload?.error === 90309999 ||
+          /login required|please login|đăng nhập/i.test(lastError)
+        ) return;
+      } catch (error) {
+        lastError = error?.message || String(error);
+      }
+    }
+
+    emit({
+      kind: 'detail-request',
+      requestId,
+      status: 0,
+      payload: { error: lastError || 'DETAIL_ENDPOINTS_UNAVAILABLE' }
+    });
+  });
+
   window.fetch = async function (...args) {
     const url = typeof args[0] === 'string' ? args[0] : args[0]?.url;
     if (requestKind(url) === 'search') {

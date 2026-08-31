@@ -67,6 +67,30 @@ async function main() {
       }
     }
   });
+  const shopeeShopInputSchema = JSON.stringify({
+    type: 'object',
+    required: ['shopUrl'],
+    properties: {
+      shopUrl: {
+        type: 'string',
+        title: 'Đường link shop Shopee',
+        description: 'Thu thập toàn bộ sản phẩm của shop, không giới hạn số lượng.',
+        placeholder: 'https://shopee.vn/ten-shop',
+        minLength: 1
+      },
+      includeDetails: {
+        type: 'boolean',
+        title: 'Thu thập chi tiết từng sản phẩm',
+        description: 'Sau khi lấy hết danh sách shop, mở từng sản phẩm để lấy dữ liệu chi tiết; không lấy bình luận.',
+        default: true
+      },
+      allowEmpty: {
+        type: 'boolean',
+        title: 'Cho phép kết quả rỗng',
+        default: false
+      }
+    }
+  });
   const shopeeOutputSchema = JSON.stringify({
     type: 'object',
     required: ['itemId', 'shopId', 'title', 'price', 'url'],
@@ -79,8 +103,11 @@ async function main() {
       priceMin: { type: 'number', title: 'Giá thấp nhất' },
       priceMax: { type: 'number', title: 'Giá cao nhất' },
       originalPrice: { type: 'number', title: 'Giá trước giảm' },
+      discountPercent: { type: 'number', title: 'Phần trăm giảm giá' },
       currency: { type: 'string', title: 'Đơn vị tiền tệ' },
       sold: { type: ['string', 'number'], title: 'Đã bán' },
+      totalSold: { type: 'number', title: 'Tổng lượt bán' },
+      salesLast30Days: { type: 'number', title: 'Lượt bán gần đây' },
       searchKeyword: { type: 'string', title: 'Từ khóa tìm kiếm' },
       searchPage: { type: 'number', title: 'Trang kết quả' },
       searchPosition: { type: 'number', title: 'Vị trí trong trang' },
@@ -101,8 +128,10 @@ async function main() {
       likedCount: { type: 'number', title: 'Lượt thích' },
       condition: { type: 'string', title: 'Tình trạng sản phẩm' },
       productCreatedAt: { type: 'string', format: 'date-time', title: 'Ngày đăng sản phẩm' },
+      productUpdatedAt: { type: 'string', format: 'date-time', title: 'Ngày cập nhật sản phẩm' },
       shopName: { type: 'string', title: 'Tên cửa hàng' },
       shopUsername: { type: 'string', title: 'Tên đăng nhập cửa hàng' },
+      shopDescription: { type: 'string', title: 'Mô tả cửa hàng' },
       shopLocation: { type: 'string', title: 'Nơi bán' },
       shopRating: { type: 'number', title: 'Điểm cửa hàng' },
       shopFollowerCount: { type: 'number', title: 'Người theo dõi cửa hàng' },
@@ -120,10 +149,29 @@ async function main() {
       variations: { type: 'array', title: 'Phân loại' },
       models: { type: 'array', title: 'Các phiên bản' },
       wholesaleTiers: { type: 'array', title: 'Giá bán sỉ' },
+      promotions: { type: 'array', title: 'Khuyến mãi' },
+      logistics: { type: 'array', title: 'Kênh vận chuyển' },
+      videos: { type: 'array', title: 'Video sản phẩm' },
+      viewCount: { type: 'number', title: 'Lượt xem sản phẩm' },
       observedAt: { type: 'string', format: 'date-time', title: 'Thời điểm quan sát' },
       detailStatus: { type: 'string', title: 'Trạng thái chi tiết' },
       detailError: { type: 'string', title: 'Lỗi khi lấy chi tiết' },
+      productExists: { type: 'boolean', title: 'Sản phẩm còn tồn tại' },
+      availabilityStatus: { type: 'string', title: 'Trạng thái tồn tại của sản phẩm' },
+      unavailableUrl: { type: 'string', format: 'uri', title: 'Link sản phẩm không còn tồn tại' },
       detailCrawledAt: { type: 'string', format: 'date-time', title: 'Thời gian lấy chi tiết' }
+    }
+  });
+  const parsedShopeeOutputSchema = JSON.parse(shopeeOutputSchema);
+  const {
+    searchKeyword: _searchKeyword,
+    ...shopeeShopOutputProperties
+  } = parsedShopeeOutputSchema.properties;
+  const shopeeShopOutputSchema = JSON.stringify({
+    ...parsedShopeeOutputSchema,
+    properties: {
+      ...shopeeShopOutputProperties,
+      sourceShopUrl: { type: 'string', format: 'uri', title: 'Shop nguồn' }
     }
   });
 
@@ -132,12 +180,14 @@ async function main() {
     where: { name: 'shopee-scraper' },
     update: {
       userId: null,
+      version: '1.1.1',
       inputSchema: shopeeInputSchema,
       outputSchema: shopeeOutputSchema
     },
     create: {
       name: 'shopee-scraper',
-      description: 'Advanced stealth scraper for Shopee VN search results using Crawlee.',
+      description: 'Browser Agent crawler for Shopee VN search results by keyword.',
+      version: '1.1.1',
       userId: null,
       inputSchema: shopeeInputSchema,
       outputSchema: shopeeOutputSchema
@@ -145,6 +195,26 @@ async function main() {
   });
 
   console.log(`Actor seeded: ${actor.name}`);
+
+  const shopeeShopActor = await prisma.actor.upsert({
+    where: { name: 'shopee-shop-scraper' },
+    update: {
+      userId: null,
+      version: '1.0.1',
+      inputSchema: shopeeShopInputSchema,
+      outputSchema: shopeeShopOutputSchema
+    },
+    create: {
+      name: 'shopee-shop-scraper',
+      description: 'Browser Agent crawler for every product exposed by a Shopee shop URL.',
+      version: '1.0.1',
+      userId: null,
+      inputSchema: shopeeShopInputSchema,
+      outputSchema: shopeeShopOutputSchema
+    }
+  });
+
+  console.log(`Actor seeded: ${shopeeShopActor.name}`);
 
   const tiktokInputSchema = JSON.stringify({
     type: 'object',

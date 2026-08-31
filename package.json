@@ -1,13 +1,14 @@
 {
   "name": "omnicrawl",
   "version": "0.0.1",
-  "description": "An open-source, self-hosted crawling platform by Synapse.",
+  "description": "Local-first web dashboard and Chrome Browser Agent for Shopee and TikTok crawling.",
   "private": true,
   "scripts": {
-    "build": "pnpm -r --parallel build",
-    "dev": "pnpm -r --parallel dev",
-    "lint": "pnpm -r --parallel lint",
-    "test": "pnpm -r --parallel test"
+    "build": "pnpm --filter @omnicrawl/database build && pnpm --filter @omnicrawl/sdk build && pnpm --filter @omnicrawl/api build && pnpm --filter @omnicrawl/dashboard build",
+    "dev": "pnpm --filter @omnicrawl/database build && pnpm --filter @omnicrawl/sdk build && pnpm --parallel --filter @omnicrawl/api --filter @omnicrawl/dashboard dev",
+    "lint": "pnpm --filter @omnicrawl/dashboard lint",
+    "db:push": "pnpm --filter @omnicrawl/database db:push",
+    "db:seed": "pnpm --filter @omnicrawl/database db:seed"
   },
   "devDependencies": {
     "typescript": "^5.4.0"

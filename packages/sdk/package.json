@@ -11,7 +11,6 @@
     "@types/node": "^20.0.0"
   },
   "dependencies": {
-    "@omnicrawl/database": "workspace:*",
-    "chalk": "^4.1.2"
+    "@omnicrawl/database": "workspace:*"
   }
 }

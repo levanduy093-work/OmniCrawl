@@ -16,12 +16,6 @@ import { exec } from 'child_process';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
-import { CronExpressionParser } from 'cron-parser';
-import {
-  disconnectShopeeSession,
-  getShopeeSession,
-  startShopeeConnection
-} from './shopeeSessionManager';
 import {
   startProxyServer,
   checkAllProxies,
@@ -38,7 +32,8 @@ const PORT = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || 'omnicrawl-secret-key-12345';
 const WORKSPACE_ROOT = path.resolve(__dirname, '..', '..', '..');
 const STORAGE_ROOT = path.join(WORKSPACE_ROOT, 'storage');
-const BROWSER_ACTOR_NAMES = ['shopee-scraper', 'tiktok-scraper'];
+const SHOPEE_ACTOR_NAMES = ['shopee-scraper', 'shopee-shop-scraper'];
+const BROWSER_ACTOR_NAMES = [...SHOPEE_ACTOR_NAMES, 'tiktok-scraper'];
 const browserAgentHeartbeats = new Map<string, { version: string; seenAt: number }>();
 const BROWSER_AGENT_HEARTBEAT_TTL_MS = 15_000;
 const SHOPEE_UNUSED_OUTPUT_FIELDS = new Set([
@@ -47,13 +42,10 @@ const SHOPEE_UNUSED_OUTPUT_FIELDS = new Set([
   'authorUrl',
   'categoryId',
   'comments',
-  'discountPercent',
   'duration',
   'hashtags',
   'likes',
-  'logistics',
   'musicTitle',
-  'promotions',
   'publishedAt',
   'reviewCount',
   'reviews',
@@ -62,15 +54,9 @@ const SHOPEE_UNUSED_OUTPUT_FIELDS = new Set([
   'reviewsRatingAverage',
   'reviewsStatus',
   'reviewsWithRating',
-  'salesLast30Days',
   'saves',
   'shares',
-  'shopDescription',
   'sourceType',
-  'totalSold',
-  'productUpdatedAt',
-  'videos',
-  'viewCount',
   'views'
 ]);
 
@@ -152,6 +138,66 @@ function normalizeActorInput(schemaJson: string | null, rawInput: Record<string,
   return input;
 }
 
+function normalizeShopeeShopUrl(value: unknown) {
+  let url: URL;
+  try {
+    url = new URL(String(value ?? '').trim());
+  } catch {
+    throw Object.assign(new Error('Link shop Shopee không hợp lệ'), {
+      name: 'ActorInputValidationError'
+    });
+  }
+  const hostname = url.hostname.toLowerCase();
+  const invalidPath = (
+    url.pathname === '/' ||
+    url.pathname.includes('/product/') ||
+    /-i\.\d+\.\d+\/?$/i.test(url.pathname) ||
+    /^\/search\/?$/i.test(url.pathname) ||
+    url.pathname.includes('/buyer/login') ||
+    url.pathname.includes('/verify/')
+  );
+  if (
+    url.protocol !== 'https:' ||
+    (hostname !== 'shopee.vn' && !hostname.endsWith('.shopee.vn')) ||
+    invalidPath
+  ) {
+    throw Object.assign(new Error('Vui lòng nhập đúng đường link trang shop trên shopee.vn'), {
+      name: 'ActorInputValidationError'
+    });
+  }
+  url.hash = '';
+  url.searchParams.delete('page');
+  url.searchParams.delete('omnicrawl_source');
+  return url.toString();
+}
+
+function validateBrowserActorInput(actorName: string, input: Record<string, unknown>) {
+  if (actorName === 'shopee-shop-scraper') {
+    input.shopUrl = normalizeShopeeShopUrl(input.shopUrl);
+    delete input.keyword;
+    delete input.maxItems;
+    return;
+  }
+  if (actorName === 'shopee-scraper') {
+    if (typeof input.keyword !== 'string' || !input.keyword.trim()) {
+      throw Object.assign(new Error('Từ khóa tìm kiếm là bắt buộc'), {
+        name: 'ActorInputValidationError'
+      });
+    }
+    input.keyword = input.keyword.trim();
+    delete input.shopUrl;
+    return;
+  }
+  if (
+    BROWSER_ACTOR_NAMES.includes(actorName) &&
+    (typeof input.keyword !== 'string' || !input.keyword.trim())
+  ) {
+    throw Object.assign(new Error('Search keyword is required'), {
+      name: 'ActorInputValidationError'
+    });
+  }
+}
+
 function csvCell(value: unknown) {
   let text = value === null || value === undefined
     ? ''
@@ -176,30 +222,35 @@ function outputSchemaColumns(schemaJson: string | null) {
 
 function compactActorRecord(actorName: string, value: unknown) {
   if (
-    actorName !== 'shopee-scraper' ||
+    !SHOPEE_ACTOR_NAMES.includes(actorName) ||
     !value ||
     typeof value !== 'object' ||
     Array.isArray(value)
   ) return value;
   return Object.fromEntries(
     Object.entries(value).filter(([field]) => (
-      !SHOPEE_UNUSED_OUTPUT_FIELDS.has(field)
+      !SHOPEE_UNUSED_OUTPUT_FIELDS.has(field) &&
+      !(actorName === 'shopee-scraper' && field === 'sourceShopUrl') &&
+      !(actorName === 'shopee-shop-scraper' && field === 'searchKeyword')
     ))
   );
 }
 
 function compactActorOutputSchema(actorName: string, schemaJson: string | null) {
-  if (actorName !== 'shopee-scraper' || !schemaJson) return schemaJson;
+  if (!SHOPEE_ACTOR_NAMES.includes(actorName) || !schemaJson) return schemaJson;
   try {
     const schema = JSON.parse(schemaJson);
     if (!schema?.properties || typeof schema.properties !== 'object') return schemaJson;
+    const compactProperties = Object.fromEntries(
+      Object.entries(schema.properties).filter(([field]) => (
+        !SHOPEE_UNUSED_OUTPUT_FIELDS.has(field) &&
+        !(actorName === 'shopee-scraper' && field === 'sourceShopUrl') &&
+        !(actorName === 'shopee-shop-scraper' && field === 'searchKeyword')
+      ))
+    );
     return JSON.stringify({
       ...schema,
-      properties: Object.fromEntries(
-        Object.entries(schema.properties).filter(([field]) => (
-          !SHOPEE_UNUSED_OUTPUT_FIELDS.has(field)
-        ))
-      )
+      properties: compactProperties
     });
   } catch {
     return schemaJson;
@@ -207,7 +258,7 @@ function compactActorOutputSchema(actorName: string, schemaJson: string | null) 
 }
 
 function compactActorInputSchema(actorName: string, schemaJson: string | null) {
-  if (actorName !== 'shopee-scraper' || !schemaJson) return schemaJson;
+  if (!SHOPEE_ACTOR_NAMES.includes(actorName) || !schemaJson) return schemaJson;
   try {
     const schema = JSON.parse(schemaJson);
     if (!schema?.properties || typeof schema.properties !== 'object') return schemaJson;
@@ -227,6 +278,7 @@ function compactActorInputSchema(actorName: string, schemaJson: string | null) {
 }
 
 function sanitizeDetailPatch(value: any) {
+  const hasOwn = (key: string) => Object.prototype.hasOwnProperty.call(value || {}, key);
   const text = (input: unknown, limit = 5000) => String(input ?? '').slice(0, limit);
   const number = (input: unknown) => {
     if (input === null || input === undefined || input === '') return null;
@@ -280,9 +332,11 @@ function sanitizeDetailPatch(value: any) {
       : []
   );
 
-  const status = value?.detailStatus === 'FAILED' ? 'FAILED' : 'COMPLETED';
+  const status = ['FAILED', 'PARTIAL'].includes(value?.detailStatus)
+    ? value.detailStatus
+    : 'COMPLETED';
   if (status === 'FAILED') {
-    return {
+    const failure = {
       itemId: text(value?.itemId, 200),
       shopId: text(value?.shopId, 200),
       title: text(value?.title, 2000),
@@ -297,11 +351,23 @@ function sanitizeDetailPatch(value: any) {
       detailError: text(value?.detailError, 1000),
       detailCrawledAt: new Date().toISOString()
     } as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.entries(failure).filter(([key, fieldValue]) => (
+        ['detailStatus', 'detailError', 'detailCrawledAt'].includes(key) ||
+        (
+          hasOwn(key) &&
+          fieldValue !== null &&
+          fieldValue !== undefined &&
+          fieldValue !== ''
+        )
+      ))
+    );
   }
   const detail: Record<string, unknown> = {
     description: text(value?.description, 50_000),
     category: text(value?.category, 1000),
     brand: text(value?.brand, 500),
+    price: text(value?.price, 200),
     priceValue: number(value?.priceValue),
     priceMin: number(value?.priceMin),
     priceMax: number(value?.priceMax),
@@ -352,7 +418,7 @@ function sanitizeDetailPatch(value: any) {
     videos: objectArray(value?.videos, 20),
     observedAt: text(value?.observedAt, 100) || new Date().toISOString(),
     detailStatus: status,
-    detailError: '',
+    detailError: text(value?.detailError, 1000),
     detailCrawledAt: new Date().toISOString()
   };
   if (Object.prototype.hasOwnProperty.call(value || {}, 'reviews')) {
@@ -366,6 +432,8 @@ function sanitizeDetailPatch(value: any) {
     Object.entries(detail).filter(([key, fieldValue]) => (
       fieldValue !== null &&
       fieldValue !== undefined &&
+      (!Array.isArray(fieldValue) || fieldValue.length > 0 || hasOwn(key)) &&
+      (typeof fieldValue !== 'boolean' || hasOwn(key)) &&
       (
         typeof fieldValue !== 'string' ||
         fieldValue !== '' ||
@@ -526,7 +594,7 @@ app.get('/api/admin/users', requireAuth, requireAdmin, async (_req: any, res: an
       credits: true,
       createdAt: true,
       updatedAt: true,
-      _count: { select: { runs: true, actors: true, schedules: true } }
+      _count: { select: { runs: true, actors: true } }
     }
   });
   res.json(users);
@@ -645,87 +713,17 @@ app.patch('/api/admin/users/:id', requireAuth, requireAdmin, async (req: any, re
       credits: true,
       createdAt: true,
       updatedAt: true,
-      _count: { select: { runs: true, actors: true, schedules: true } }
+      _count: { select: { runs: true, actors: true } }
     }
   });
   res.json(updated);
 });
 
-// --- SHOPEE SESSION ROUTES ---
-
-app.get('/api/integrations/shopee/session', requireAuth, async (req: any, res: any) => {
-  try {
-    const session = await getShopeeSession(req.user.id);
-    res.json({
-      status: session.status,
-      lastConnectedAt: session.lastConnectedAt,
-      lastCheckedAt: session.lastCheckedAt,
-      lastError: session.lastError
-    });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/integrations/shopee/connect', requireAuth, async (req: any, res: any) => {
-  try {
-    const session = await startShopeeConnection(req.user.id);
-    res.status(202).json({
-      status: session.status,
-      message: 'A dedicated Edge window was opened. Log in to Shopee and complete any CAPTCHA.'
-    });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete('/api/integrations/shopee/session', requireAuth, async (req: any, res: any) => {
-  try {
-    const session = await disconnectShopeeSession(req.user.id);
-    res.json({ status: session.status });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 // --- CORE ROUTES ---
 
-function applyTierLimits(schemaString: string | null, tier: string, role?: string): string | null {
-  if (!schemaString) return null;
-  try {
-    const schema = JSON.parse(schemaString);
-    if (!schema.properties) return schemaString;
-
-    if (role === 'SUPER_ADMIN') {
-      if (schema.properties.maxItems) delete schema.properties.maxItems.maximum;
-      if (schema.properties.maxReviewsPerProduct) delete schema.properties.maxReviewsPerProduct.maximum;
-      return JSON.stringify(schema);
-    }
-
-    const limits: Record<string, { maxItems: number, maxReviews: number }> = {
-      'FREE': { maxItems: 10, maxReviews: 10 },
-      'BASIC': { maxItems: 100, maxReviews: 100 },
-      'PRO': { maxItems: 1000, maxReviews: 1000 },
-      'ENTERPRISE': { maxItems: 100000, maxReviews: 100000 }
-    };
-    const tierLimits = limits[tier] || limits['FREE'];
-
-    if (schema.properties.maxItems) {
-      schema.properties.maxItems.maximum = Math.min(
-        schema.properties.maxItems.maximum ?? 100000,
-        tierLimits.maxItems
-      );
-    }
-    if (schema.properties.maxReviewsPerProduct) {
-      schema.properties.maxReviewsPerProduct.maximum = Math.min(
-        schema.properties.maxReviewsPerProduct.maximum ?? 100000,
-        tierLimits.maxReviews
-      );
-    }
-    return JSON.stringify(schema);
-  } catch {
-    return schemaString;
-  }
+function applyTierLimits(schemaString: string | null, _tier?: string, _role?: string): string | null {
+  // Open-source edition: no tier-based limits
+  return schemaString;
 }
 
 // List all actors
@@ -769,13 +767,8 @@ app.post('/api/actors/:id/run', requireAuth, async (req: any, res: any) => {
       ),
       rawInput
     );
-    if (actor.name === 'shopee-scraper') delete input.maxReviewsPerProduct;
-    if (
-      BROWSER_ACTOR_NAMES.includes(actor.name) &&
-      (typeof input.keyword !== 'string' || !input.keyword.trim())
-    ) {
-      return res.status(400).json({ error: 'Search keyword is required' });
-    }
+    if (SHOPEE_ACTOR_NAMES.includes(actor.name)) delete input.maxReviewsPerProduct;
+    validateBrowserActorInput(actor.name, input);
     const run = await prisma.$transaction(async (tx) => {
       return tx.run.create({
         // Keep the run invisible to workers until its input is durable.
@@ -804,7 +797,7 @@ app.post('/api/actors/:id/run', requireAuth, async (req: any, res: any) => {
       }
     });
 
-    res.json({ message: 'Run scheduled.', run: queuedRun });
+    res.json({ message: 'Run queued.', run: queuedRun });
   } catch (err: any) {
     if (err.name === 'ActorInputValidationError') {
       return res.status(400).json({ error: err.message });
@@ -865,17 +858,22 @@ app.get('/api/browser-agent/jobs/next', requireAuth, async (req: any, res: any) 
     if (claim.count !== 1) return res.status(204).send();
 
     const input: any = await readRunInput(candidate.id);
+    const platform = candidate.actor.name === 'tiktok-scraper' ? 'tiktok' : 'shopee';
+    const crawlMode = candidate.actor.name === 'shopee-shop-scraper' ? 'shop' : 'keyword';
+    const unlimitedItems = crawlMode === 'shop';
     const maxItemsValue = Number(input.maxItems ?? 30);
-    const maxItems = Number.isFinite(maxItemsValue)
+    const maxItems = unlimitedItems ? null : Number.isFinite(maxItemsValue)
       ? Math.min(500, Math.max(1, Math.floor(maxItemsValue)))
       : 30;
-    const platform = candidate.actor.name === 'tiktok-scraper' ? 'tiktok' : 'shopee';
     const platformLabel = platform === 'tiktok' ? 'TikTok' : 'Shopee';
-    const keyword = String(input.keyword || 'máy in 3d').trim() || 'máy in 3d';
+    const keyword = unlimitedItems ? '' : String(input.keyword || 'máy in 3d').trim() || 'máy in 3d';
+    const shopUrl = unlimitedItems ? normalizeShopeeShopUrl(input.shopUrl) : '';
     const mode = platform === 'tiktok' && input.mode === 'videos' ? 'videos' : 'products';
     appendRunLog(
       candidate.id,
-      `[INFO] [BrowserAgent] Claimed ${platformLabel} ${mode} job for keyword "${keyword}".`
+      unlimitedItems
+        ? `[INFO] [BrowserAgent] Claimed ${platformLabel} shop job for ${shopUrl}.`
+        : `[INFO] [BrowserAgent] Claimed ${platformLabel} ${mode} job for keyword "${keyword}".`
     );
     const includeDetails = input.includeDetails !== false;
     const maxReviewsValue = Number(input.maxReviewsPerProduct ?? 20);
@@ -891,8 +889,10 @@ app.get('/api/browser-agent/jobs/next', requireAuth, async (req: any, res: any) 
       mode,
       query: {
         keyword,
+        crawlMode,
+        ...(shopUrl ? { shopUrl } : {}),
         mode,
-        maxItems,
+        maxItems: unlimitedItems ? 'ALL' : maxItems,
         includeDetails,
         ...(platform === 'shopee' ? {} : { maxReviewsPerProduct }),
         detailConcurrency
@@ -910,7 +910,10 @@ app.get('/api/browser-agent/jobs/next', requireAuth, async (req: any, res: any) 
       platform,
       mode,
       keyword,
+      crawlMode,
+      shopUrl,
       maxItems,
+      unlimitedItems,
       includeDetails,
       maxReviewsPerProduct,
       detailConcurrency
@@ -1083,15 +1086,17 @@ app.patch('/api/browser-agent/jobs/:id/items/:itemId', requireAuth, async (req: 
     }
 
     const completed = Math.max(0, Math.floor(Number(req.body?.progress?.completed) || 0));
+    const partial = Math.max(0, Math.floor(Number(req.body?.progress?.partial) || 0));
     const failed = Math.max(0, Math.floor(Number(req.body?.progress?.failed) || 0));
     const total = Math.max(
-      completed + failed,
+      completed + partial + failed,
       Math.floor(Number(req.body?.progress?.total) || 0)
     );
     await dataset.setMetadata({
       detailProgress: {
         enabled: true,
         completed,
+        partial,
         failed,
         total
       }
@@ -1099,7 +1104,7 @@ app.patch('/api/browser-agent/jobs/:id/items/:itemId', requireAuth, async (req: 
     appendRunLog(
       run.id,
       `[INFO] [BrowserAgent] ${run.actor.name === 'tiktok-scraper' ? 'TikTok' : 'Shopee'} ` +
-      `details ${completed + failed}/${total}: ` +
+      `details ${completed + partial + failed}/${total}: ` +
       `${detail.detailStatus === 'FAILED' ? 'failed' : 'stored'} for item ${String(req.params.itemId).slice(0, 100)}.`
     );
     res.json({ success: true, detailStatus: detail.detailStatus });
@@ -1120,7 +1125,7 @@ app.post('/api/browser-agent/jobs/:id/items/:itemId/reviews', requireAuth, async
       select: { id: true, actor: { select: { name: true } } }
     });
     if (!run) return res.status(404).json({ error: 'Active browser job not found' });
-    if (run.actor.name === 'shopee-scraper') {
+    if (SHOPEE_ACTOR_NAMES.includes(run.actor.name)) {
       return res.json({ accepted: 0, total: 0, disabled: true });
     }
 
@@ -1208,9 +1213,10 @@ app.post('/api/browser-agent/jobs/:id/complete', requireAuth, async (req: any, r
   }
 
   const detailCompleted = Math.max(0, Math.floor(Number(req.body?.details?.completed) || 0));
+  const detailPartial = Math.max(0, Math.floor(Number(req.body?.details?.partial) || 0));
   const detailFailed = Math.max(0, Math.floor(Number(req.body?.details?.failed) || 0));
   const detailTotal = Math.max(
-    detailCompleted + detailFailed,
+    detailCompleted + detailPartial + detailFailed,
     Math.floor(Number(req.body?.details?.total) || 0)
   );
   if (req.body?.details) {
@@ -1218,13 +1224,14 @@ app.post('/api/browser-agent/jobs/:id/complete', requireAuth, async (req: any, r
       detailProgress: {
         enabled: Boolean(req.body.details.enabled),
         completed: detailCompleted,
+        partial: detailPartial,
         failed: detailFailed,
         total: detailTotal
       }
     });
   }
 
-  const finalStatus = detailFailed > 0 ? 'PARTIAL' : 'SUCCESS';
+  const finalStatus = detailFailed > 0 || detailPartial > 0 ? 'PARTIAL' : 'SUCCESS';
   const completed = await prisma.run.updateMany({
     where: {
       id: req.params.id,
@@ -1239,7 +1246,7 @@ app.post('/api/browser-agent/jobs/:id/complete', requireAuth, async (req: any, r
     req.params.id,
     `[INFO] [BrowserAgent] Completed with ${storedCount} ${platformLabel} items` +
     (req.body?.details
-      ? `; details: ${detailCompleted} completed, ${detailFailed} failed.`
+      ? `; details: ${detailCompleted} completed, ${detailPartial} partial, ${detailFailed} failed.`
       : '.')
   );
   res.json({ success: finalStatus === 'SUCCESS', status: finalStatus });
@@ -1528,84 +1535,6 @@ app.delete('/api/runs/:id', requireAuth, async (req: any, res) => {
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
-});
-
-// List schedules
-app.get('/api/schedules', requireAuth, async (req: any, res) => {
-  const schedules = await prisma.schedule.findMany({
-    where: { userId: req.user.id },
-    include: { actor: true },
-    orderBy: { createdAt: 'desc' }
-  });
-  res.json(schedules);
-});
-
-// Create schedule
-app.post('/api/schedules', requireAuth, async (req: any, res: any) => {
-  const { actorId, cron } = req.body;
-  const rawInput = req.body?.input && typeof req.body.input === 'object' && !Array.isArray(req.body.input)
-    ? req.body.input
-    : {};
-  if (!actorId || !cron) {
-    return res.status(400).json({ error: 'actorId and cron are required' });
-  }
-  try {
-    CronExpressionParser.parse(cron);
-  } catch {
-    return res.status(400).json({ error: 'Invalid cron expression' });
-  }
-
-  // Verify actor exists and belongs to user or is public
-  const actor = await prisma.actor.findUnique({ where: { id: actorId } });
-  if (!actor) return res.status(404).json({ error: 'Actor not found' });
-
-  if (actor.userId && actor.userId !== req.user.id) {
-    return res.status(403).json({ error: 'Unauthorized to use this actor' });
-  }
-
-  let input: Record<string, unknown>;
-  try {
-    input = normalizeActorInput(actor.inputSchema, rawInput);
-  } catch (err: any) {
-    if (err.name === 'ActorInputValidationError') {
-      return res.status(400).json({ error: err.message });
-    }
-    throw err;
-  }
-
-  const schedule = await prisma.schedule.create({
-    data: {
-      actorId,
-      userId: req.user.id,
-      cron,
-      input: input as any,
-      enabled: true
-    }
-  });
-  res.json(schedule);
-});
-
-// Delete a schedule
-app.delete('/api/schedules/:id', requireAuth, async (req: any, res: any) => {
-  const schedule = await prisma.schedule.findUnique({ where: { id: req.params.id } });
-  if (!schedule) return res.status(404).json({ error: 'Not found' });
-  if (schedule.userId !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
-
-  await prisma.schedule.delete({ where: { id: req.params.id } });
-  res.json({ success: true });
-});
-
-// Toggle a schedule
-app.patch('/api/schedules/:id', requireAuth, async (req: any, res: any) => {
-  const schedule = await prisma.schedule.findUnique({ where: { id: req.params.id } });
-  if (!schedule) return res.status(404).json({ error: 'Not found' });
-  if (schedule.userId !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
-
-  const updated = await prisma.schedule.update({
-    where: { id: req.params.id },
-    data: { enabled: !schedule.enabled }
-  });
-  res.json(updated);
 });
 
 // Get run details

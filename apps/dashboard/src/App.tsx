@@ -3,7 +3,6 @@ import { createPortal } from 'react-dom'
 import {
   Play,
   Activity,
-  Clock,
   Settings,
   Search,
   Bot,
@@ -29,7 +28,9 @@ import Login from './Login'
 import OmniCrawlLogo from './Logo'
 import './App.css'
 
-const REQUIRED_BROWSER_AGENT_VERSION = '0.11.22'
+const REQUIRED_BROWSER_AGENT_VERSION = '0.13.2'
+const BROWSER_ACTOR_NAMES = ['shopee-scraper', 'shopee-shop-scraper', 'tiktok-scraper']
+const SHOPEE_ACTOR_NAMES = ['shopee-scraper', 'shopee-shop-scraper']
 
 type ProxyConfig = {
   enabled: boolean
@@ -204,8 +205,12 @@ function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem('token'))
   const [user, setUser] = useState<any>(null)
   
-  // Tabs: actors, runs, schedules, marketplace
-  const [activeTab, setActiveTab] = useState(() => localStorage.getItem('activeTab') || 'actors')
+  const [activeTab, setActiveTab] = useState(() => {
+    const savedTab = localStorage.getItem('activeTab')
+    return savedTab && ['actors', 'runs', 'proxies', 'settings'].includes(savedTab)
+      ? savedTab
+      : 'actors'
+  })
 
   useEffect(() => {
     localStorage.setItem('activeTab', activeTab);
@@ -233,10 +238,6 @@ function App() {
   
   const [actors, setActors] = useState([])
   const [runs, setRuns] = useState([])
-  const [schedules, setSchedules] = useState([])
-  const [newScheduleActorId, setNewScheduleActorId] = useState('')
-  const [newScheduleCron, setNewScheduleCron] = useState('* * * * *')
-  const [newScheduleInput, setNewScheduleInput] = useState<Record<string, unknown>>({})
   const [isSidebarOpen, setIsSidebarOpen] = useState(true)
   const [runInputs, setRunInputs] = useState<Record<string, any>>({})
   const [browserAgentConnected, setBrowserAgentConnected] = useState(false)
@@ -322,10 +323,9 @@ function App() {
   const fetchData = useCallback(async () => {
     try {
       const headers = { 'Authorization': `Bearer ${token}` }
-      const [actorsRes, runsRes, schedulesRes] = await Promise.all([
+      const [actorsRes, runsRes] = await Promise.all([
         fetch('http://localhost:3001/api/actors', { headers }),
-        fetch('http://localhost:3001/api/runs', { headers }),
-        fetch('http://localhost:3001/api/schedules', { headers })
+        fetch('http://localhost:3001/api/runs', { headers })
       ])
       if (actorsRes.status === 401 || runsRes.status === 401) {
         handleLogout()
@@ -333,7 +333,6 @@ function App() {
       }
       setActors(await actorsRes.json())
       setRuns(await runsRes.json())
-      if (schedulesRes.ok) setSchedules(await schedulesRes.json())
       window.postMessage({
         source: 'OMNICRAWL_DASHBOARD',
         type: 'POLL_NOW'
@@ -544,58 +543,6 @@ function App() {
     }
   }
 
-  const handleCreateSchedule = async () => {
-    if (!newScheduleActorId || !newScheduleCron) {
-      alert('Please select an actor and enter a cron expression.');
-      return;
-    }
-    
-    try {
-      const res = await fetch('http://localhost:3001/api/schedules', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({
-          actorId: newScheduleActorId,
-          cron: newScheduleCron,
-          input: applyInputDefaults(
-            (actors.find((actor: any) => actor.id === newScheduleActorId) as any)?.inputSchema,
-            newScheduleInput
-          )
-        })
-      });
-      if (!res.ok) throw new Error(await res.text());
-      setNewScheduleCron('* * * * *');
-      setNewScheduleInput({});
-      fetchData();
-    } catch (err: any) {
-      alert(`Error: ${err.message}`);
-    }
-  }
-
-  const handleToggleSchedule = async (id: string) => {
-    try {
-      await fetch(`http://localhost:3001/api/schedules/${id}`, {
-        method: 'PATCH',
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      fetchData();
-    } catch (err: any) {
-      alert(`Error: ${err.message}`);
-    }
-  }
-
-  const handleDeleteSchedule = async (id: string) => {
-    try {
-      await fetch(`http://localhost:3001/api/schedules/${id}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      fetchData();
-    } catch (err: any) {
-      alert(`Error: ${err.message}`);
-    }
-  }
-
   const handleStopRun = async (id: string) => {
     try {
       const response = await fetch(`http://localhost:3001/api/runs/${id}/stop`, {
@@ -765,13 +712,6 @@ function App() {
             onClick={() => setActiveTab('runs')} 
             collapsed={!isSidebarOpen}
           />
-          <NavItem 
-            icon={<Clock />} 
-            label="Schedules" 
-            active={activeTab === 'schedules'} 
-            onClick={() => setActiveTab('schedules')} 
-            collapsed={!isSidebarOpen}
-          />
           {isAdminRole(user?.role) && (
             <NavItem 
               icon={<Shield />} 
@@ -839,7 +779,7 @@ function App() {
                           </span>
                         )}
                       </div>
-                      <span className="text-[11px] text-gray-400 font-mono">v1.0.0</span>
+                      <span className="text-[11px] text-gray-400 font-mono">v{actor.version || '1.0.0'}</span>
                     </div>
                   </div>
                   
@@ -847,7 +787,7 @@ function App() {
                     {actor.description || 'No description provided.'}
                   </p>
                   
-                  {(actor.name === 'shopee-scraper' || actor.name === 'tiktok-scraper') && (
+                  {BROWSER_ACTOR_NAMES.includes(actor.name) && (
                     <div className="mb-3 flex flex-col gap-2">
                       <div className="rounded-xl border border-gray-200/80 bg-slate-50/70 px-3 py-2 flex items-center justify-between gap-2 min-h-[38px]">
                         <div className="flex items-center gap-1.5 text-xs font-medium text-gray-800">
@@ -869,7 +809,7 @@ function App() {
                         </div>
                       </div>
                       
-                      {browserAgentConnected && actor.name === 'shopee-scraper' && (
+                      {browserAgentConnected && SHOPEE_ACTOR_NAMES.includes(actor.name) && (
                         <div className="rounded-xl border border-gray-200/80 bg-slate-50/70 px-3 py-2 flex items-center justify-between gap-2 min-h-[38px]">
                           <div className="flex items-center gap-1.5 text-xs font-medium text-gray-800">
                             <span className="relative flex h-2 w-2 shrink-0">
@@ -937,7 +877,7 @@ function App() {
                     }))}
                   />
 
-                  {((runInputs[actor.id]?.maxItems as number) > 200 || (runInputs[actor.id]?.maxItems === undefined && 200 < 0 /* fallback logic if needed */)) && (
+                  {actor.name !== 'shopee-shop-scraper' && (runInputs[actor.id]?.maxItems as number) > 200 && (
                     <div className="mt-3 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2 text-amber-800 text-xs shadow-sm">
                       <AlertTriangle size={16} className="shrink-0 mt-0.5" />
                       <div>
@@ -950,7 +890,7 @@ function App() {
                 <div className="pt-3 mt-4 border-t border-gray-100">
                   <button 
                     onClick={() => triggerRun(actor.id)}
-                    disabled={(actor.name === 'shopee-scraper' || actor.name === 'tiktok-scraper') && !browserAgentConnected}
+                    disabled={BROWSER_ACTOR_NAMES.includes(actor.name) && !browserAgentConnected}
                     className="w-full flex items-center justify-center gap-2 bg-[#E8F0FE] text-blue-700 font-semibold py-2.5 text-xs rounded-xl hover:bg-blue-100 transition-colors disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed"
                   >
                     <Play size={14} fill="currentColor" /> Run
@@ -1037,100 +977,6 @@ function App() {
                 ))}
               </tbody>
             </table>
-          </div>
-        )}
-
-        {activeTab === 'schedules' && (
-          <div className="space-y-6">
-            <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-50 space-y-4">
-              <div className="flex gap-4 items-end">
-                <div className="flex-1">
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Select Crawler</label>
-                  <select
-                    value={newScheduleActorId}
-                    onChange={e => {
-                      setNewScheduleActorId(e.target.value)
-                      setNewScheduleInput({})
-                    }}
-                    className="w-full px-4 py-3 bg-gray-50 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                  >
-                    <option value="">-- Select a crawler --</option>
-                    {actors.map((actor: any) => (
-                      <option key={actor.id} value={actor.id}>{actor.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="flex-1">
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Schedule Interval</label>
-                  <select
-                    value={newScheduleCron}
-                    onChange={e => setNewScheduleCron(e.target.value)}
-                    className="w-full px-4 py-3 bg-gray-50 rounded-xl border border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-100"
-                  >
-                    <option value="* * * * *">Every minute</option>
-                    <option value="0 * * * *">Every hour</option>
-                    <option value="0 0 * * *">Every day at midnight</option>
-                    <option value="0 0 * * 0">Every Sunday</option>
-                  </select>
-                </div>
-                <button
-                  onClick={handleCreateSchedule}
-                  className="bg-blue-600 text-white font-medium px-6 py-3 rounded-xl hover:bg-blue-700 transition-colors h-[50px]"
-                >
-                  Create Schedule
-                </button>
-              </div>
-              {newScheduleActorId && (
-                <ActorInputFields
-                  schema={(actors.find((actor: any) => actor.id === newScheduleActorId) as any)?.inputSchema}
-                  input={newScheduleInput}
-                  onChange={setNewScheduleInput}
-                />
-              )}
-            </div>
-
-            <div className="bg-white rounded-3xl shadow-sm border border-gray-50 overflow-hidden">
-              <table className="w-full text-left">
-                <thead className="bg-[#F1F3F5] text-gray-800 font-semibold text-sm border-b border-gray-200">
-                  <tr>
-                    <th className="px-6 py-4">Crawler</th>
-                    <th className="px-6 py-4">Cron Expression</th>
-                    <th className="px-6 py-4">Status</th>
-                    <th className="px-6 py-4 text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-100">
-                  {schedules.map((schedule: any) => (
-                    <tr key={schedule.id} className="hover:bg-blue-50/25 transition-colors group">
-                      <td className="px-6 py-5 text-gray-900 font-medium">{schedule.actor?.name || schedule.actorId}</td>
-                      <td className="px-6 py-5 font-mono text-sm text-gray-600 bg-gray-100 rounded my-4 inline-block ml-6 px-2">{schedule.cron}</td>
-                      <td className="px-6 py-5">
-                        <button 
-                          onClick={() => handleToggleSchedule(schedule.id)}
-                          className={`px-3 py-1 text-xs font-semibold rounded-full transition-colors ${
-                          schedule.enabled ? 'bg-green-100 text-green-700 hover:bg-green-200' : 'bg-gray-200 text-gray-600 hover:bg-gray-300'
-                        }`}>
-                          {schedule.enabled ? 'ACTIVE' : 'DISABLED'}
-                        </button>
-                      </td>
-                      <td className="px-6 py-5 text-right">
-                        <button 
-                          onClick={() => handleDeleteSchedule(schedule.id)}
-                          className="px-3 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-700 hover:bg-red-200 transition-colors"
-                        >
-                          Delete
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                  {schedules.length === 0 && (
-                    <tr>
-                      <td colSpan={4} className="px-6 py-10 text-center text-gray-500">No schedules created yet.</td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
           </div>
         )}
 
@@ -2237,7 +2083,7 @@ function ActorInputFields({
   schema,
   input,
   onChange,
-  actorName
+  actorName: _actorName
 }: {
   schema?: string | null
   input: Record<string, unknown>
@@ -2246,10 +2092,9 @@ function ActorInputFields({
 }) {
   const parsed = parseInputSchema(schema)
   
-  if (actorName === 'shopee-scraper' || actorName === 'tiktok-scraper') {
-    if (parsed?.properties?.maxItems) {
-      parsed.properties.maxItems.maximum = 200
-      parsed.properties.maxItems.description = (parsed.properties.maxItems.description || '') + ' (Tối đa 200)'
+  if (parsed?.properties?.maxItems && parsed.properties.maxItems.maximum) {
+    if (!parsed.properties.maxItems.description?.includes('Tối đa')) {
+      parsed.properties.maxItems.description = (parsed.properties.maxItems.description ? `${parsed.properties.maxItems.description} ` : '') + `(Tối đa ${parsed.properties.maxItems.maximum})`
     }
   }
 
@@ -2263,6 +2108,7 @@ function ActorInputFields({
       {properties.map(([key, property]) => {
         const label = property.title || key
         const currentValue = input[key] ?? property.default ?? ''
+        const isRequired = required.has(key)
 
         if (property.type === 'boolean') {
           return (
@@ -2288,7 +2134,7 @@ function ActorInputFields({
           return (
             <div key={key}>
               <label className="mb-1 block text-xs font-medium text-gray-700">
-                {label}{required.has(key) ? ' *' : ''}
+                {label}{isRequired ? ' *' : ''}
               </label>
               <select
                 value={String(currentValue)}
@@ -2312,7 +2158,7 @@ function ActorInputFields({
         return (
           <div key={key}>
             <label className="mb-1 block text-xs font-medium text-gray-700">
-              {label}{required.has(key) ? ' *' : ''}
+              {label}{isRequired ? ' *' : ''}
             </label>
             <input
               type={numeric ? 'number' : 'text'}
@@ -2320,7 +2166,7 @@ function ActorInputFields({
               min={property.minimum}
               max={property.maximum}
               step={property.type === 'integer' ? 1 : undefined}
-              required={required.has(key)}
+              required={isRequired}
               placeholder={property.placeholder || property.description}
               onChange={(event) => onChange({ ...input, [key]: event.target.value })}
               className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"

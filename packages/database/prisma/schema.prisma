@@ -21,23 +21,8 @@ model User {
   updatedAt DateTime @updatedAt
   actors    Actor[]
   runs      Run[]
-  schedules Schedule[]
-  shopeeSession ShopeeSession?
 
   @@index([role, status])
-}
-
-model ShopeeSession {
-  id              String    @id @default(cuid())
-  userId          String    @unique
-  status          String    @default("DISCONNECTED") // DISCONNECTED, CONNECTING, CONNECTED, EXPIRED, ERROR
-  lastConnectedAt DateTime?
-  lastCheckedAt   DateTime?
-  lastError       String?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-
-  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model Actor {
@@ -52,8 +37,6 @@ model Actor {
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
   runs        Run[]
-  schedules   Schedule[]
-  webhooks    Webhook[]
 }
 
 model Run {
@@ -91,32 +74,6 @@ model DatasetItem {
   @@unique([runId, position])
   @@unique([runId, externalKey])
   @@index([runId, position])
-}
-
-model Schedule {
-  id          String   @id @default(cuid())
-  actorId     String
-  userId      String?
-  cron        String
-  input       Json?    // JSON payload reused for each scheduled run
-  enabled     Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  
-  actor       Actor    @relation(fields: [actorId], references: [id])
-  user        User?    @relation(fields: [userId], references: [id])
-
-  @@index([enabled, updatedAt])
-}
-
-model Webhook {
-  id          String   @id @default(cuid())
-  actorId     String
-  url         String
-  events      String   @default("RUN_SUCCESS,RUN_FAILED") // Comma separated events
-  createdAt   DateTime @default(now())
-  
-  actor       Actor    @relation(fields: [actorId], references: [id])
 }
 
 model ProxyGroup {

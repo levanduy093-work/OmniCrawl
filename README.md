@@ -1,22 +1,66 @@
 # OmniCrawl
 
-**An open-source, self-hosted crawling platform by Synapse.**
+OmniCrawl là dashboard web local-first để chạy các crawler qua Chrome Browser
+Agent. Trình duyệt đang đăng nhập Shopee/TikTok thực hiện thu thập; API quản lý
+run, dữ liệu và proxy.
 
-OmniCrawl is a powerful infrastructure for building, running, and scaling web crawlers anywhere. It adopts an "Actor-based" model similar to Apify, allowing you to manage multiple crawlers (Actors) on a unified platform.
+## Các actor hiện có
 
-## Key Features
+| Actor | Đầu vào | Phạm vi |
+| --- | --- | --- |
+| `shopee-scraper` | Từ khóa | Có giới hạn `maxItems` theo mỗi run |
+| `shopee-shop-scraper` | URL shop Shopee | Lấy toàn bộ sản phẩm shop, không có `maxItems` |
+| `tiktok-scraper` | Từ khóa và chế độ tìm kiếm | Video TikTok hoặc sản phẩm TikTok Shop |
 
-- **Actor Model:** Package your scraper into isolated units with their own input/output schemas.
-- **Self-Hosted:** Deploy anywhere from a single local machine to a Kubernetes cluster.
-- **Multi-language Support:** Write crawlers in TypeScript, Python, Playwright, Puppeteer, etc.
-- **Built-in Infrastructure:** Job queues, proxy management, dataset storage, and scheduling out of the box.
+Shopee keyword và Shopee shop là hai actor độc lập, có schema và runtime riêng.
 
-## Documentation
+## Cấu trúc dự án
 
-- [Roadmap](./ROADMAP.md) - The vision and development phases.
-- [Architecture Overview](./docs/architecture/overview.md) - How OmniCrawl works under the hood.
-- [Getting Started](./docs/development/getting-started.md) - Developer guide for setting up the monorepo.
+```text
+apps/
+├── api/                 REST API, xác thực, runs, datasets và proxy
+├── browser-extension/   Chrome Browser Agent và runtime từng actor
+│   └── actors/
+│       ├── shopee-search/
+│       ├── shopee-shop/
+│       └── tiktok/
+└── dashboard/           Giao diện web React/Vite
+packages/
+├── database/            Prisma schema, client và seed dữ liệu nền
+└── sdk/                 Hợp đồng dữ liệu/run dùng chung
+docs/
+└── architecture.md      Luồng chạy và nguyên tắc mở rộng
+```
 
-## License
+Thư mục `storage/` là dữ liệu runtime do API tự tạo và đã được git bỏ qua.
 
-MIT (or to be defined).
+## Chạy local
+
+Yêu cầu Node.js 20+, pnpm 9+ và PostgreSQL có extension `vector`, `pg_trgm`.
+
+```bash
+cp .env.example .env
+docker compose -f docker-compose.example.yml up -d db
+pnpm install
+pnpm db:push
+pnpm db:seed
+pnpm dev
+```
+
+- Dashboard: `http://localhost:5173`
+- API: `http://localhost:3001`
+- Browser Agent: load unpacked thư mục `apps/browser-extension` tại
+  `chrome://extensions`.
+
+## Lệnh chính
+
+```bash
+pnpm dev       # API + dashboard
+pnpm build     # Build toàn bộ source đang dùng
+pnpm lint      # Kiểm tra dashboard
+pnpm db:push   # Đồng bộ Prisma schema
+pnpm db:seed   # Tạo/cập nhật actor mặc định
+```
+
+Chi tiết cách Browser Agent hoạt động nằm tại
+[`apps/browser-extension/README.md`](apps/browser-extension/README.md).

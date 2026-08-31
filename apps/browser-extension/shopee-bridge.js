@@ -6,6 +6,59 @@ window.addEventListener('omnicrawl:shopee-response', (event) => {
   }).catch(() => undefined);
 });
 
+function extractShopeeHydrationDetail() {
+  const ids = parseProductIds(location.href);
+  if (!ids) return null;
+  const cacheKey = `${ids.shopId}/${ids.itemId}`;
+
+  for (const script of document.querySelectorAll('script[type="text/mfe-initial-data"]')) {
+    let state;
+    try {
+      state = JSON.parse(script.textContent || '{}')?.initialState;
+    } catch {
+      continue;
+    }
+    const cached = state?.DOMAIN_PDP?.data?.PDP_BFF_DATA?.cachedMap?.[cacheKey];
+    const sourceItem = cached?.item || state?.item?.items?.[String(ids.itemId)];
+    if (!sourceItem) continue;
+    const sourceItemId = String(sourceItem.item_id ?? sourceItem.itemid ?? '');
+    if (sourceItemId && sourceItemId !== String(ids.itemId)) continue;
+
+    const hydrationImages = cached?.product_images?.images;
+    const item = {
+      ...sourceItem,
+      images: Array.isArray(sourceItem.images) && sourceItem.images.length
+        ? sourceItem.images
+        : (Array.isArray(hydrationImages) ? hydrationImages : [])
+    };
+    return {
+      data: {
+        ...(cached || {}),
+        item,
+        shop_detailed: cached?.shop_detailed || null
+      }
+    };
+  }
+  return null;
+}
+
+function sendShopeeHydrationDetail() {
+  const payload = extractShopeeHydrationDetail();
+  if (!payload) return false;
+  chrome.runtime.sendMessage({
+    type: 'SHOPEE_RESPONSE',
+    detail: {
+      kind: 'detail',
+      status: 200,
+      url: location.href,
+      payload,
+      hydration: true,
+      requestedByOmniCrawl: true
+    }
+  }).catch(() => undefined);
+  return true;
+}
+
 let pageUnavailableReported = false;
 
 function reportShopeePageUnavailable() {
@@ -13,6 +66,19 @@ function reportShopeePageUnavailable() {
   const pageText = (document.body?.innerText || document.body?.textContent || '')
     .replace(/\s+/g, ' ')
     .trim();
+  const productNotFound = (
+    /(?:the|this)\s+product\s+(?:does\s+not|doesn['’]t)\s+exist/i.test(pageText) ||
+    /product\s+(?:not\s+found|is\s+unavailable)/i.test(pageText) ||
+    /sản\s+phẩm\s+(?:không\s+tồn\s+tại|đã\s+(?:bị\s+)?(?:xóa|gỡ))/i.test(pageText)
+  );
+  if (productNotFound) {
+    pageUnavailableReported = true;
+    chrome.runtime.sendMessage({
+      type: 'SHOPEE_PRODUCT_NOT_FOUND',
+      url: location.href
+    }).catch(() => undefined);
+    return;
+  }
   if (!/page\s+unavailable/i.test(pageText) || !/something\s+went\s+wrong/i.test(pageText)) return;
   pageUnavailableReported = true;
   chrome.runtime.sendMessage({
@@ -70,6 +136,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }).catch(() => undefined);
     }, 500);
 
+    return true;
+  }
+  if (message.type === 'REQUEST_SHOPEE_STRUCTURED_DETAIL') {
+    const hydrationSent = sendShopeeHydrationDetail();
+    window.dispatchEvent(new CustomEvent('omnicrawl:execute-shopee-detail', {
+      detail: {
+        itemId: String(message.itemId || ''),
+        shopId: String(message.shopId || ''),
+        requestId: String(message.requestId || '')
+      }
+    }));
+    sendResponse({ ok: true, hydrationSent });
     return true;
   }
   return undefined;
@@ -515,6 +593,11 @@ function currentShopeeSearchPage() {
   return Number.isInteger(page) && page >= 0 ? page : 0;
 }
 
+function isShopeeProductCollectionPage() {
+  const params = new URLSearchParams(location.search);
+  return location.pathname.includes('/search') || params.get('omnicrawl_source') === 'shop';
+}
+
 function sendShopeeDomItems(items, page, isFinal = false) {
   chrome.runtime.sendMessage({
     type: 'SHOPEE_DOM_ITEMS',
@@ -533,7 +616,7 @@ function waitForRenderedScroll(minimumMs = 350, maximumMs = 650) {
 }
 
 async function rescanRenderedShopeeProducts(round = 0) {
-  if (!location.pathname.includes('/search')) return 0;
+  if (!isShopeeProductCollectionPage()) return 0;
   const height = Math.max(document.body.scrollHeight, 4000);
   const positions = [0.15, 0.35, 0.55, 0.75, 0.95, 0.5];
   const ratio = positions[Math.abs(Math.floor(round)) % positions.length];
@@ -552,7 +635,7 @@ async function rescanRenderedShopeeProducts(round = 0) {
 }
 
 async function autoScrollShopeeSearchPage() {
-  if (!location.pathname.includes('/search')) return;
+  if (!isShopeeProductCollectionPage()) return;
   const page = currentShopeeSearchPage();
   const minimumStableItems = 20;
   let stableRounds = 0;
@@ -613,7 +696,7 @@ async function autoScrollShopeeSearchPage() {
   sendShopeeDomItems([], page, true);
 }
 
-if (location.pathname.includes('/search')) {
+if (isShopeeProductCollectionPage()) {
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
       void autoScrollShopeeSearchPage();
@@ -721,7 +804,10 @@ function scrapeRenderedProductDetail() {
   const images = [metaImage, ...galleryUrls]
     .filter((url) => url && /(?:shopee|susercontent)\.(?:com|vn)|susercontent\.com\/file\//i.test(url))
     .filter((url) => !/(?:badge|icon|avatar|logo)/i.test(url))
-    .map((url) => url.replace(/_tn(?=\.\w+$|$|[?#])/i, ''))
+    .map((url) => String(url)
+      .replace(/_tn(?=\.\w+$|$|[?#])/i, '')
+      .replace(/@resize_[^/?#]+$/i, '')
+      .replace(/\?.*$/, ''))
     .filter((url, index, all) => url && all.indexOf(url) === index)
     .slice(0, 30);
 
@@ -765,6 +851,7 @@ if (parseProductIds(location.href)) {
     return detailStableRounds >= 1;
   };
   const startDetailObserver = () => {
+    sendShopeeHydrationDetail();
     if (captureDetailWhenReady()) return;
     detailObserver = new MutationObserver(() => {
       if (!captureDetailWhenReady()) return;

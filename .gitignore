@@ -1,5 +1,7 @@
 node_modules/
 dist/
+*.tsbuildinfo
+.DS_Store
 .env
 .env.*
 !.env.example
@@ -7,8 +9,4 @@ docker-compose.yml
 dev.db
 dev.db-journal
 *.log
-storage/browser_profiles/
-storage/runs/
-storage/datasets/
-storage/key_value_stores/
-storage/logs/
+storage/
