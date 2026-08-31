@@ -10,24 +10,31 @@ const prisma = new PrismaClient();
 async function main() {
   console.log('Start seeding...');
   
+  const adminEmail = process.env.ADMIN_EMAIL || 'admin@omnicrawl.local';
+  const rawAdminPassword = process.env.ADMIN_PASSWORD || 'password123';
+
+  if (!process.env.ADMIN_PASSWORD) {
+    console.warn('[SECURITY] ADMIN_PASSWORD not specified in environment. Using default password "password123". Change this in production!');
+  }
+
   // Create a default user if none exists
   const existingUser = await prisma.user.findUnique({
-    where: { email: 'admin@omnicrawl.local' }
+    where: { email: adminEmail }
   });
-  const hashedPassword = await bcrypt.hash('password123', 10);
+  const hashedPassword = await bcrypt.hash(rawAdminPassword, 10);
   const passwordUpgrade = existingUser && !existingUser.password.startsWith('$2')
     ? { password: await bcrypt.hash(existingUser.password, 10) }
     : {};
 
   const user = await prisma.user.upsert({
-    where: { email: 'admin@omnicrawl.local' },
+    where: { email: adminEmail },
     update: {
       ...passwordUpgrade,
       role: 'ADMIN',
       status: 'ACTIVE',
     },
     create: {
-      email: 'admin@omnicrawl.local',
+      email: adminEmail,
       password: hashedPassword,
       role: 'ADMIN',
       status: 'ACTIVE',
@@ -35,7 +42,7 @@ async function main() {
     },
   });
 
-  console.log(`User created with id: ${user.id}`);
+  console.log(`User created/updated with id: ${user.id} (${user.email})`);
 
   const shopeeInputSchema = JSON.stringify({
     type: 'object',

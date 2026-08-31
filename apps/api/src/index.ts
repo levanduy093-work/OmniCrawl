@@ -29,7 +29,13 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
-const JWT_SECRET = process.env.JWT_SECRET || 'omnicrawl-secret-key-12345';
+const JWT_SECRET = process.env.JWT_SECRET || (() => {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('FATAL: JWT_SECRET environment variable is required in production mode.');
+  }
+  console.warn('[SECURITY WARN] JWT_SECRET is not set in environment. Using fallback development key. Set JWT_SECRET in .env for security.');
+  return 'omnicrawl-dev-secret-key-change-me';
+})();
 const WORKSPACE_ROOT = path.resolve(__dirname, '..', '..', '..');
 const STORAGE_ROOT = path.join(WORKSPACE_ROOT, 'storage');
 const SHOPEE_ACTOR_NAMES = ['shopee-scraper', 'shopee-shop-scraper'];
