@@ -19,8 +19,11 @@ import dotenv from 'dotenv';
 import {
   startProxyServer,
   checkAllProxies,
-  getProxyStats
+  getProxyStats,
+  getProxyReadiness
 } from './proxy-server';
+import { encryptProxySecret, redactProxy } from './proxy-credentials';
+import { loadOrCreateRuntimeSecret } from './runtime-secret';
 
 dotenv.config({ path: path.resolve(__dirname, '..', '..', '..', '.env'), quiet: true });
 
@@ -28,19 +31,15 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = process.env.PORT || 3001;
-const JWT_SECRET = process.env.JWT_SECRET || (() => {
-  if (process.env.NODE_ENV === 'production') {
-    throw new Error('FATAL: JWT_SECRET environment variable is required in production mode.');
-  }
-  console.warn('[SECURITY WARN] JWT_SECRET is not set in environment. Using fallback development key. Set JWT_SECRET in .env for security.');
-  return 'omnicrawl-dev-secret-key-change-me';
-})();
+const PORT = Number(process.env.PORT || 3001);
+const HOST = process.env.HOST || '127.0.0.1';
+const JWT_SECRET = loadOrCreateRuntimeSecret('.jwt-secret', 'JWT_SECRET');
 const WORKSPACE_ROOT = path.resolve(__dirname, '..', '..', '..');
 const STORAGE_ROOT = path.join(WORKSPACE_ROOT, 'storage');
 const SHOPEE_ACTOR_NAMES = ['shopee-scraper', 'shopee-shop-scraper'];
 const BROWSER_ACTOR_NAMES = [...SHOPEE_ACTOR_NAMES, 'tiktok-scraper'];
 const browserAgentHeartbeats = new Map<string, { version: string; seenAt: number }>();
+const proxyBlockedRunLogAt = new Map<string, number>();
 const BROWSER_AGENT_HEARTBEAT_TTL_MS = 15_000;
 const SHOPEE_UNUSED_OUTPUT_FIELDS = new Set([
   'author',
@@ -766,6 +765,16 @@ app.post('/api/actors/:id/run', requireAuth, async (req: any, res: any) => {
     if (!actor) {
       return res.status(404).json({ error: 'Actor not found' });
     }
+    if (BROWSER_ACTOR_NAMES.includes(actor.name)) {
+      const proxyReadiness = await getProxyReadiness();
+      if (!proxyReadiness.ready) {
+        return res.status(503).json({
+          error: proxyReadiness.message,
+          code: 'PROXY_UNAVAILABLE',
+          proxyReadiness
+        });
+      }
+    }
     const input = normalizeActorInput(
       compactActorInputSchema(
         actor.name,
@@ -840,6 +849,53 @@ app.get('/api/browser-agent/status', requireAuth, (req: any, res) => {
   });
 });
 
+function sanitizeShopeeShopInfo(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  const text = (key: string, maxLength = 1000) => {
+    const normalized = String(source[key] ?? '').trim();
+    return normalized ? normalized.slice(0, maxLength) : undefined;
+  };
+  const numeric = (key: string) => {
+    if (source[key] === null || source[key] === undefined || source[key] === '') return undefined;
+    const normalized = Number(source[key]);
+    return Number.isFinite(normalized) ? normalized : undefined;
+  };
+  const shopInfo = {
+    shopId: text('shopId', 200),
+    shopUsername: text('shopUsername', 500),
+    shopName: text('shopName', 1000),
+    shopDescription: text('shopDescription', 20_000),
+    shopLocation: text('shopLocation', 2000),
+    shopBusinessName: text('shopBusinessName', 1000),
+    shopAvatar: text('shopAvatar', 2000),
+    shopResponseRateText: text('shopResponseRateText', 100),
+    shopCancellationRateText: text('shopCancellationRateText', 100),
+    shopJoinedText: text('shopJoinedText', 200),
+    shopLastActiveText: text('shopLastActiveText', 200),
+    shopJoinedAt: text('shopJoinedAt', 100),
+    shopLastActiveAt: text('shopLastActiveAt', 100),
+    url: text('url', 2000),
+    shopRating: numeric('shopRating'),
+    shopRatingCount: numeric('shopRatingCount'),
+    shopFollowerCount: numeric('shopFollowerCount'),
+    shopFollowingCount: numeric('shopFollowingCount'),
+    shopProductCount: numeric('shopProductCount'),
+    shopResponseRate: numeric('shopResponseRate'),
+    shopResponseTime: numeric('shopResponseTime'),
+    shopCancellationRate: numeric('shopCancellationRate'),
+    crawledProductCount: numeric('crawledProductCount'),
+    pagesCrawled: numeric('pagesCrawled'),
+    paginationExhausted: Boolean(source.paginationExhausted),
+    shopIsPreferred: Boolean(source.shopIsPreferred),
+    shopIsMall: Boolean(source.shopIsMall),
+    shopIsVerified: Boolean(source.shopIsVerified)
+  };
+  return Object.fromEntries(
+    Object.entries(shopInfo).filter(([, fieldValue]) => fieldValue !== undefined)
+  );
+}
+
 app.get('/api/browser-agent/jobs/next', requireAuth, async (req: any, res: any) => {
   try {
     const candidate = await prisma.run.findFirst({
@@ -853,6 +909,23 @@ app.get('/api/browser-agent/jobs/next', requireAuth, async (req: any, res: any) 
     });
     if (!candidate) return res.status(204).send();
 
+    const proxyReadiness = await getProxyReadiness();
+    if (!proxyReadiness.ready) {
+      const lastLoggedAt = proxyBlockedRunLogAt.get(candidate.id) || 0;
+      if (Date.now() - lastLoggedAt > 60_000) {
+        proxyBlockedRunLogAt.set(candidate.id, Date.now());
+        appendRunLog(
+          candidate.id,
+          `[SECURITY] Browser job was not claimed: ${proxyReadiness.message}`
+        );
+      }
+      return res.status(503).json({
+        error: proxyReadiness.message,
+        code: 'PROXY_NOT_READY',
+        proxyReadiness
+      });
+    }
+
     const claim = await prisma.run.updateMany({
       where: {
         id: candidate.id,
@@ -862,6 +935,7 @@ app.get('/api/browser-agent/jobs/next', requireAuth, async (req: any, res: any) 
       data: { status: 'BROWSER_RUNNING', startedAt: new Date() }
     });
     if (claim.count !== 1) return res.status(204).send();
+    proxyBlockedRunLogAt.delete(candidate.id);
 
     const input: any = await readRunInput(candidate.id);
     const platform = candidate.actor.name === 'tiktok-scraper' ? 'tiktok' : 'shopee';
@@ -1003,6 +1077,29 @@ app.post('/api/browser-agent/jobs/:id/items', requireAuth, async (req: any, res:
     const itemLabel = run.actor.name === 'tiktok-scraper' ? 'TikTok items' : 'products';
     appendRunLog(run.id, `[INFO] [BrowserAgent] Stored ${storedCount} ${itemLabel}.`);
     res.json({ accepted: storedCount });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/browser-agent/jobs/:id/shop-info', requireAuth, async (req: any, res: any) => {
+  try {
+    const run = await prisma.run.findFirst({
+      where: {
+        id: req.params.id,
+        userId: req.user.id,
+        status: 'BROWSER_RUNNING',
+        actor: { name: 'shopee-shop-scraper' }
+      },
+      select: { id: true }
+    });
+    if (!run) return res.status(404).json({ error: 'Active Shopee shop job not found' });
+    const shopInfo = sanitizeShopeeShopInfo(req.body?.shopInfo);
+    if (!shopInfo || !Object.keys(shopInfo).length) {
+      return res.status(400).json({ error: 'Shop information is required' });
+    }
+    await new Dataset(run.id).setMetadata({ shopInfo });
+    res.json({ shopInfo });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -1237,7 +1334,24 @@ app.post('/api/browser-agent/jobs/:id/complete', requireAuth, async (req: any, r
     });
   }
 
-  const finalStatus = detailFailed > 0 || detailPartial > 0 ? 'PARTIAL' : 'SUCCESS';
+  if (req.body?.shopInfo && typeof req.body.shopInfo === 'object') {
+    const shopInfo = sanitizeShopeeShopInfo(req.body.shopInfo);
+    await dataset.setMetadata({
+      ...(shopInfo ? { shopInfo } : {})
+    });
+  }
+
+  const completedShopInfo = sanitizeShopeeShopInfo(req.body?.shopInfo);
+  const expectedShopProducts = Number(completedShopInfo?.shopProductCount || 0);
+  const crawledShopProducts = Number(completedShopInfo?.crawledProductCount || storedCount);
+  const shopListingIncomplete = (
+    run.actor.name === 'shopee-shop-scraper' &&
+    expectedShopProducts > 0 &&
+    crawledShopProducts < expectedShopProducts
+  );
+  const finalStatus = detailFailed > 0 || detailPartial > 0 || shopListingIncomplete
+    ? 'PARTIAL'
+    : 'SUCCESS';
   const completed = await prisma.run.updateMany({
     where: {
       id: req.params.id,
@@ -1253,7 +1367,10 @@ app.post('/api/browser-agent/jobs/:id/complete', requireAuth, async (req: any, r
     `[INFO] [BrowserAgent] Completed with ${storedCount} ${platformLabel} items` +
     (req.body?.details
       ? `; details: ${detailCompleted} completed, ${detailPartial} partial, ${detailFailed} failed.`
-      : '.')
+      : '.') +
+    (shopListingIncomplete
+      ? ` Shop listing incomplete: ${crawledShopProducts}/${expectedShopProducts} products.`
+      : '')
   );
   res.json({ success: finalStatus === 'SUCCESS', status: finalStatus });
 });
@@ -1614,7 +1731,7 @@ function parseProxyString(line: string) {
 
   // Format: protocol://user:pass@host:port
   const urlMatch = trimmed.match(
-    /^(https?|socks5):\/\/(?:([^:@]+):([^@]+)@)?([^:]+):(\d+)$/i
+    /^(https?|socks4|socks5):\/\/(?:([^:@]+):([^@]+)@)?([^:]+):(\d+)$/i
   );
   if (urlMatch) {
     return {
@@ -1675,7 +1792,10 @@ app.get('/api/proxies', requireAuth, requireAdmin, async (_req: any, res: any) =
       _count: { select: { proxies: true } }
     }
   });
-  res.json(groups);
+  res.json(groups.map(group => ({
+    ...group,
+    proxies: group.proxies.map(proxy => redactProxy(proxy))
+  })));
 });
 
 // Create proxy group
@@ -1719,7 +1839,10 @@ app.patch('/api/proxies/groups/:id', requireAuth, requireAdmin, async (req: any,
     data,
     include: { proxies: true, _count: { select: { proxies: true } } }
   });
-  res.json(updated);
+  res.json({
+    ...updated,
+    proxies: updated.proxies.map(proxy => redactProxy(proxy))
+  });
 });
 
 // Delete proxy group
@@ -1742,6 +1865,9 @@ app.post('/api/proxies', requireAuth, requireAdmin, async (req: any, res: any) =
   if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
     return res.status(400).json({ error: 'Valid host and port are required' });
   }
+  if (!['http', 'https', 'socks4', 'socks5'].includes(protocol)) {
+    return res.status(400).json({ error: 'Protocol must be http, https, socks4, or socks5' });
+  }
 
   try {
     const proxy = await prisma.proxy.create({
@@ -1751,12 +1877,12 @@ app.post('/api/proxies', requireAuth, requireAdmin, async (req: any, res: any) =
         host,
         port,
         username: req.body?.username || null,
-        password: req.body?.password || null,
+        password: encryptProxySecret(req.body?.password),
         country: req.body?.country || null,
         isRotating: Boolean(req.body?.isRotating)
       }
     });
-    res.status(201).json(proxy);
+    res.status(201).json(redactProxy(proxy));
   } catch (err: any) {
     if (err?.code === 'P2002') {
       return res.status(409).json({ error: 'Proxy with this host:port:username already exists' });
@@ -1767,9 +1893,21 @@ app.post('/api/proxies', requireAuth, requireAdmin, async (req: any, res: any) =
 
 // Bulk import proxies
 app.post('/api/proxies/import', requireAuth, requireAdmin, async (req: any, res: any) => {
-  const groupId = String(req.body?.groupId || '');
-  const group = await prisma.proxyGroup.findUnique({ where: { id: groupId } });
+  let groupId = String(req.body?.groupId || '');
+  let group = groupId
+    ? await prisma.proxyGroup.findUnique({ where: { id: groupId } })
+    : await prisma.proxyGroup.findFirst({
+        where: { isDefault: true },
+        orderBy: { createdAt: 'asc' }
+      });
+  if (!group && !groupId) {
+    group = await prisma.proxyGroup.create({
+      data: { name: 'Proxy mặc định', isDefault: true, enabled: true }
+    });
+    groupId = group.id;
+  }
   if (!group) return res.status(400).json({ error: 'Invalid group' });
+  groupId = group.id;
 
   const text = String(req.body?.text || '');
   const lines = text.split(/[\r\n]+/).filter(Boolean);
@@ -1794,7 +1932,7 @@ app.post('/api/proxies/import', requireAuth, requireAdmin, async (req: any, res:
           host: parsed.host,
           port: parsed.port,
           username: parsed.username,
-          password: parsed.password,
+          password: encryptProxySecret(parsed.password),
           country,
           isRotating
         }
@@ -1837,7 +1975,7 @@ app.patch('/api/proxies/:id', requireAuth, requireAdmin, async (req: any, res: a
     where: { id: req.params.id },
     data
   });
-  res.json(updated);
+  res.json(redactProxy(updated));
 });
 
 // Bulk delete proxies
@@ -1880,10 +2018,27 @@ app.get('/api/proxies/stats', requireAuth, requireAdmin, async (_req: any, res: 
   }
 });
 
+// Browser Agent preflight. It exposes no proxy host, credential, or public IP.
+app.get('/api/proxies/readiness', requireAuth, async (_req: any, res: any) => {
+  try {
+    const readiness = await getProxyReadiness();
+    res.status(readiness.ready ? 200 : 503).json(readiness);
+  } catch {
+    res.status(503).json({
+      ready: false,
+      mode: 'blocked',
+      activeProxies: 0,
+      verifiedProxies: 0,
+      checkedAt: new Date().toISOString(),
+      message: 'Không thể xác minh proxy; crawler bị khóa theo cơ chế fail-closed.'
+    });
+  }
+});
+
 // --- START SERVERS ---
 
-app.listen(PORT, () => {
-  console.log(`Core API Server running on http://localhost:${PORT}`);
+app.listen(PORT, HOST, () => {
+  console.log(`Core API Server running on http://${HOST}:${PORT}`);
   // Start the local proxy server alongside the API
   startProxyServer();
 });

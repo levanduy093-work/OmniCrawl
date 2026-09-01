@@ -1,17 +1,22 @@
 import * as http from 'http';
+import * as https from 'https';
 import * as net from 'net';
-import * as url from 'url';
+import * as tls from 'tls';
+import { SocksClient } from 'socks';
 import { prisma } from '@omnicrawl/database';
+import { decryptProxySecret } from './proxy-credentials';
 
 const PROXY_PORT = Number(process.env.PROXY_PORT || 8888);
-const HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
-const MAX_CONSECUTIVE_FAILS = 3;
+const HEALTH_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const HEALTH_CHECK_TIMEOUT_MS = 10_000;
 const PROXY_REQUEST_TIMEOUT_MS = 30_000;
-
-// Per-proxy rate limiting
-const proxyRequestTimestamps = new Map<string, number[]>();
+const VERIFICATION_TTL_MS = 5 * 60 * 1000;
+const MAX_CONSECUTIVE_FAILS = 3;
 const MAX_REQUESTS_PER_STATIC_PROXY_PER_MINUTE = 300;
+const EGRESS_CHECK_HOST = process.env.PROXY_EGRESS_CHECK_HOST || 'api.ipify.org';
+const EGRESS_CHECK_PATH = process.env.PROXY_EGRESS_CHECK_PATH || '/';
+
+type ProxyProtocol = 'http' | 'https' | 'socks4' | 'socks5';
 
 interface ProxyEntry {
   id: string;
@@ -26,23 +31,37 @@ interface ProxyEntry {
   successCount: number;
 }
 
-// Cached list refreshed periodically
+export interface ProxyReadiness {
+  ready: boolean;
+  mode: 'direct' | 'proxy' | 'blocked';
+  activeProxies: number;
+  verifiedProxies: number;
+  checkedAt: string;
+  message: string;
+}
+
+const proxyRequestTimestamps = new Map<string, number[]>();
+const verifiedProxyIds = new Map<string, number>();
 let cachedProxies: ProxyEntry[] = [];
 let lastCacheRefreshAt = 0;
-const CACHE_TTL_MS = 30_000; // 30 seconds
+let readinessInFlight: Promise<ProxyReadiness> | null = null;
+let lastReadiness: ProxyReadiness | null = null;
+const CACHE_TTL_MS = 30_000;
+
+function normalizedProtocol(proxy: ProxyEntry): ProxyProtocol {
+  const protocol = proxy.protocol.toLowerCase();
+  if (!['http', 'https', 'socks4', 'socks5'].includes(protocol)) {
+    throw new Error(`Unsupported upstream proxy protocol: ${protocol}`);
+  }
+  return protocol as ProxyProtocol;
+}
 
 async function refreshProxyCache(): Promise<ProxyEntry[]> {
   const now = Date.now();
-  if (cachedProxies.length > 0 && now - lastCacheRefreshAt < CACHE_TTL_MS) {
-    return cachedProxies;
-  }
+  if (now - lastCacheRefreshAt < CACHE_TTL_MS) return cachedProxies;
   try {
     cachedProxies = await prisma.proxy.findMany({
-      where: {
-        enabled: true,
-        status: { not: 'DEAD' },
-        group: { enabled: true }
-      },
+      where: { enabled: true, status: { not: 'DEAD' }, group: { enabled: true } },
       select: {
         id: true,
         protocol: true,
@@ -58,7 +77,9 @@ async function refreshProxyCache(): Promise<ProxyEntry[]> {
     });
     lastCacheRefreshAt = now;
   } catch (error) {
-    console.error('[ProxyServer] Failed to refresh proxy cache:', error);
+    cachedProxies = [];
+    lastCacheRefreshAt = 0;
+    console.error('[ProxyServer] Failed to refresh proxy cache; fail-closed is active:', error);
   }
   return cachedProxies;
 }
@@ -66,55 +87,131 @@ async function refreshProxyCache(): Promise<ProxyEntry[]> {
 function isProxyRateLimited(proxy: ProxyEntry): boolean {
   if (proxy.isRotating) return false;
   const now = Date.now();
-  const timestamps = proxyRequestTimestamps.get(proxy.id) || [];
-  const recentTimestamps = timestamps.filter(t => now - t < 60_000);
-  proxyRequestTimestamps.set(proxy.id, recentTimestamps);
-  return recentTimestamps.length >= MAX_REQUESTS_PER_STATIC_PROXY_PER_MINUTE;
+  const recent = (proxyRequestTimestamps.get(proxy.id) || [])
+    .filter(timestamp => now - timestamp < 60_000);
+  proxyRequestTimestamps.set(proxy.id, recent);
+  return recent.length >= MAX_REQUESTS_PER_STATIC_PROXY_PER_MINUTE;
 }
 
 function recordProxyRequest(proxyId: string) {
-  const timestamps = proxyRequestTimestamps.get(proxyId) || [];
-  timestamps.push(Date.now());
-  proxyRequestTimestamps.set(proxyId, timestamps);
+  proxyRequestTimestamps.set(proxyId, [
+    ...(proxyRequestTimestamps.get(proxyId) || []),
+    Date.now()
+  ]);
 }
 
 function selectProxy(proxies: ProxyEntry[]): ProxyEntry | null {
-  // Filter out rate-limited proxies
-  const available = proxies.filter(p => !isProxyRateLimited(p));
-  if (available.length === 0) return null;
+  const now = Date.now();
+  const available = proxies.filter(proxy => {
+    const verifiedAt = verifiedProxyIds.get(proxy.id) || 0;
+    return now - verifiedAt < VERIFICATION_TTL_MS && !isProxyRateLimited(proxy);
+  });
+  if (!available.length) return null;
 
-  // Weighted random: prefer low-latency, high-success proxies
-  const weights = available.map(p => {
-    let weight = 10;
-    // Prefer lower latency
-    if (p.lastLatencyMs !== null) {
-      if (p.lastLatencyMs < 500) weight += 5;
-      else if (p.lastLatencyMs < 1000) weight += 3;
-      else if (p.lastLatencyMs < 2000) weight += 1;
-      else weight -= 2;
+  const weights = available.map(proxy => {
+    let weight = 10 - Math.min(5, proxy.failCount);
+    if (proxy.lastLatencyMs !== null) {
+      if (proxy.lastLatencyMs < 500) weight += 5;
+      else if (proxy.lastLatencyMs < 1000) weight += 3;
+      else if (proxy.lastLatencyMs > 2000) weight -= 2;
     }
-    // Penalize proxies with recent failures
-    weight -= Math.min(5, p.failCount);
-    // Rotating gateways get slight preference (they handle rotation themselves)
-    if (p.isRotating) weight += 3;
     return Math.max(1, weight);
   });
-
-  const totalWeight = weights.reduce((sum, w) => sum + w, 0);
-  let random = Math.random() * totalWeight;
-  for (let i = 0; i < available.length; i++) {
-    random -= weights[i];
-    if (random <= 0) return available[i];
+  let random = Math.random() * weights.reduce((sum, weight) => sum + weight, 0);
+  for (let index = 0; index < available.length; index += 1) {
+    random -= weights[index];
+    if (random <= 0) return available[index];
   }
   return available[available.length - 1];
 }
 
-function proxyAuthHeader(proxy: ProxyEntry): string | null {
+function proxyAuthorization(proxy: ProxyEntry): string | null {
   if (!proxy.username) return null;
-  const credentials = proxy.password
-    ? `${proxy.username}:${proxy.password}`
-    : proxy.username;
-  return `Basic ${Buffer.from(credentials).toString('base64')}`;
+  const password = decryptProxySecret(proxy.password) || '';
+  return `Basic ${Buffer.from(`${proxy.username}:${password}`).toString('base64')}`;
+}
+
+function connectToUpstream(proxy: ProxyEntry): Promise<net.Socket> {
+  return new Promise((resolve, reject) => {
+    const protocol = normalizedProtocol(proxy);
+    const socket: net.Socket = protocol === 'https'
+      ? tls.connect({ host: proxy.host, port: proxy.port, servername: proxy.host })
+      : net.connect(proxy.port, proxy.host);
+    const readyEvent = protocol === 'https' ? 'secureConnect' : 'connect';
+    const onError = (error: Error) => reject(error);
+    socket.setTimeout(PROXY_REQUEST_TIMEOUT_MS, () => {
+      socket.destroy();
+      reject(new Error('Upstream proxy connection timed out'));
+    });
+    socket.once('error', onError);
+    socket.once(readyEvent, () => {
+      socket.off('error', onError);
+      socket.setTimeout(0);
+      resolve(socket);
+    });
+  });
+}
+
+async function openHttpProxyTunnel(proxy: ProxyEntry, targetHost: string, targetPort: number) {
+  const socket = await connectToUpstream(proxy);
+  return new Promise<net.Socket>((resolve, reject) => {
+    let buffer = Buffer.alloc(0);
+    const cleanup = () => {
+      socket.off('data', onData);
+      socket.off('error', fail);
+      socket.setTimeout(0);
+    };
+    const fail = (error: Error) => {
+      cleanup();
+      socket.destroy();
+      reject(error);
+    };
+    const onData = (chunk: Buffer) => {
+      buffer = Buffer.concat([buffer, chunk]);
+      const headerEnd = buffer.indexOf('\r\n\r\n');
+      if (headerEnd === -1) return;
+      const statusLine = buffer.subarray(0, headerEnd).toString('latin1').split('\r\n')[0];
+      const statusCode = Number(statusLine.split(' ')[1]);
+      if (statusCode !== 200) {
+        fail(new Error(`Upstream proxy refused CONNECT with status ${statusCode || 'unknown'}`));
+        return;
+      }
+      const remaining = buffer.subarray(headerEnd + 4);
+      cleanup();
+      if (remaining.length) socket.unshift(remaining);
+      resolve(socket);
+    };
+    socket.on('data', onData);
+    socket.once('error', fail);
+    socket.setTimeout(PROXY_REQUEST_TIMEOUT_MS, () => fail(new Error('Upstream CONNECT timed out')));
+    const auth = proxyAuthorization(proxy);
+    socket.write(
+      `CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\n` +
+      `Host: ${targetHost}:${targetPort}\r\n` +
+      (auth ? `Proxy-Authorization: ${auth}\r\n` : '') +
+      'Proxy-Connection: Keep-Alive\r\n\r\n'
+    );
+  });
+}
+
+async function openProxyTunnel(proxy: ProxyEntry, targetHost: string, targetPort: number) {
+  const protocol = normalizedProtocol(proxy);
+  if (protocol === 'socks4' || protocol === 'socks5') {
+    const connection = await SocksClient.createConnection({
+      command: 'connect',
+      destination: { host: targetHost, port: targetPort },
+      proxy: {
+        host: proxy.host,
+        port: proxy.port,
+        type: protocol === 'socks4' ? 4 : 5,
+        userId: proxy.username || undefined,
+        password: decryptProxySecret(proxy.password) || undefined
+      },
+      timeout: PROXY_REQUEST_TIMEOUT_MS
+    });
+    return connection.socket;
+  }
+  return openHttpProxyTunnel(proxy, targetHost, targetPort);
 }
 
 async function recordProxyResult(proxyId: string, success: boolean, latencyMs?: number) {
@@ -125,380 +222,298 @@ async function recordProxyResult(proxyId: string, success: boolean, latencyMs?: 
         data: {
           successCount: { increment: 1 },
           failCount: 0,
-          status: 'ALIVE',
+          status: latencyMs !== undefined && latencyMs > 5000 ? 'SLOW' : 'ALIVE',
           lastCheckedAt: new Date(),
           ...(latencyMs !== undefined ? { lastLatencyMs: latencyMs } : {})
         }
       });
     } else {
-      const proxy = await prisma.proxy.update({
+      verifiedProxyIds.delete(proxyId);
+      const updated = await prisma.proxy.update({
         where: { id: proxyId },
-        data: {
-          failCount: { increment: 1 },
-          lastCheckedAt: new Date()
-        }
+        data: { failCount: { increment: 1 }, lastCheckedAt: new Date() }
       });
-      if (proxy.failCount >= MAX_CONSECUTIVE_FAILS) {
+      if (updated.failCount >= MAX_CONSECUTIVE_FAILS) {
         await prisma.proxy.update({
           where: { id: proxyId },
           data: { status: 'DEAD', enabled: false }
         });
-        console.log(`[ProxyServer] Proxy ${proxy.host}:${proxy.port} disabled after ${MAX_CONSECUTIVE_FAILS} consecutive failures`);
       }
     }
-    // Invalidate cache after DB update
     lastCacheRefreshAt = 0;
-  } catch (error) {
-    // Non-critical: don't crash the proxy for a DB update failure
+  } catch {
+    // Telemetry failure must never enable a direct fallback.
   }
 }
 
-// --- HTTPS CONNECT Tunnel (for HTTPS requests through upstream proxy) ---
-function handleConnect(
-  clientReq: http.IncomingMessage,
-  clientSocket: net.Socket,
-  head: Buffer
-) {
-  const targetHost = clientReq.url || '';
-  const [hostname, portStr] = targetHost.split(':');
-  const port = parseInt(portStr, 10) || 443;
-
-  (async () => {
-    const proxies = await refreshProxyCache();
-    if (proxies.length === 0) {
-      // No proxies available: connect directly
-      console.log(`[ProxyServer] CONNECT ${targetHost} → DIRECT (no configured proxies)`);
-      const upstream = net.connect(port, hostname, () => {
-        clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-        if (head && head.length > 0) {
-          upstream.write(head);
-        }
-        upstream.pipe(clientSocket);
-        clientSocket.pipe(upstream);
+async function directPublicIp(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const request = https.get({
+      hostname: EGRESS_CHECK_HOST,
+      path: EGRESS_CHECK_PATH,
+      timeout: HEALTH_CHECK_TIMEOUT_MS,
+      headers: { Accept: 'text/plain', 'User-Agent': 'OmniCrawl-Proxy-Check/1.0' }
+    }, response => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', chunk => { body += chunk; });
+      response.on('end', () => {
+        const value = body.trim();
+        if (response.statusCode === 200 && value) resolve(value);
+        else reject(new Error(`Direct egress check returned ${response.statusCode}`));
       });
-      upstream.on('error', () => {
-        clientSocket.destroy();
-      });
-      return;
-    }
-
-    const proxy = selectProxy(proxies);
-    if (!proxy) {
-      // DO NOT fall back to DIRECT when proxies are configured to prevent leaking the real IP!
-      console.warn(`[ProxyServer] CONNECT ${targetHost} → 503 (all ${proxies.length} proxies are rate-limited or busy)`);
-      clientSocket.write('HTTP/1.1 503 Service Unavailable\r\n\r\nAll configured proxies are currently busy or rate-limited.');
-      clientSocket.destroy();
-      return;
-    }
-
-    recordProxyRequest(proxy.id);
-    const startTime = Date.now();
-    console.log(`[ProxyServer] CONNECT ${targetHost} → ${proxy.host}:${proxy.port}`);
-
-    // Send CONNECT to upstream proxy
-    const upstreamSocket = net.connect(proxy.port, proxy.host, () => {
-      let connectReq = `CONNECT ${targetHost} HTTP/1.1\r\nHost: ${targetHost}\r\n`;
-      const auth = proxyAuthHeader(proxy);
-      if (auth) {
-        connectReq += `Proxy-Authorization: ${auth}\r\n`;
-      }
-      connectReq += '\r\n';
-      upstreamSocket.write(connectReq);
     });
-
-    upstreamSocket.setTimeout(PROXY_REQUEST_TIMEOUT_MS);
-
-    let buffer = Buffer.alloc(0);
-    let established = false;
-
-    const onUpstreamData = (chunk: Buffer) => {
-      if (established) return;
-      buffer = Buffer.concat([buffer, chunk]);
-      const headerEndIndex = buffer.indexOf('\r\n\r\n');
-      if (headerEndIndex === -1) return;
-
-      established = true;
-      // Remove temporary data listener so pipe() does not duplicate packets!
-      upstreamSocket.off('data', onUpstreamData);
-
-      const headerStr = buffer.subarray(0, headerEndIndex).toString('latin1');
-      const statusCode = parseInt(headerStr.split(' ')[1], 10);
-
-      if (statusCode === 200) {
-        const latency = Date.now() - startTime;
-        void recordProxyResult(proxy.id, true, latency);
-        clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-
-        // Forward any binary payload that arrived after the HTTP 200 header
-        const remaining = buffer.subarray(headerEndIndex + 4);
-        if (remaining.length > 0) {
-          clientSocket.write(remaining);
-        }
-
-        // Forward initial head data if provided
-        if (head && head.length > 0) {
-          upstreamSocket.write(head);
-        }
-
-        upstreamSocket.pipe(clientSocket);
-        clientSocket.pipe(upstreamSocket);
-      } else {
-        void recordProxyResult(proxy.id, false);
-        console.error(`[ProxyServer] Upstream proxy returned ${statusCode} for CONNECT ${targetHost}`);
-        clientSocket.write(`HTTP/1.1 ${statusCode} Proxy Error\r\n\r\n`);
-        clientSocket.destroy();
-        upstreamSocket.destroy();
-      }
-    };
-
-    upstreamSocket.on('data', onUpstreamData);
-
-    upstreamSocket.on('error', (err) => {
-      void recordProxyResult(proxy.id, false);
-      console.error(`[ProxyServer] Upstream proxy error: ${err.message}`);
-      if (!established) {
-        clientSocket.write('HTTP/1.1 502 Bad Gateway\r\n\r\n');
-      }
-      clientSocket.destroy();
-    });
-
-    upstreamSocket.on('timeout', () => {
-      void recordProxyResult(proxy.id, false);
-      console.error(`[ProxyServer] Upstream proxy timeout for ${targetHost}`);
-      if (!established) {
-        clientSocket.write('HTTP/1.1 504 Gateway Timeout\r\n\r\n');
-      }
-      upstreamSocket.destroy();
-      clientSocket.destroy();
-    });
-
-    clientSocket.on('error', () => {
-      upstreamSocket.destroy();
-    });
-
-    clientSocket.on('close', () => {
-      upstreamSocket.destroy();
-    });
-  })().catch((error) => {
-    console.error('[ProxyServer] CONNECT handler error:', error);
-    clientSocket.destroy();
+    request.on('timeout', () => request.destroy(new Error('Direct egress check timed out')));
+    request.on('error', reject);
   });
 }
 
-// --- HTTP forwarding (for plain HTTP requests through upstream proxy) ---
-function handleRequest(
-  clientReq: http.IncomingMessage,
-  clientRes: http.ServerResponse
-) {
-  (async () => {
-    const targetUrl = clientReq.url || '';
-    const proxies = await refreshProxyCache();
+async function proxiedPublicIp(proxy: ProxyEntry): Promise<string> {
+  const tunnel = await openProxyTunnel(proxy, EGRESS_CHECK_HOST, 443);
+  return new Promise((resolve, reject) => {
+    const request = https.request({
+      hostname: EGRESS_CHECK_HOST,
+      path: EGRESS_CHECK_PATH,
+      method: 'GET',
+      agent: false,
+      headers: { Accept: 'text/plain', 'User-Agent': 'OmniCrawl-Proxy-Check/1.0' },
+      createConnection: () => tls.connect({ socket: tunnel, servername: EGRESS_CHECK_HOST })
+    }, response => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', chunk => { body += chunk; });
+      response.on('end', () => {
+        const value = body.trim();
+        if (response.statusCode === 200 && value) resolve(value);
+        else reject(new Error(`Proxy egress check returned ${response.statusCode}`));
+      });
+    });
+    request.setTimeout(HEALTH_CHECK_TIMEOUT_MS, () => request.destroy(new Error('Proxy egress check timed out')));
+    request.once('error', reject);
+    request.end();
+  });
+}
 
-    if (proxies.length === 0) {
-      // No proxies: forward directly
-      const parsed = url.parse(targetUrl);
-      const options: http.RequestOptions = {
-        hostname: parsed.hostname,
-        port: parseInt(parsed.port || '80', 10),
-        path: parsed.path,
+async function computeProxyReadiness(): Promise<ProxyReadiness> {
+  const checkedAt = new Date().toISOString();
+  const [proxies, configuredProxies] = await Promise.all([
+    refreshProxyCache(),
+    prisma.proxy.count({ where: { enabled: true, group: { enabled: true } } })
+  ]);
+  if (configuredProxies === 0) {
+    return {
+      ready: true,
+      mode: 'direct',
+      activeProxies: 0,
+      verifiedProxies: 0,
+      checkedAt,
+      message: 'Không sử dụng proxy; crawler chạy trực tiếp bằng kết nối của máy.'
+    };
+  }
+  if (!proxies.length) {
+    return {
+      ready: false,
+      mode: 'blocked',
+      activeProxies: 0,
+      verifiedProxies: 0,
+      checkedAt,
+      message: 'Proxy đã được cấu hình nhưng không có địa chỉ nào hoạt động.'
+    };
+  }
+
+  let machineIp: string;
+  try {
+    machineIp = await directPublicIp();
+  } catch {
+    return {
+      ready: false,
+      mode: 'blocked',
+      activeProxies: proxies.length,
+      verifiedProxies: 0,
+      checkedAt,
+      message: 'Không xác minh được IP máy; crawler bị khóa theo cơ chế fail-closed.'
+    };
+  }
+
+  let verified = 0;
+  for (let offset = 0; offset < proxies.length; offset += 5) {
+    const batch = proxies.slice(offset, offset + 5);
+    await Promise.all(batch.map(async proxy => {
+      const startedAt = Date.now();
+      try {
+        const exitIp = await proxiedPublicIp(proxy);
+        if (exitIp === machineIp) throw new Error('Proxy exit IP matches machine IP');
+        verifiedProxyIds.set(proxy.id, Date.now());
+        verified += 1;
+        await recordProxyResult(proxy.id, true, Date.now() - startedAt);
+      } catch {
+        verifiedProxyIds.delete(proxy.id);
+        await recordProxyResult(proxy.id, false);
+      }
+    }));
+  }
+
+  return {
+    ready: verified > 0,
+    mode: verified > 0 ? 'proxy' : 'blocked',
+    activeProxies: proxies.length,
+    verifiedProxies: verified,
+    checkedAt,
+    message: verified > 0
+      ? `${verified}/${proxies.length} proxy đã xác minh IP egress khác IP máy.`
+      : 'Không proxy nào vượt qua kiểm tra IP egress; crawler bị khóa để tránh lộ IP thật.'
+  };
+}
+
+export async function getProxyReadiness(options: { force?: boolean } = {}) {
+  const now = Date.now();
+  if (
+    !options.force &&
+    lastReadiness &&
+    now - Date.parse(lastReadiness.checkedAt) < CACHE_TTL_MS
+  ) return lastReadiness;
+  const freshVerified = [...verifiedProxyIds.values()]
+    .filter(timestamp => now - timestamp < VERIFICATION_TTL_MS).length;
+  const proxies = await refreshProxyCache();
+  if (!options.force && freshVerified > 0) {
+    return {
+      ready: true,
+      mode: 'proxy',
+      activeProxies: proxies.length,
+      verifiedProxies: freshVerified,
+      checkedAt: new Date().toISOString(),
+      message: `${freshVerified}/${proxies.length} proxy có xác minh egress còn hiệu lực.`
+    } satisfies ProxyReadiness;
+  }
+  if (!readinessInFlight) {
+    readinessInFlight = computeProxyReadiness()
+      .then(readiness => {
+        lastReadiness = readiness;
+        return readiness;
+      })
+      .finally(() => { readinessInFlight = null; });
+  }
+  return readinessInFlight;
+}
+
+async function usableProxies() {
+  const readiness = await getProxyReadiness();
+  if (!readiness.ready) return [];
+  return refreshProxyCache();
+}
+
+function rejectConnect(clientSocket: net.Socket, status: number, message: string) {
+  clientSocket.end(`HTTP/1.1 ${status} Service Unavailable\r\nConnection: close\r\n\r\n${message}`);
+}
+
+function handleConnect(clientReq: http.IncomingMessage, clientSocket: net.Socket, head: Buffer) {
+  void (async () => {
+    const authority = clientReq.url || '';
+    const separator = authority.lastIndexOf(':');
+    const hostname = separator > 0 ? authority.slice(0, separator).replace(/^\[|\]$/g, '') : authority;
+    const port = separator > 0 ? Number(authority.slice(separator + 1)) : 443;
+    if (!hostname || !Number.isInteger(port) || port < 1 || port > 65535) {
+      rejectConnect(clientSocket, 400, 'Invalid CONNECT target');
+      return;
+    }
+    const proxies = await usableProxies();
+    const proxy = selectProxy(proxies);
+    if (!proxy) {
+      rejectConnect(clientSocket, 503, 'No verified upstream proxy is available; direct access is disabled.');
+      return;
+    }
+    recordProxyRequest(proxy.id);
+    const startedAt = Date.now();
+    try {
+      const upstream = await openProxyTunnel(proxy, hostname, port);
+      await recordProxyResult(proxy.id, true, Date.now() - startedAt);
+      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      if (head.length) upstream.write(head);
+      upstream.pipe(clientSocket);
+      clientSocket.pipe(upstream);
+      upstream.once('error', () => clientSocket.destroy());
+      clientSocket.once('error', () => upstream.destroy());
+      clientSocket.once('close', () => upstream.destroy());
+    } catch (error) {
+      await recordProxyResult(proxy.id, false);
+      console.error(`[ProxyServer] CONNECT ${authority} failed through proxy ${proxy.id}:`, error instanceof Error ? error.message : error);
+      rejectConnect(clientSocket, 502, 'Verified upstream proxy connection failed; direct access is disabled.');
+    }
+  })().catch(() => rejectConnect(clientSocket, 503, 'Proxy readiness check failed; direct access is disabled.'));
+}
+
+function handleRequest(clientReq: http.IncomingMessage, clientRes: http.ServerResponse) {
+  void (async () => {
+    let target: URL;
+    try {
+      target = new URL(clientReq.url || '');
+    } catch {
+      clientRes.writeHead(400).end('Absolute HTTP URL required');
+      return;
+    }
+    if (target.protocol !== 'http:') {
+      clientRes.writeHead(400).end('Use CONNECT for HTTPS targets');
+      return;
+    }
+    const proxies = await usableProxies();
+    const proxy = selectProxy(proxies);
+    if (!proxy) {
+      clientRes.writeHead(503).end('No verified upstream proxy is available; direct access is disabled.');
+      return;
+    }
+    recordProxyRequest(proxy.id);
+    const startedAt = Date.now();
+    try {
+      const tunnel = await openProxyTunnel(proxy, target.hostname, Number(target.port || 80));
+      const headers = { ...clientReq.headers };
+      delete headers['proxy-authorization'];
+      delete headers['proxy-connection'];
+      const upstream = http.request({
+        hostname: target.hostname,
+        port: Number(target.port || 80),
+        path: `${target.pathname}${target.search}`,
         method: clientReq.method,
-        headers: { ...clientReq.headers } as Record<string, string | string[] | undefined>
-      };
-      delete (options.headers as any)['proxy-connection'];
-      
-      const upstream = http.request(options, (upstreamRes) => {
+        headers,
+        agent: false,
+        createConnection: () => tunnel
+      }, upstreamRes => {
+        void recordProxyResult(proxy.id, true, Date.now() - startedAt);
         clientRes.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
         upstreamRes.pipe(clientRes);
       });
-      upstream.on('error', () => {
-        clientRes.writeHead(502);
-        clientRes.end('Bad Gateway');
+      upstream.setTimeout(PROXY_REQUEST_TIMEOUT_MS, () => upstream.destroy(new Error('Proxy request timed out')));
+      upstream.once('error', error => {
+        void recordProxyResult(proxy.id, false);
+        if (!clientRes.headersSent) clientRes.writeHead(502);
+        clientRes.end('Verified upstream proxy request failed; direct access is disabled.');
+        console.error(`[ProxyServer] HTTP ${target.hostname} failed through proxy ${proxy.id}:`, error.message);
       });
       clientReq.pipe(upstream);
-      return;
+    } catch {
+      await recordProxyResult(proxy.id, false);
+      clientRes.writeHead(502).end('Verified upstream proxy connection failed; direct access is disabled.');
     }
-
-    const proxy = selectProxy(proxies);
-    if (!proxy) {
-      clientRes.writeHead(503);
-      clientRes.end('All proxies rate-limited');
-      return;
-    }
-
-    recordProxyRequest(proxy.id);
-    const startTime = Date.now();
-    console.log(`[ProxyServer] HTTP ${clientReq.method} ${targetUrl} → ${proxy.host}:${proxy.port}`);
-
-    const options: http.RequestOptions = {
-      hostname: proxy.host,
-      port: proxy.port,
-      path: targetUrl,
-      method: clientReq.method,
-      headers: { ...clientReq.headers } as Record<string, string | string[] | undefined>
-    };
-    delete (options.headers as any)['proxy-connection'];
-
-    const auth = proxyAuthHeader(proxy);
-    if (auth) {
-      (options.headers as any)['Proxy-Authorization'] = auth;
-    }
-
-    const upstream = http.request(options, (upstreamRes) => {
-      const latency = Date.now() - startTime;
-      void recordProxyResult(proxy.id, true, latency);
-      clientRes.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
-      upstreamRes.pipe(clientRes);
-    });
-
-    upstream.setTimeout(PROXY_REQUEST_TIMEOUT_MS);
-
-    upstream.on('error', (err) => {
-      void recordProxyResult(proxy.id, false);
-      console.error(`[ProxyServer] HTTP proxy error: ${err.message}`);
-      clientRes.writeHead(502);
-      clientRes.end('Bad Gateway');
-    });
-
-    upstream.on('timeout', () => {
-      void recordProxyResult(proxy.id, false);
-      upstream.destroy();
-      clientRes.writeHead(504);
-      clientRes.end('Gateway Timeout');
-    });
-
-    clientReq.pipe(upstream);
-  })().catch((error) => {
-    console.error('[ProxyServer] Request handler error:', error);
-    clientRes.writeHead(500);
-    clientRes.end('Internal Server Error');
-  });
+  })().catch(() => clientRes.writeHead(503).end('Proxy readiness check failed; direct access is disabled.'));
 }
 
-// --- Health Check ---
 export async function checkAllProxies() {
-  try {
-    const proxies = await prisma.proxy.findMany({
-      where: { enabled: true },
-      select: { id: true, protocol: true, host: true, port: true, username: true, password: true, isRotating: true, lastLatencyMs: true, failCount: true, successCount: true }
-    });
-
-    console.log(`[ProxyServer] Health checking ${proxies.length} proxies...`);
-    const results = { alive: 0, dead: 0, slow: 0 };
-
-    for (const proxy of proxies) {
-      try {
-        const startTime = Date.now();
-        const isAlive = await checkSingleProxy(proxy);
-        const latency = Date.now() - startTime;
-
-        if (isAlive) {
-          const status = latency > 5000 ? 'SLOW' : 'ALIVE';
-          if (status === 'SLOW') results.slow++;
-          else results.alive++;
-          await prisma.proxy.update({
-            where: { id: proxy.id },
-            data: {
-              status,
-              lastCheckedAt: new Date(),
-              lastLatencyMs: latency,
-              failCount: 0
-            }
-          });
-        } else {
-          results.dead++;
-          await prisma.proxy.update({
-            where: { id: proxy.id },
-            data: {
-              status: 'DEAD',
-              lastCheckedAt: new Date(),
-              failCount: { increment: 1 }
-            }
-          });
-        }
-      } catch {
-        results.dead++;
-      }
-    }
-
-    lastCacheRefreshAt = 0; // Invalidate cache
-    console.log(`[ProxyServer] Health check done: ${results.alive} alive, ${results.slow} slow, ${results.dead} dead`);
-    return results;
-  } catch (error) {
-    console.error('[ProxyServer] Error during proxy health checks:', error);
-    return { alive: 0, dead: 0, slow: 0 };
-  }
+  const readiness = await getProxyReadiness({ force: true });
+  return {
+    alive: readiness.verifiedProxies,
+    dead: Math.max(0, readiness.activeProxies - readiness.verifiedProxies),
+    slow: 0,
+    readiness
+  };
 }
 
-function checkSingleProxy(proxy: ProxyEntry): Promise<boolean> {
-  return new Promise((resolve) => {
-    let resolved = false;
-    const finish = (result: boolean) => {
-      if (resolved) return;
-      resolved = true;
-      clearTimeout(timeout);
-      socket.destroy();
-      resolve(result);
-    };
-
-    const timeout = setTimeout(() => {
-      finish(false);
-    }, HEALTH_CHECK_TIMEOUT_MS);
-
-    // Try a CONNECT to shopee.vn:443 through the proxy
-    const socket = net.connect(proxy.port, proxy.host, () => {
-      let connectReq = `CONNECT shopee.vn:443 HTTP/1.1\r\nHost: shopee.vn:443\r\n`;
-      const auth = proxyAuthHeader(proxy);
-      if (auth) {
-        connectReq += `Proxy-Authorization: ${auth}\r\n`;
-      }
-      connectReq += '\r\n';
-      socket.write(connectReq);
-    });
-
-    let buffer = Buffer.alloc(0);
-    socket.on('data', (chunk) => {
-      buffer = Buffer.concat([buffer, chunk]);
-      const headerEndIndex = buffer.indexOf('\r\n\r\n');
-      if (headerEndIndex !== -1) {
-        const statusLine = buffer.subarray(0, headerEndIndex).toString('latin1').split('\r\n')[0];
-        const statusCode = parseInt(statusLine.split(' ')[1], 10);
-        finish(statusCode === 200);
-      }
-    });
-
-    socket.on('error', () => {
-      finish(false);
-    });
-
-    socket.on('timeout', () => {
-      finish(false);
-    });
-
-    socket.setTimeout(HEALTH_CHECK_TIMEOUT_MS);
-  });
-}
-
-// --- Server Startup ---
 export function startProxyServer() {
   const server = http.createServer(handleRequest);
   server.on('connect', handleConnect);
-
   server.listen(PROXY_PORT, '127.0.0.1', () => {
-    console.log(`[ProxyServer] Local proxy server running on http://127.0.0.1:${PROXY_PORT}`);
-    console.log(`[ProxyServer] Configure your browser to use this proxy for shopee.vn traffic`);
+    console.log(`[ProxyServer] Fail-closed local proxy listening on http://127.0.0.1:${PROXY_PORT}`);
   });
-
-  // Periodic health check (unref so timer does not block graceful shutdown)
-  const healthCheckTimer = setInterval(() => {
-    void checkAllProxies();
-  }, HEALTH_CHECK_INTERVAL_MS);
+  const healthCheckTimer = setInterval(() => void getProxyReadiness({ force: true }), HEALTH_CHECK_INTERVAL_MS);
   healthCheckTimer.unref();
-
-  // Initial proxy cache load
-  void refreshProxyCache().then((proxies) => {
-    console.log(`[ProxyServer] Loaded ${proxies.length} active proxies`);
-  });
-
   return server;
 }
 
@@ -511,12 +526,11 @@ export async function getProxyStats() {
     prisma.proxy.count({ where: { status: 'UNKNOWN', enabled: true } }),
     prisma.proxy.count({ where: { enabled: false } })
   ]);
-
   const avgLatency = await prisma.proxy.aggregate({
     where: { status: 'ALIVE', enabled: true, lastLatencyMs: { not: null } },
     _avg: { lastLatencyMs: true }
   });
-
+  const readiness = await getProxyReadiness();
   return {
     total,
     alive,
@@ -524,6 +538,7 @@ export async function getProxyStats() {
     slow,
     unknown,
     disabled,
-    avgLatencyMs: Math.round(avgLatency._avg.lastLatencyMs || 0)
+    avgLatencyMs: Math.round(avgLatency._avg.lastLatencyMs || 0),
+    readiness
   };
 }

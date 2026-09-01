@@ -1,5 +1,4 @@
 import { useState, useEffect, useCallback, Fragment } from 'react'
-import { createPortal } from 'react-dom'
 import {
   Play,
   Activity,
@@ -15,7 +14,6 @@ import {
   AlertTriangle,
   Globe,
   Shield,
-  Plus,
   Trash2,
   RefreshCw,
   Upload,
@@ -28,62 +26,9 @@ import Login from './Login'
 import OmniCrawlLogo from './Logo'
 import './App.css'
 
-const REQUIRED_BROWSER_AGENT_VERSION = '0.13.3'
+const REQUIRED_BROWSER_AGENT_VERSION = '0.14.3'
 const BROWSER_ACTOR_NAMES = ['shopee-scraper', 'shopee-shop-scraper', 'tiktok-scraper']
 const SHOPEE_ACTOR_NAMES = ['shopee-scraper', 'shopee-shop-scraper']
-
-type ProxyConfig = {
-  enabled: boolean
-  scheme: 'http' | 'https' | 'socks4' | 'socks5'
-  host: string
-  port: string
-  username: string
-  password: string
-}
-
-const DEFAULT_PROXY_CONFIG: ProxyConfig = {
-  enabled: false,
-  scheme: 'http',
-  host: '',
-  port: '',
-  username: '',
-  password: ''
-}
-
-function readProxyConfig(): ProxyConfig {
-  try {
-    const saved = localStorage.getItem('omnicrawl_proxy_config')
-    if (!saved) return DEFAULT_PROXY_CONFIG
-    const parsed = JSON.parse(saved)
-    const scheme = ['http', 'https', 'socks4', 'socks5'].includes(parsed?.scheme)
-      ? parsed.scheme
-      : DEFAULT_PROXY_CONFIG.scheme
-    return {
-      enabled: Boolean(parsed?.enabled),
-      scheme,
-      host: typeof parsed?.host === 'string' ? parsed.host : '',
-      port: typeof parsed?.port === 'string' || typeof parsed?.port === 'number' ? String(parsed.port) : '',
-      username: typeof parsed?.username === 'string' ? parsed.username : '',
-      password: typeof parsed?.password === 'string' ? parsed.password : ''
-    }
-  } catch {
-    return DEFAULT_PROXY_CONFIG
-  }
-}
-
-function proxyValidationError(config: ProxyConfig): string | null {
-  if (!config.enabled) return null
-  const host = config.host.trim()
-  if (!host) return 'Nhập hostname hoặc IP của proxy trước khi bật.'
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(host) || /[/?#@\s]/.test(host)) {
-    return 'Host chỉ được nhập hostname hoặc IP, không gồm http://, port hay thông tin đăng nhập.'
-  }
-  const port = Number(config.port)
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    return 'Port phải là số nguyên từ 1 đến 65535.'
-  }
-  return null
-}
 
 function isVersionAtLeast(current: string | null, required: string) {
   if (!current) return false
@@ -225,14 +170,13 @@ function App() {
   // Proxy Manager State
   const [proxyGroups, setProxyGroups] = useState<any[]>([])
   const [proxyStats, setProxyStats] = useState<any>(null)
+  const [networkReadiness, setNetworkReadiness] = useState<any>(null)
+  const [runError, setRunError] = useState<string | null>(null)
   const [proxyLoading, setProxyLoading] = useState(false)
-  const [proxyImportGroupId, setProxyImportGroupId] = useState('')
   const [proxyImportText, setProxyImportText] = useState('')
   const [proxyImportCountry, setProxyImportCountry] = useState('VN')
   const [proxyImportIsRotating, setProxyImportIsRotating] = useState(false)
   const [proxyImportResult, setProxyImportResult] = useState<any>(null)
-  const [showProxyImport, setShowProxyImport] = useState(false)
-  const [newGroupName, setNewGroupName] = useState('')
   const [proxyChecking, setProxyChecking] = useState(false)
   const [proxyCheckResult, setProxyCheckResult] = useState<any>(null)
   
@@ -245,37 +189,10 @@ function App() {
   const [browserAgentVersion, setBrowserAgentVersion] = useState<string | null>(null)
   const [authStatus, setAuthStatus] = useState({ shopeeLoggedIn: false, tiktokLoggedIn: false, debugTikTokCookies: '' })
 
-  const [proxyConfig, setProxyConfig] = useState<ProxyConfig>(readProxyConfig)
-  const [proxyDraft, setProxyDraft] = useState<ProxyConfig>(readProxyConfig)
-  const [showProxyModal, setShowProxyModal] = useState(false)
-  const [proxyError, setProxyError] = useState<string | null>(null)
-  const [proxyApplyStatus, setProxyApplyStatus] = useState('')
-
   useEffect(() => {
-    localStorage.setItem('omnicrawl_proxy_config', JSON.stringify(proxyConfig))
-  }, [proxyConfig])
-
-  const openProxySettings = useCallback(() => {
-    setProxyDraft(proxyConfig)
-    setProxyError(null)
-    setShowProxyModal(true)
-  }, [proxyConfig])
-
-  const saveProxySettings = useCallback(() => {
-    const error = proxyValidationError(proxyDraft)
-    if (error) {
-      setProxyError(error)
-      return
-    }
-    setProxyError(null)
-    setProxyApplyStatus('Đang áp dụng cấu hình trong Browser Agent…')
-    setProxyConfig({
-      ...proxyDraft,
-      host: proxyDraft.host.trim(),
-      port: proxyDraft.port.trim(),
-      username: proxyDraft.username.trim()
-    })
-  }, [proxyDraft])
+    // Remove credentials stored by Browser Agent versions before 0.14.0.
+    localStorage.removeItem('omnicrawl_proxy_config')
+  }, [])
 
   // Log Viewer State
   const [logModalOpen, setLogModalOpen] = useState(false)
@@ -323,16 +240,20 @@ function App() {
   const fetchData = useCallback(async () => {
     try {
       const headers = { 'Authorization': `Bearer ${token}` }
-      const [actorsRes, runsRes] = await Promise.all([
+      const [actorsRes, runsRes, networkRes] = await Promise.all([
         fetch('http://localhost:3001/api/actors', { headers }),
-        fetch('http://localhost:3001/api/runs', { headers })
+        fetch('http://localhost:3001/api/runs', { headers }),
+        fetch('http://localhost:3001/api/proxies/readiness', { headers })
       ])
-      if (actorsRes.status === 401 || runsRes.status === 401) {
+      if (actorsRes.status === 401 || runsRes.status === 401 || networkRes.status === 401) {
         handleLogout()
         return
       }
       setActors(await actorsRes.json())
       setRuns(await runsRes.json())
+      const readiness = await networkRes.json().catch(() => null)
+      setNetworkReadiness(readiness)
+      if (readiness?.ready) setRunError(null)
       window.postMessage({
         source: 'OMNICRAWL_DASHBOARD',
         type: 'POLL_NOW'
@@ -352,19 +273,6 @@ function App() {
   useEffect(() => {
     if (activeTab === 'proxies') fetchProxyData()
   }, [activeTab, fetchProxyData])
-
-  const createProxyGroup = useCallback(async () => {
-    if (!newGroupName.trim()) return
-    try {
-      await fetch('http://localhost:3001/api/proxies/groups', {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: newGroupName.trim() })
-      })
-      setNewGroupName('')
-      fetchProxyData()
-    } catch {}
-  }, [newGroupName, token, fetchProxyData])
 
   const deleteProxyGroup = useCallback(async (groupId: string) => {
     if (!confirm('Xóa nhóm proxy này và tất cả proxy bên trong?')) return
@@ -421,7 +329,7 @@ function App() {
   }, [token, fetchProxyData])
 
   const importProxies = useCallback(async () => {
-    if (!proxyImportGroupId || !proxyImportText.trim()) return
+    if (!proxyImportText.trim()) return
     setProxyLoading(true)
     setProxyImportResult(null)
     try {
@@ -429,7 +337,6 @@ function App() {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          groupId: proxyImportGroupId,
           text: proxyImportText,
           country: proxyImportCountry || null,
           isRotating: proxyImportIsRotating
@@ -439,12 +346,24 @@ function App() {
         const result = await res.json()
         setProxyImportResult(result)
         setProxyImportText('')
-        fetchProxyData()
+        setProxyChecking(true)
+        const checkResponse = await fetch('http://localhost:3001/api/proxies/check', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` }
+        })
+        if (checkResponse.ok) setProxyCheckResult(await checkResponse.json())
+        await fetchProxyData()
+      } else {
+        const body = await res.json().catch(() => ({}))
+        setProxyImportResult({ error: body.error || 'Không thể thêm proxy.' })
       }
-    } catch {} finally {
+    } catch {
+      setProxyImportResult({ error: 'Không kết nối được API proxy.' })
+    } finally {
       setProxyLoading(false)
+      setProxyChecking(false)
     }
-  }, [proxyImportGroupId, proxyImportText, proxyImportCountry, proxyImportIsRotating, token, fetchProxyData])
+  }, [proxyImportText, proxyImportCountry, proxyImportIsRotating, token, fetchProxyData])
 
   const runProxyHealthCheck = useCallback(async () => {
     setProxyChecking(true)
@@ -498,23 +417,12 @@ function App() {
           setAuthStatus(event.data.authStatus)
         }
       }
-      if (event.data?.type === 'PROXY_CONFIGURATION') {
-        const message = typeof event.data.message === 'string' ? event.data.message : ''
-        if (event.data.ok) {
-          setProxyError(null)
-          setProxyApplyStatus(message || 'Cấu hình proxy đã được Browser Agent áp dụng.')
-        } else {
-          setProxyApplyStatus('')
-          setProxyError(message || 'Browser Agent không thể áp dụng cấu hình proxy.')
-        }
-      }
     }
     window.addEventListener('message', handleAgentMessage)
     const configure = () => window.postMessage({
       source: 'OMNICRAWL_DASHBOARD',
       type: 'CONFIGURE',
-      token,
-      proxyConfig
+      token
     }, window.location.origin)
     configure()
     const interval = setInterval(configure, 3000)
@@ -522,10 +430,11 @@ function App() {
       window.removeEventListener('message', handleAgentMessage)
       clearInterval(interval)
     }
-  }, [token, proxyConfig])
+  }, [token])
 
   const triggerRun = async (id: string) => {
     try {
+      setRunError(null)
       const actor: any = actors.find((candidate: any) => candidate.id === id)
       const input = applyInputDefaults(actor?.inputSchema, runInputs[id] || {})
       const res = await fetch(`http://localhost:3001/api/actors/${id}/run`, {
@@ -534,6 +443,11 @@ function App() {
         body: JSON.stringify(input)
       })
       const data = await res.json()
+      if (!res.ok && data.code === 'PROXY_UNAVAILABLE') {
+        setNetworkReadiness(data.proxyReadiness || null)
+        setRunError(data.error || 'Proxy đã cấu hình nhưng hiện không hoạt động.')
+        return
+      }
       if (!res.ok) throw new Error(data.error)
       alert(data.message)
       fetchData()
@@ -655,6 +569,16 @@ function App() {
     };
   }, [logModalOpen, activeLogRunId, fetchLogs]);
 
+  useEffect(() => {
+    const runId = runDetail?.run?.id
+    const status = String(runDetail?.run?.status || '')
+    if (!runDetailOpen || !runId || !['BROWSER_PENDING', 'BROWSER_RUNNING'].includes(status)) return
+    const interval = setInterval(() => {
+      fetchRunDetail(runId, runDetailPage, runDetailStatus)
+    }, 3000)
+    return () => clearInterval(interval)
+  }, [runDetailOpen, runDetail?.run?.id, runDetail?.run?.status, runDetailPage, runDetailStatus, fetchRunDetail])
+
   const handleLogin = (newToken: string, newUser: any) => {
     localStorage.setItem('token', newToken)
     setToken(newToken)
@@ -730,25 +654,21 @@ function App() {
       </aside>
 
       {/* Main Content Area */}
-      <main className="flex-1 p-6 overflow-y-auto">
+      <main className="flex-1 p-6 overflow-y-auto min-w-0">
         <header className="flex justify-between items-center mb-8">
           <h1 className="text-2xl font-semibold text-gray-900 capitalize">{activeTab}</h1>
           <div className="flex items-center space-x-4">
-            <button
-              type="button"
-              onClick={openProxySettings}
-              aria-haspopup="dialog"
-              aria-expanded={showProxyModal}
-              title={proxyApplyStatus || 'Cấu hình proxy cho Browser Agent'}
-              className={`relative z-10 cursor-pointer flex items-center space-x-2 px-3 py-1.5 rounded-md border text-sm font-medium transition-colors ${
-                proxyConfig.enabled
-                  ? 'bg-blue-50 border-blue-200 text-blue-700 hover:bg-blue-100'
-                  : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
-              }`}
-            >
-              <Globe size={16} />
-              <span>Proxy: {proxyConfig.enabled ? 'ON' : 'OFF'}</span>
-            </button>
+            {isAdminRole(user?.role) && (
+              <button
+                type="button"
+                onClick={() => setActiveTab('proxies')}
+                title="Quản lý proxy"
+                className="relative z-10 cursor-pointer flex items-center space-x-2 px-3 py-1.5 rounded-md border text-sm font-medium transition-colors bg-white border-gray-200 text-gray-600 hover:bg-gray-50"
+              >
+                <Globe size={16} />
+                <span>Proxy Manager</span>
+              </button>
+            )}
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
               <input
@@ -759,6 +679,29 @@ function App() {
             </div>
           </div>
         </header>
+
+        {(networkReadiness?.mode === 'blocked' || runError) && (
+          <section role="alert" className="mb-5 flex max-w-[1280px] flex-col gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-red-900 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start gap-3">
+              <AlertTriangle size={18} className="mt-0.5 shrink-0 text-red-600" />
+              <div>
+                <p className="text-sm font-semibold">Proxy không hoạt động</p>
+                <p className="mt-0.5 text-xs leading-5 text-red-700">
+                  {runError || networkReadiness?.message || 'Không có proxy khả dụng để chạy crawler.'}
+                </p>
+              </div>
+            </div>
+            {isAdminRole(user?.role) && (
+              <button
+                type="button"
+                onClick={() => setActiveTab('proxies')}
+                className="shrink-0 self-start rounded-lg bg-red-700 px-3 py-2 text-xs font-semibold text-white transition hover:bg-red-800 active:translate-y-px sm:self-auto"
+              >
+                Quản lý proxy
+              </button>
+            )}
+          </section>
+        )}
 
         {activeTab === 'actors' && (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5 items-stretch max-w-[1280px]">
@@ -902,228 +845,218 @@ function App() {
         )}
 
         {activeTab === 'runs' && (
-          <div className="bg-white rounded-3xl shadow-sm border border-gray-50 overflow-hidden">
-            <table className="w-full text-left">
-              <thead className="bg-[#F1F3F5] text-gray-800 font-semibold text-sm border-b border-gray-200">
-                <tr>
-                  <th className="px-6 py-4">ID</th>
-                  <th className="px-6 py-4">Crawler</th>
-                  <th className="px-6 py-4">Status</th>
-                  <th className="px-6 py-4">Items</th>
-                  <th className="px-6 py-4">Created At</th>
-                  <th className="px-6 py-4">Finished At</th>
-                  <th className="px-6 py-4">Duration</th>
-                  <th className="px-6 py-4 text-right">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {runs.map((run: any) => (
-                  <tr 
-                    key={run.id} 
-                    onClick={() => openRunDetail(run.id)}
-                    className="hover:bg-blue-50/25 transition-colors group cursor-pointer"
-                  >
-                    <td className="px-6 py-5 font-mono text-xs text-gray-400">{run.id}</td>
-                    <td className="px-6 py-5 text-gray-900 font-medium">{run.actor?.name || run.actorId}</td>
-                    <td className="px-6 py-5">
-                      <span className={`px-3 py-1 text-xs font-semibold rounded-full ${
-                        run.status === 'SUCCESS' ? 'bg-green-100 text-green-700' :
-                        run.status === 'PARTIAL' ? 'bg-amber-100 text-amber-700' :
-                        run.status === 'FAILED' ? 'bg-red-100 text-red-700' :
-                        (run.status === 'RUNNING' || run.status === 'BROWSER_RUNNING' || run.status === 'STOPPING') ? 'bg-blue-100 text-blue-700' :
-                        (run.status === 'PENDING' || run.status === 'BROWSER_PENDING') ? 'bg-amber-100 text-amber-700' :
-                        'bg-gray-100 text-gray-700'
-                      }`}>
-                        {run.status}
-                      </span>
-                    </td>
-                    <td className="px-6 py-5 text-gray-700">{run.itemCount ?? 0}</td>
-                    <td className="px-6 py-5 text-gray-500">{new Date(run.createdAt).toLocaleString()}</td>
-                    <td className="px-6 py-5 text-gray-500">{run.finishedAt ? new Date(run.finishedAt).toLocaleString() : '-'}</td>
-                    <td className="px-6 py-5 text-gray-500">
-                      {run.finishedAt ? (() => {
-                        const ms = new Date(run.finishedAt).getTime() - new Date(run.createdAt).getTime();
-                        if (ms < 0) return '-';
-                        const totalSeconds = Math.floor(ms / 1000);
-                        const mins = Math.floor(totalSeconds / 60);
-                        const secs = totalSeconds % 60;
-                        return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
-                      })() : '-'}
-                    </td>
-                    <td className="px-6 py-4">
-                      <div className="flex items-center justify-end gap-2" onClick={(e) => e.stopPropagation()}>
-                        <button onClick={() => openRunDetail(run.id)} className="inline-flex items-center justify-center gap-1.5 h-8 px-3 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 text-xs font-medium transition-colors">
-                          <Eye size={14} /> View
-                        </button>
-                        <button onClick={() => openLogViewer(run.id)} className="inline-flex items-center justify-center gap-1.5 h-8 px-3 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 text-xs font-medium transition-colors">
-                          Logs
-                        </button>
-                        {(
-                          run.status === 'RUNNING' ||
-                          run.status === 'PENDING' ||
-                          run.status === 'BROWSER_RUNNING' ||
-                          run.status === 'BROWSER_PENDING'
-                        ) && (
-                          <button onClick={() => handleStopRun(run.id)} className="inline-flex items-center justify-center gap-1.5 h-8 px-3 bg-amber-50 text-amber-700 rounded-lg hover:bg-amber-100 text-xs font-medium transition-colors">
-                            Stop
-                          </button>
-                        )}
-                        <button onClick={() => handleDeleteRun(run.id)} className="inline-flex items-center justify-center gap-1.5 h-8 px-3 bg-red-50 text-red-700 rounded-lg hover:bg-red-100 text-xs font-medium transition-colors">
-                          Delete
-                        </button>
-                      </div>
-                    </td>
+          <div className="bg-white rounded-3xl shadow-sm border border-gray-100 overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left min-w-[950px]">
+                <thead className="bg-[#F1F3F5] text-gray-800 font-semibold text-sm border-b border-gray-200">
+                  <tr>
+                    <th className="px-6 py-4 whitespace-nowrap">ID</th>
+                    <th className="px-6 py-4 whitespace-nowrap">Crawler</th>
+                    <th className="px-6 py-4 whitespace-nowrap">Status</th>
+                    <th className="px-6 py-4 whitespace-nowrap">Items</th>
+                    <th className="px-6 py-4 whitespace-nowrap">Created At</th>
+                    <th className="px-6 py-4 whitespace-nowrap">Finished At</th>
+                    <th className="px-6 py-4 whitespace-nowrap">Duration</th>
+                    <th className="px-6 py-4 text-right whitespace-nowrap">Actions</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {runs.map((run: any) => (
+                    <tr
+                      key={run.id}
+                      onClick={() => openRunDetail(run.id)}
+                      className="hover:bg-blue-50/25 transition-colors group cursor-pointer"
+                    >
+                      <td className="px-6 py-5 font-mono text-xs text-gray-400 whitespace-nowrap">{run.id}</td>
+                      <td className="px-6 py-5 text-gray-900 font-medium whitespace-nowrap">{run.actor?.name || run.actorId}</td>
+                      <td className="px-6 py-5 whitespace-nowrap">
+                        <span className={`px-3 py-1 text-xs font-semibold rounded-full ${
+                          run.status === 'SUCCESS' ? 'bg-green-100 text-green-700' :
+                          run.status === 'PARTIAL' ? 'bg-amber-100 text-amber-700' :
+                          run.status === 'FAILED' ? 'bg-red-100 text-red-700' :
+                          (run.status === 'RUNNING' || run.status === 'BROWSER_RUNNING' || run.status === 'STOPPING') ? 'bg-blue-100 text-blue-700' :
+                          (run.status === 'PENDING' || run.status === 'BROWSER_PENDING') ? 'bg-amber-100 text-amber-700' :
+                          'bg-gray-100 text-gray-700'
+                        }`}>
+                          {run.status}
+                        </span>
+                      </td>
+                      <td className="px-6 py-5 text-gray-700 whitespace-nowrap">{run.itemCount ?? 0}</td>
+                      <td className="px-6 py-5 text-gray-500 whitespace-nowrap">{new Date(run.createdAt).toLocaleString()}</td>
+                      <td className="px-6 py-5 text-gray-500 whitespace-nowrap">{run.finishedAt ? new Date(run.finishedAt).toLocaleString() : '-'}</td>
+                      <td className="px-6 py-5 text-gray-500 whitespace-nowrap">
+                        {run.finishedAt ? (() => {
+                          const ms = new Date(run.finishedAt).getTime() - new Date(run.createdAt).getTime();
+                          if (ms < 0) return '-';
+                          const totalSeconds = Math.floor(ms / 1000);
+                          const mins = Math.floor(totalSeconds / 60);
+                          const secs = totalSeconds % 60;
+                          return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+                        })() : '-'}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap">
+                        <div className="flex items-center justify-end gap-2" onClick={(e) => e.stopPropagation()}>
+                          <button onClick={() => openRunDetail(run.id)} className="inline-flex items-center justify-center gap-1.5 h-8 px-3 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 text-xs font-medium transition-colors">
+                            <Eye size={14} /> View
+                          </button>
+                          <button onClick={() => openLogViewer(run.id)} className="inline-flex items-center justify-center gap-1.5 h-8 px-3 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 text-xs font-medium transition-colors">
+                            Logs
+                          </button>
+                          {(
+                            run.status === 'RUNNING' ||
+                            run.status === 'PENDING' ||
+                            run.status === 'BROWSER_RUNNING' ||
+                            run.status === 'BROWSER_PENDING'
+                          ) && (
+                            <button onClick={() => handleStopRun(run.id)} className="inline-flex items-center justify-center gap-1.5 h-8 px-3 bg-amber-50 text-amber-700 rounded-lg hover:bg-amber-100 text-xs font-medium transition-colors">
+                              Stop
+                            </button>
+                          )}
+                          <button onClick={() => handleDeleteRun(run.id)} className="inline-flex items-center justify-center gap-1.5 h-8 px-3 bg-red-50 text-red-700 rounded-lg hover:bg-red-100 text-xs font-medium transition-colors">
+                            Delete
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
 
         {activeTab === 'proxies' && isAdminRole(user?.role) && (
-          <div className="space-y-6 max-w-[1280px]">
-            {/* Stats Cards */}
+          <div className="space-y-5 max-w-[1120px]">
             {proxyStats && (
-              <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
-                {[
-                  { label: 'Tổng', value: proxyStats.total, color: 'bg-gray-100 text-gray-700' },
-                  { label: 'Alive', value: proxyStats.alive, color: 'bg-emerald-50 text-emerald-700' },
-                  { label: 'Dead', value: proxyStats.dead, color: 'bg-red-50 text-red-700' },
-                  { label: 'Slow', value: proxyStats.slow, color: 'bg-amber-50 text-amber-700' },
-                  { label: 'Unknown', value: proxyStats.unknown, color: 'bg-gray-50 text-gray-500' },
-                  { label: 'Disabled', value: proxyStats.disabled, color: 'bg-gray-50 text-gray-400' },
-                  { label: 'Avg Latency', value: `${proxyStats.avgLatencyMs}ms`, color: 'bg-blue-50 text-blue-700' }
-                ].map((stat) => (
-                  <div key={stat.label} className={`${stat.color} rounded-xl px-4 py-3 text-center`}>
-                    <div className="text-2xl font-bold">{stat.value}</div>
-                    <div className="text-xs font-medium mt-0.5">{stat.label}</div>
+              <section className={`rounded-2xl px-5 py-4 ${
+                proxyStats.total === 0
+                  ? 'bg-white text-slate-700 shadow-[0_8px_24px_rgba(30,58,95,0.06)]'
+                  : proxyStats.readiness?.ready
+                    ? 'bg-emerald-50 text-emerald-900'
+                    : 'bg-amber-50 text-amber-900'
+              }`}>
+                <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                  <div className="flex items-center gap-3">
+                    <span className={`h-2.5 w-2.5 rounded-full ${
+                      proxyStats.total === 0
+                        ? 'bg-slate-400'
+                        : proxyStats.readiness?.ready
+                        ? 'bg-emerald-500'
+                        : 'bg-amber-500'
+                    }`} />
+                    <div>
+                      <p className="text-xs font-medium opacity-60">Proxy pool</p>
+                      <h3 className="mt-0.5 font-semibold">
+                        {proxyStats.total === 0
+                          ? 'Không sử dụng'
+                          : proxyStats.readiness?.ready
+                            ? 'Sẵn sàng'
+                            : 'Không sẵn sàng'}
+                      </h3>
+                    </div>
                   </div>
-                ))}
-              </div>
+                  <dl className="grid grid-cols-3 gap-6 md:min-w-[320px]">
+                    <div>
+                      <dt className="text-xs opacity-60">Tổng</dt>
+                      <dd className="mt-1 text-xl font-semibold tabular-nums">{proxyStats.total}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs opacity-60">Dùng được</dt>
+                      <dd className="mt-1 text-xl font-semibold tabular-nums">{proxyStats.alive}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs opacity-60">Độ trễ</dt>
+                      <dd className="mt-1 text-xl font-semibold tabular-nums">{proxyStats.avgLatencyMs || 0}ms</dd>
+                    </div>
+                  </dl>
+                </div>
+              </section>
             )}
 
-            {/* Actions Bar */}
-            <div className="flex flex-wrap gap-3 items-center">
-              <div className="flex gap-2 items-center flex-1">
-                <input
-                  type="text"
-                  placeholder="Tên nhóm proxy mới..."
-                  value={newGroupName}
-                  onChange={(e) => setNewGroupName(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && createProxyGroup()}
-                  className="rounded-lg border border-gray-200 px-3 py-2 text-sm w-60 focus:outline-none focus:ring-2 focus:ring-blue-200"
-                />
-                <button
-                  onClick={createProxyGroup}
-                  disabled={!newGroupName.trim()}
-                  className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-40 transition-colors"
-                >
-                  <Plus size={16} /> Tạo nhóm
-                </button>
+            <section className="rounded-2xl bg-white px-6 py-6 shadow-[0_12px_35px_rgba(30,58,95,0.08)]">
+              <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                <h3 className="text-base font-semibold text-gray-950">Thêm proxy</h3>
+                <span className="font-mono text-xs text-gray-400">host:port:user:pass</span>
               </div>
-              <button
-                onClick={() => setShowProxyImport(!showProxyImport)}
-                className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-violet-700 bg-violet-50 border border-violet-200 rounded-lg hover:bg-violet-100 transition-colors"
-              >
-                <Upload size={16} /> Import Proxy
-              </button>
-              <button
-                onClick={runProxyHealthCheck}
-                disabled={proxyChecking}
-                className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg hover:bg-emerald-100 disabled:opacity-50 transition-colors"
-              >
-                <RefreshCw size={16} className={proxyChecking ? 'animate-spin' : ''} />
-                {proxyChecking ? 'Đang check...' : 'Health Check'}
-              </button>
-              <button
-                onClick={fetchProxyData}
-                className="flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
-              >
-                <RefreshCw size={16} /> Refresh
-              </button>
-            </div>
+              <label htmlFor="proxy-import" className="sr-only">Danh sách proxy</label>
+                  <textarea
+                    id="proxy-import"
+                    value={proxyImportText}
+                    onChange={(event) => setProxyImportText(event.target.value)}
+                    placeholder={"proxy.example.com:8080:user:password\nhttp://user:password@proxy.example.com:8080"}
+                    rows={5}
+                    className="mt-4 w-full resize-y rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 font-mono text-sm leading-6 text-gray-800 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
+                  />
 
-            {proxyCheckResult && (
-              <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-                Health check xong: <strong>{proxyCheckResult.alive}</strong> alive, <strong>{proxyCheckResult.slow}</strong> slow, <strong>{proxyCheckResult.dead}</strong> dead
-              </div>
-            )}
+                  <details className="group mt-3 text-sm text-gray-600">
+                    <summary className="w-fit cursor-pointer select-none rounded-md px-1 py-1 font-medium text-gray-500 outline-none transition hover:text-gray-950 focus-visible:ring-2 focus-visible:ring-blue-300">
+                      Tùy chọn nâng cao
+                    </summary>
+                    <div className="mt-3 grid gap-3 rounded-xl bg-slate-50 p-4 sm:grid-cols-2">
+                      <label className="text-xs font-medium text-gray-600">
+                        Quốc gia
+                        <input
+                          type="text"
+                          value={proxyImportCountry}
+                          onChange={(event) => setProxyImportCountry(event.target.value)}
+                          className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                        />
+                      </label>
+                      <label className="flex items-center gap-2 self-end rounded-lg px-1 py-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={proxyImportIsRotating}
+                          onChange={(event) => setProxyImportIsRotating(event.target.checked)}
+                          className="rounded border-gray-300"
+                        />
+                        Nhà cung cấp tự xoay IP
+                      </label>
+                    </div>
+                  </details>
 
-            {/* Import Panel */}
-            {showProxyImport && (
-              <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
-                <h3 className="text-sm font-semibold text-gray-900 mb-4 flex items-center gap-2">
-                  <Upload size={16} className="text-violet-600" /> Import Proxy hàng loạt
-                </h3>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-                  <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-1">Nhóm proxy</label>
-                    <select
-                      value={proxyImportGroupId}
-                      onChange={(e) => setProxyImportGroupId(e.target.value)}
-                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  <div className="mt-5 flex flex-wrap items-center gap-3">
+                    <button
+                      onClick={importProxies}
+                      disabled={proxyLoading || proxyChecking || !proxyImportText.trim()}
+                      className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-700 active:translate-y-px disabled:cursor-not-allowed disabled:opacity-40"
                     >
-                      <option value="">Chọn nhóm...</option>
-                      {proxyGroups.map((g: any) => (
-                        <option key={g.id} value={g.id}>{g.name}</option>
-                      ))}
-                    </select>
+                      <Upload size={16} />
+                      {proxyLoading || proxyChecking ? 'Đang thêm và kiểm tra…' : 'Thêm proxy và kiểm tra'}
+                    </button>
+                    <button
+                      onClick={runProxyHealthCheck}
+                      disabled={proxyChecking || proxyStats?.total === 0}
+                      className="inline-flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-slate-100 active:translate-y-px disabled:opacity-40"
+                    >
+                      <RefreshCw size={16} className={proxyChecking ? 'animate-spin' : ''} />
+                      Kiểm tra lại
+                    </button>
+                    <button
+                      onClick={fetchProxyData}
+                      className="px-2 py-2.5 text-sm text-gray-500 transition hover:text-gray-900"
+                    >
+                      Làm mới
+                    </button>
                   </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-1">Quốc gia</label>
-                    <input
-                      type="text"
-                      placeholder="VN, US, ..."
-                      value={proxyImportCountry}
-                      onChange={(e) => setProxyImportCountry(e.target.value)}
-                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
-                    />
-                  </div>
-                  <div className="flex items-end">
-                    <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={proxyImportIsRotating}
-                        onChange={(e) => setProxyImportIsRotating(e.target.checked)}
-                        className="rounded border-gray-300"
-                      />
-                      Rotating gateway
-                    </label>
-                  </div>
-                </div>
-                <textarea
-                  value={proxyImportText}
-                  onChange={(e) => setProxyImportText(e.target.value)}
-                  placeholder={`Mỗi dòng 1 proxy. Hỗ trợ format:\nhost:port:user:pass\nhttp://user:pass@host:port\nhost:port\nuser:pass@host:port`}
-                  rows={6}
-                  className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-blue-500 mb-3"
-                />
-                <div className="flex items-center gap-3">
-                  <button
-                    onClick={importProxies}
-                    disabled={proxyLoading || !proxyImportGroupId || !proxyImportText.trim()}
-                    className="flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-violet-600 rounded-lg hover:bg-violet-700 disabled:opacity-40 transition-colors"
-                  >
-                    <Upload size={16} /> {proxyLoading ? 'Đang import...' : 'Import'}
-                  </button>
-                  {proxyImportResult && (
-                    <span className="text-sm text-gray-600">
-                      ✅ {proxyImportResult.imported} imported, ⏭️ {proxyImportResult.skipped} trùng, ❌ {proxyImportResult.failed} lỗi
-                    </span>
+
+                  {proxyImportResult?.error && (
+                    <p role="alert" className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
+                      {proxyImportResult.error}
+                    </p>
                   )}
-                </div>
-              </div>
-            )}
-
+                  {proxyImportResult && !proxyImportResult.error && (
+                    <p role="status" className="mt-4 rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+                      Đã thêm {proxyImportResult.imported}, bỏ qua {proxyImportResult.skipped} proxy trùng
+                      {proxyImportResult.failed ? `, ${proxyImportResult.failed} dòng không hợp lệ` : '.'}
+                    </p>
+                  )}
+                  {proxyCheckResult && !proxyImportResult && (
+                    <p role="status" className="mt-4 text-sm text-gray-600">
+                      Kiểm tra xong: {proxyCheckResult.alive} dùng được, {proxyCheckResult.dead} không hoạt động.
+                    </p>
+                  )}
+            </section>
             {/* Proxy Groups */}
-            {proxyGroups.length === 0 && (
-              <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-12 text-center">
-                <Shield size={48} className="mx-auto text-gray-300 mb-4" />
-                <h3 className="text-lg font-medium text-gray-500">Chưa có nhóm proxy nào</h3>
-                <p className="text-sm text-gray-400 mt-1">Tạo nhóm proxy và import danh sách proxy dân cư để bắt đầu</p>
-              </div>
-            )}
-
             {proxyGroups.map((group: any) => (
               <div key={group.id} className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
                 <div className="flex items-center justify-between px-6 py-4 bg-gray-50/80 border-b border-gray-100">
@@ -1160,43 +1093,43 @@ function App() {
 
                 {group.proxies?.length > 0 ? (
                   <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
+                    <table className="w-full text-sm min-w-[850px]">
                       <thead>
                         <tr className="text-xs text-gray-500 font-medium uppercase tracking-wider">
-                          <th className="px-4 py-2.5 text-left">Status</th>
-                          <th className="px-4 py-2.5 text-left">Host</th>
-                          <th className="px-4 py-2.5 text-left">Port</th>
-                          <th className="px-4 py-2.5 text-left">Protocol</th>
-                          <th className="px-4 py-2.5 text-left">User</th>
-                          <th className="px-4 py-2.5 text-left">Country</th>
-                          <th className="px-4 py-2.5 text-right">Latency</th>
-                          <th className="px-4 py-2.5 text-right">Success</th>
-                          <th className="px-4 py-2.5 text-right">Fails</th>
-                          <th className="px-4 py-2.5 text-center">Actions</th>
+                          <th className="px-4 py-2.5 text-left whitespace-nowrap">Status</th>
+                          <th className="px-4 py-2.5 text-left whitespace-nowrap">Host</th>
+                          <th className="px-4 py-2.5 text-left whitespace-nowrap">Port</th>
+                          <th className="px-4 py-2.5 text-left whitespace-nowrap">Protocol</th>
+                          <th className="px-4 py-2.5 text-left whitespace-nowrap">User</th>
+                          <th className="px-4 py-2.5 text-left whitespace-nowrap">Country</th>
+                          <th className="px-4 py-2.5 text-right whitespace-nowrap">Latency</th>
+                          <th className="px-4 py-2.5 text-right whitespace-nowrap">Success</th>
+                          <th className="px-4 py-2.5 text-right whitespace-nowrap">Fails</th>
+                          <th className="px-4 py-2.5 text-center whitespace-nowrap">Actions</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-50">
                         {group.proxies.map((proxy: any) => (
                           <tr key={proxy.id} className={`hover:bg-gray-50/50 ${!proxy.enabled ? 'opacity-50' : ''}`}>
-                            <td className="px-4 py-2">
+                            <td className="px-4 py-2 whitespace-nowrap">
                               {proxy.status === 'ALIVE' && <span className="inline-flex items-center gap-1 text-emerald-600"><CheckCircle size={14} /> Alive</span>}
                               {proxy.status === 'DEAD' && <span className="inline-flex items-center gap-1 text-red-500"><XCircle size={14} /> Dead</span>}
                               {proxy.status === 'SLOW' && <span className="inline-flex items-center gap-1 text-amber-500"><Zap size={14} /> Slow</span>}
                               {proxy.status === 'UNKNOWN' && <span className="inline-flex items-center gap-1 text-gray-400"><CircleDot size={14} /> Unknown</span>}
                             </td>
-                            <td className="px-4 py-2 font-mono text-xs">{proxy.host}</td>
-                            <td className="px-4 py-2 font-mono text-xs">{proxy.port}</td>
-                            <td className="px-4 py-2">
+                            <td className="px-4 py-2 font-mono text-xs whitespace-nowrap">{proxy.host}</td>
+                            <td className="px-4 py-2 font-mono text-xs whitespace-nowrap">{proxy.port}</td>
+                            <td className="px-4 py-2 whitespace-nowrap">
                               <span className="px-1.5 py-0.5 rounded text-xs bg-gray-100">{proxy.protocol}</span>
                             </td>
-                            <td className="px-4 py-2 font-mono text-xs text-gray-500">{proxy.username || '—'}</td>
-                            <td className="px-4 py-2 text-xs">{proxy.country || '—'}</td>
-                            <td className="px-4 py-2 text-right text-xs">
+                            <td className="px-4 py-2 font-mono text-xs text-gray-500 whitespace-nowrap">{proxy.username || '—'}</td>
+                            <td className="px-4 py-2 text-xs whitespace-nowrap">{proxy.country || '—'}</td>
+                            <td className="px-4 py-2 text-right text-xs whitespace-nowrap">
                               {proxy.lastLatencyMs != null ? `${proxy.lastLatencyMs}ms` : '—'}
                             </td>
-                            <td className="px-4 py-2 text-right text-xs text-emerald-600">{proxy.successCount}</td>
-                            <td className="px-4 py-2 text-right text-xs text-red-500">{proxy.failCount}</td>
-                            <td className="px-4 py-2">
+                            <td className="px-4 py-2 text-right text-xs text-emerald-600 whitespace-nowrap">{proxy.successCount}</td>
+                            <td className="px-4 py-2 text-right text-xs text-red-500 whitespace-nowrap">{proxy.failCount}</td>
+                            <td className="px-4 py-2 whitespace-nowrap">
                               <div className="flex items-center justify-center gap-1">
                                 <button
                                   onClick={() => toggleProxy(proxy.id, !proxy.enabled)}
@@ -1300,150 +1233,6 @@ function App() {
           </div>
         </div>
       )}
-      {/* Proxy Settings Modal */}
-      {showProxyModal && createPortal(
-        <div
-          className="fixed inset-0 z-[9999] flex items-center justify-center bg-gray-900/50 p-4"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setShowProxyModal(false)
-          }}
-        >
-          <form
-            className="bg-white rounded-xl shadow-xl w-full max-w-md min-h-[400px] flex flex-col relative"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="proxy-settings-title"
-            onSubmit={(event) => {
-              event.preventDefault()
-              saveProxySettings()
-            }}
-          >
-            <div className="flex justify-between items-center px-6 py-4 border-b border-gray-100 bg-gray-50/50">
-              <h2 id="proxy-settings-title" className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-                <Globe size={20} className="text-blue-600" /> Proxy Settings
-              </h2>
-              <button
-                type="button"
-                onClick={() => setShowProxyModal(false)}
-                className="text-gray-400 hover:text-gray-600 transition-colors p-1"
-                aria-label="Đóng cài đặt proxy"
-              >
-                ✕
-              </button>
-            </div>
-
-            <div className="p-6 overflow-y-auto space-y-4">
-              {proxyError && (
-                <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                  {proxyError}
-                </p>
-              )}
-              {proxyApplyStatus && !proxyError && (
-                <p role="status" className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-700">
-                  {proxyApplyStatus}
-                </p>
-              )}
-              <div className="flex items-center justify-between p-4 bg-gray-50 rounded-xl border border-gray-100">
-                <div>
-                  <h3 className="font-medium text-gray-900 text-sm">Enable Proxy</h3>
-                  <p className="text-xs text-gray-500 mt-0.5">Route extension traffic through proxy</p>
-                </div>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    className="sr-only peer"
-                    checked={proxyDraft.enabled}
-                    onChange={(e) => setProxyDraft({ ...proxyDraft, enabled: e.target.checked })}
-                  />
-                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
-                </label>
-              </div>
-
-              <div className="grid grid-cols-3 gap-3">
-                <div className="col-span-1">
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Scheme</label>
-                  <select
-                    value={proxyDraft.scheme}
-                    onChange={(e) => setProxyDraft({ ...proxyDraft, scheme: e.target.value as ProxyConfig['scheme'] })}
-                    className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  >
-                    <option value="http">HTTP</option>
-                    <option value="https">HTTPS</option>
-                    <option value="socks4">SOCKS4</option>
-                    <option value="socks5">SOCKS5</option>
-                  </select>
-                </div>
-                <div className="col-span-2">
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Host</label>
-                  <input
-                    type="text"
-                    placeholder="proxy.example.com"
-                    value={proxyDraft.host}
-                    onChange={(e) => setProxyDraft({ ...proxyDraft, host: e.target.value })}
-                    className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Port</label>
-                <input
-                  type="text"
-                  placeholder="8080"
-                  inputMode="numeric"
-                  value={proxyDraft.port}
-                  onChange={(e) => setProxyDraft({ ...proxyDraft, port: e.target.value })}
-                  className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
-                />
-              </div>
-
-              <div className="pt-2">
-                <h4 className="text-xs font-semibold text-gray-900 mb-3 uppercase tracking-wider">Authentication (Optional)</h4>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-1">Username</label>
-                    <input
-                      type="text"
-                      placeholder="Username"
-                      value={proxyDraft.username}
-                      onChange={(e) => setProxyDraft({ ...proxyDraft, username: e.target.value })}
-                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-1">Password</label>
-                    <input
-                      type="password"
-                      placeholder="Password"
-                      value={proxyDraft.password}
-                      onChange={(e) => setProxyDraft({ ...proxyDraft, password: e.target.value })}
-                      className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
-                    />
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="px-6 py-4 border-t border-gray-100 bg-gray-50 flex justify-end gap-3">
-              <button
-                type="button"
-                onClick={() => setShowProxyModal(false)}
-                className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors"
-              >
-                Hủy
-              </button>
-              <button
-                type="submit"
-                className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
-              >
-                {proxyDraft.enabled ? 'Lưu và bật proxy' : 'Lưu cấu hình'}
-              </button>
-            </div>
-          </form>
-        </div>,
-        document.body
-      )}
     </div>
   )
 }
@@ -1487,6 +1276,14 @@ function RunDetailModal({
   const [reviewPages, setReviewPages] = useState<Record<string, number>>({})
   const records = (detail?.items || []).map((item: any) => item.data || {})
   const detailProgress = detail?.run?.outputMetadata?.detailProgress
+  const shopInfo = detail?.run?.actor?.name === 'shopee-shop-scraper'
+    ? detail?.run?.outputMetadata?.shopInfo
+    : null
+  const formatShopMetric = (value: unknown) => {
+    const number = Number(value)
+    if (!Number.isFinite(number)) return '—'
+    return new Intl.NumberFormat('vi-VN', { notation: number >= 10000 ? 'compact' : 'standard' }).format(number)
+  }
   let schemaColumns: string[] = []
   let schemaLabels: Record<string, string> = {}
   try {
@@ -1824,6 +1621,80 @@ function RunDetailModal({
           <div className="flex-1 flex items-center justify-center text-gray-500">Loading data…</div>
         ) : detail ? (
           <>
+            {shopInfo && (
+              <section className="border-b border-slate-200 bg-slate-900 px-5 py-5 text-white">
+                <div className="flex flex-col gap-5 xl:flex-row xl:items-center xl:justify-between">
+                  <div className="flex min-w-0 items-center gap-4">
+                    {shopInfo.shopAvatar ? (
+                      <img
+                        src={shopInfo.shopAvatar}
+                        alt={`Ảnh đại diện ${shopInfo.shopName || 'shop Shopee'}`}
+                        referrerPolicy="no-referrer"
+                        className="h-16 w-16 shrink-0 rounded-2xl border border-white/15 bg-white object-cover"
+                      />
+                    ) : (
+                      <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl bg-white/10 text-xl font-semibold">
+                        {String(shopInfo.shopName || 'S').slice(0, 1).toUpperCase()}
+                      </div>
+                    )}
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="truncate text-xl font-semibold tracking-tight">
+                          {shopInfo.shopName || shopInfo.shopUsername || 'Shopee shop'}
+                        </h3>
+                        {shopInfo.shopIsPreferred && <span className="rounded-md bg-orange-500/20 px-2 py-1 text-[11px] font-semibold text-orange-200">Preferred</span>}
+                        {shopInfo.shopIsMall && <span className="rounded-md bg-red-500/20 px-2 py-1 text-[11px] font-semibold text-red-200">Mall</span>}
+                        {shopInfo.shopIsVerified && <span className="rounded-md bg-blue-500/20 px-2 py-1 text-[11px] font-semibold text-blue-200">Đã xác minh</span>}
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-300">
+                        {shopInfo.shopUsername && <span>@{shopInfo.shopUsername}</span>}
+                        {shopInfo.shopLastActiveText && <span>Hoạt động {shopInfo.shopLastActiveText}</span>}
+                        {shopInfo.url && (
+                          <a href={shopInfo.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-blue-300 hover:text-blue-200">
+                            Mở shop <ExternalLink size={11} />
+                          </a>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <dl className="grid grid-cols-2 gap-x-7 gap-y-3 sm:grid-cols-4 xl:min-w-[34rem]">
+                    <div>
+                      <dt className="text-[11px] text-slate-400">Sản phẩm đã lấy</dt>
+                      <dd className="mt-0.5 text-lg font-semibold tabular-nums">
+                        {formatShopMetric(shopInfo.crawledProductCount ?? detail.run.itemCount)}
+                        {shopInfo.shopProductCount ? <span className="text-sm font-normal text-slate-400">/{formatShopMetric(shopInfo.shopProductCount)}</span> : null}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-[11px] text-slate-400">Người theo dõi</dt>
+                      <dd className="mt-0.5 text-lg font-semibold tabular-nums">{formatShopMetric(shopInfo.shopFollowerCount)}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-[11px] text-slate-400">Đánh giá</dt>
+                      <dd className="mt-0.5 text-lg font-semibold tabular-nums">
+                        {shopInfo.shopRating ?? '—'}{shopInfo.shopRating ? ' ★' : ''}
+                        {shopInfo.shopRatingCount ? <span className="ml-1 text-xs font-normal text-slate-400">({formatShopMetric(shopInfo.shopRatingCount)})</span> : null}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-[11px] text-slate-400">Phản hồi chat</dt>
+                      <dd className="mt-0.5 text-lg font-semibold tabular-nums">{shopInfo.shopResponseRateText || (shopInfo.shopResponseRate !== undefined ? `${shopInfo.shopResponseRate}%` : '—')}</dd>
+                    </div>
+                  </dl>
+                </div>
+
+                <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 border-t border-white/10 pt-3 text-xs text-slate-300">
+                  {shopInfo.shopLocation && <span><span className="text-slate-500">Địa chỉ:</span> {shopInfo.shopLocation}</span>}
+                  {shopInfo.shopJoinedText && <span><span className="text-slate-500">Tham gia:</span> {shopInfo.shopJoinedText}</span>}
+                  {shopInfo.shopFollowingCount !== undefined && <span><span className="text-slate-500">Đang theo:</span> {formatShopMetric(shopInfo.shopFollowingCount)}</span>}
+                  {shopInfo.shopCancellationRateText && <span><span className="text-slate-500">Hủy đơn:</span> {shopInfo.shopCancellationRateText}</span>}
+                  {shopInfo.shopBusinessName && <span><span className="text-slate-500">Doanh nghiệp:</span> {shopInfo.shopBusinessName}</span>}
+                  {shopInfo.pagesCrawled && <span><span className="text-slate-500">Trang đã crawl:</span> {shopInfo.pagesCrawled}</span>}
+                </div>
+              </section>
+            )}
+
             <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 p-5 bg-gray-50 border-b border-gray-100">
               <div className="bg-white rounded-2xl p-4">
                 <div className="text-xs uppercase tracking-wide text-gray-400">Crawler</div>

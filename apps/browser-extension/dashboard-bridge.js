@@ -51,7 +51,6 @@ window.addEventListener('message', (event) => {
     sendToBackground({
       type: 'CONFIGURE',
       token: message.token,
-      proxyConfig: message.proxyConfig,
       apiBase: 'http://localhost:3001'
     }).then((result) => {
       if (!result?.ok) {

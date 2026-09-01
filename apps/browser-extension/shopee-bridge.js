@@ -95,6 +95,15 @@ new MutationObserver(reportShopeePageUnavailable).observe(document.documentEleme
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message.type === 'REQUEST_SHOPEE_SHOP_NEXT_PAGE') {
+    void advanceShopeeShopPage(Number(message.page || 0))
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error?.message || String(error)
+      }));
+    return true;
+  }
   if (message.type === 'REQUEST_SHOPEE_SEARCH_RESCAN') {
     void rescanRenderedShopeeProducts(Number(message.round || 0))
       .then((count) => sendResponse({ ok: true, count }))
@@ -581,6 +590,7 @@ function scrapeRenderedProducts() {
 
 let lastDomSignature = '';
 let domAttempts = 0;
+let shopVirtualPage = null;
 
 function renderedProductSignature(items) {
   return items
@@ -589,6 +599,9 @@ function renderedProductSignature(items) {
 }
 
 function currentShopeeSearchPage() {
+  if (Number.isInteger(shopVirtualPage) && shopVirtualPage >= 0) {
+    return shopVirtualPage;
+  }
   const page = Number(new URLSearchParams(location.search).get('page') || 0);
   return Number.isInteger(page) && page >= 0 ? page : 0;
 }
@@ -598,14 +611,92 @@ function isShopeeProductCollectionPage() {
   return location.pathname.includes('/search') || params.get('omnicrawl_source') === 'shop';
 }
 
-function sendShopeeDomItems(items, page, isFinal = false) {
+function sendShopeeDomItems(items, page, isFinal = false, pagination = null) {
   chrome.runtime.sendMessage({
     type: 'SHOPEE_DOM_ITEMS',
     items,
     page,
     pageUrl: location.href,
-    isFinal
+    isFinal,
+    ...(pagination ? { pagination } : {})
   }).catch(() => undefined);
+}
+
+function renderedShopPaginationState() {
+  const controllers = [...document.querySelectorAll(
+    '.shopee-page-controller, [class*="page-controller"], [class*="pagination"]'
+  )];
+  for (const controller of controllers) {
+    const buttons = [...controller.querySelectorAll('button, a[href]')];
+    const numericButtons = buttons.filter((button) => /^\d+$/.test((button.textContent || '').trim()));
+    if (!numericButtons.length) continue;
+    const activeButton = numericButtons.find((button) => (
+      button.classList.contains('shopee-button-solid--primary') ||
+      button.classList.contains('shopee-button-no-outline--active') ||
+      String(button.className).includes('active') ||
+      String(button.className).includes('primary') ||
+      button.getAttribute('aria-current') === 'page'
+    ));
+    const currentPage = Number((activeButton?.textContent || '').trim()) || currentShopeeSearchPage() + 1;
+    const totalPages = Math.max(...numericButtons.map((button) => Number((button.textContent || '').trim())));
+    const nextControl = controller.querySelector([
+      '.shopee-icon-button--right',
+      '[class*="icon-button--right"]',
+      'button[aria-label*="next" i]',
+      'button[aria-label*="tiếp" i]',
+      'button[class*="right"]',
+      'button[class*="next"]'
+    ].join(','));
+    const exhausted = Boolean(
+      (nextControl && !isEnabledPaginationControl(nextControl)) ||
+      (!nextControl && activeButton && currentPage >= totalPages)
+    );
+    return {
+      currentPage,
+      totalPages,
+      hasNextPage: exhausted ? false : true,
+      exhausted
+    };
+  }
+  return null;
+}
+
+async function advanceShopeeShopPage(page) {
+  if (!isShopeeProductCollectionPage()) {
+    return { ok: false, error: 'Trang hiện tại không phải danh sách sản phẩm shop.' };
+  }
+  const controllers = [...document.querySelectorAll(
+    '.shopee-page-controller, [class*="page-controller"], [class*="pagination"]'
+  )];
+  const controller = controllers.find((candidate) => (
+    [...candidate.querySelectorAll('button, a[href]')]
+      .some((button) => /^\d+$/.test((button.textContent || '').trim()))
+  ));
+  if (!controller) return { ok: false, error: 'Không tìm thấy pagination All Products.' };
+  const nextControl = controller.querySelector([
+    '.shopee-icon-button--right',
+    '[class*="icon-button--right"]',
+    'button[aria-label*="next" i]',
+    'button[aria-label*="tiếp" i]',
+    'button[class*="right"]',
+    'button[class*="next"]'
+  ].join(','));
+  if (!isEnabledPaginationControl(nextControl)) {
+    return { ok: false, exhausted: true, error: 'Đã ở trang All Products cuối cùng.' };
+  }
+
+  const previousSignature = renderedProductSignature(scrapeRenderedProducts());
+  shopVirtualPage = Math.max(0, Math.floor(page));
+  lastDomSignature = '';
+  nextControl.click();
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const currentSignature = renderedProductSignature(scrapeRenderedProducts());
+    if (currentSignature && currentSignature !== previousSignature) break;
+  }
+  window.scrollTo({ top: 0, behavior: 'auto' });
+  await autoScrollShopeeSearchPage();
+  return { ok: true, page: shopVirtualPage };
 }
 
 function waitForRenderedScroll(minimumMs = 350, maximumMs = 650) {
@@ -636,6 +727,8 @@ async function rescanRenderedShopeeProducts(round = 0) {
 
 async function autoScrollShopeeSearchPage() {
   if (!isShopeeProductCollectionPage()) return;
+  sendShopeeShopInfoIfAvailable();
+  if (!ensureShopeeAllProductsTab()) return;
   const page = currentShopeeSearchPage();
   const minimumStableItems = 20;
   let stableRounds = 0;
@@ -652,6 +745,7 @@ async function autoScrollShopeeSearchPage() {
       resolve();
     };
     const observer = new MutationObserver(() => {
+      sendShopeeShopInfoIfAvailable();
       const current = renderedProductSignature(scrapeRenderedProducts());
       if (current && current !== signature) finish();
     });
@@ -660,6 +754,7 @@ async function autoScrollShopeeSearchPage() {
   });
 
   for (let i = 0; i < 25; i += 1) {
+    sendShopeeShopInfoIfAvailable();
     const totalHeight = Math.max(document.body.scrollHeight, 4000);
     const maximumY = Math.max(0, totalHeight - window.innerHeight);
     const step = Math.max(
@@ -693,21 +788,227 @@ async function autoScrollShopeeSearchPage() {
       stableRounds >= 5
     ) break;
   }
-  sendShopeeDomItems([], page, true);
+  sendShopeeShopInfoIfAvailable();
+  sendShopeeDomItems([], page, true, renderedShopPaginationState());
+}
+
+function extractShopeeShopHydration() {
+  for (const script of document.querySelectorAll('script[type="text/mfe-initial-data"]')) {
+    let state;
+    try {
+      state = JSON.parse(script.textContent || '{}')?.initialState;
+    } catch {
+      continue;
+    }
+    const shop = (
+      state?.DOMAIN_SHOP?.data?.shop_base ||
+      state?.DOMAIN_SHOP?.data?.shop_detail ||
+      state?.DOMAIN_SHOP?.data ||
+      state?.shop?.data ||
+      state?.shop_info ||
+      state?.shop
+    );
+    if (shop && (shop.shopid || shop.shop_id || shop.name || shop.username)) {
+      return shop;
+    }
+  }
+  return null;
+}
+
+function extractShopeeShopDomHeader() {
+  const headerCandidates = [
+    document.querySelector('.section-seller-overview-horizontal'),
+    document.querySelector('.shopee-seller-portrait'),
+    document.querySelector('[class*="seller-overview"]'),
+    document.querySelector('[class*="shop-page__header"]'),
+    document.querySelector('[class*="shop-header"]'),
+    document.querySelector('[class*="header__shop"]')
+  ].filter(Boolean);
+
+  const root = headerCandidates[0] || document.querySelector('main') || document.body;
+  const rootText = (root?.innerText || root?.textContent || '');
+  const mainText = (document.querySelector('main')?.innerText || '').slice(0, 6000);
+  const text = `${rootText} ${mainText}`
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const productMatch = text.match(/(?:products?|sản\s*phẩm)\s*[:：]?\s*([\d.,]+\s*(?:k|nghìn)?)/i);
+  const followerMatch = text.match(/(?:followers?|người\s*theo\s*dõi)\s*[:：]?\s*([\d.,]+\s*(?:k|nghìn|tr|triệu)?)/i);
+  const followingMatch = text.match(/(?:following|đang\s*theo(?:\s*dõi)?)\s*[:：]?\s*([\d.,]+)/i);
+  const ratingMatch = text.match(/(?:rating|đánh\s*giá)\s*[:：]?\s*([1-5](?:[.,]\d)?)\s*(?:\(\s*([\d.,]+\s*(?:k|nghìn)?)\s*(?:ratings?|đánh\s*giá)?\s*\))?/i);
+  const chatMatch = text.match(/(?:chat\s*performance|tỉ\s*lệ\s*phản\s*hồi(?:\s*chat)?)\s*[:：]?\s*(\d+%\s*(?:\([^)]+\))?)/i);
+  const joinedMatch = text.match(/(?:joined|tham\s*gia)\s*[:：]?\s*([^|\n,•]{2,30}?)(?:\s*(?:address|địa\s*chỉ|business|followers|following|rating|chat|products)|$)/i);
+  const addressMatch = text.match(/(?:address|địa\s*chỉ)\s*[:：]?\s*([^|\n•]{3,100}?)(?:\s*(?:business\s*name|tên\s*doanh\s*nghiệp|joined|tham\s*gia|followers|products)|$)/i);
+  const businessMatch = text.match(/(?:business\s*name|tên\s*doanh\s*nghiệp)\s*[:：]?\s*([^|\n•]{2,100}?)(?:\s*(?:address|địa\s*chỉ|joined|followers)|$)/i);
+  const activeMatch = text.match(/(?:active|online|hoạt\s*động)\s+([^|\n•]{2,30}?)(?:\s*(?:follow|chat|theo\s*dõi)|$)/i);
+  const cancellationMatch = text.match(/(?:cancellation\s*rate|tỉ\s*lệ\s*shop\s*hủy\s*đơn)\s*[:：]?\s*(\d+(?:[.,]\d+)?%)/i);
+
+  const nameNode = root.querySelector([
+    'h1',
+    '[class*="seller-name"]',
+    '[class*="shop-name"]',
+    '[class*="portrait-name"]',
+    '[class*="header__shop-name"]'
+  ].join(','));
+  const shopName = nameNode?.textContent?.trim() || '';
+  const avatarNode = root.querySelector([
+    'img[class*="avatar"]',
+    'img[class*="portrait"]',
+    '[class*="avatar"] img',
+    '[class*="portrait"] img'
+  ].join(','));
+  const shopAvatar = avatarNode?.currentSrc || avatarNode?.src || '';
+
+  const isPreferred = /preferred|yêu thích/i.test(text);
+  const isMall = /shopee mall|\bmall\b|chính hãng/i.test(text);
+
+  return {
+    ...(shopName ? { shopName } : {}),
+    ...(productMatch ? { shopProductCount: compactReviewCount(productMatch[1]) } : {}),
+    ...(followerMatch ? { shopFollowerCount: compactReviewCount(followerMatch[1]) } : {}),
+    ...(followingMatch ? { shopFollowingCount: Number(followingMatch[1]) } : {}),
+    ...(ratingMatch ? {
+      shopRating: Number(ratingMatch[1].replace(',', '.')),
+      ...(ratingMatch[2] ? { shopRatingCount: compactReviewCount(ratingMatch[2]) } : {})
+    } : {}),
+    ...(chatMatch ? { shopResponseRateText: chatMatch[1].trim() } : {}),
+    ...(joinedMatch ? { shopJoinedText: joinedMatch[1].trim() } : {}),
+    ...(addressMatch ? { shopLocation: addressMatch[1].trim().replace(/^\*+,\s*/, '') } : {}),
+    ...(businessMatch ? { shopBusinessName: businessMatch[1].trim() } : {}),
+    ...(activeMatch ? { shopLastActiveText: activeMatch[1].trim() } : {}),
+    ...(cancellationMatch ? {
+      shopCancellationRate: Number(cancellationMatch[1].replace('%', '').replace(',', '.')),
+      shopCancellationRateText: cancellationMatch[1]
+    } : {}),
+    ...(shopAvatar ? { shopAvatar } : {}),
+    shopIsPreferred: isPreferred,
+    shopIsMall: isMall
+  };
+}
+
+function extractShopeeShopInfo() {
+  const hydration = extractShopeeShopHydration();
+  const dom = extractShopeeShopDomHeader();
+
+  if (!hydration && !dom.shopName && !dom.shopProductCount) return null;
+
+  const shopId = String(hydration?.shopid || hydration?.shop_id || '');
+  const shopUsername = String(hydration?.username || hydration?.account?.username || '');
+  const shopName = String(hydration?.name || hydration?.shop_name || dom.shopName || '').trim();
+  const shopDescription = String(hydration?.description || hydration?.shop_description || '').trim();
+  const shopRating = hydration?.rating_star ?? dom.shopRating ?? null;
+  const shopRatingCount = (
+    (hydration?.rating_good ?? 0) + (hydration?.rating_normal ?? 0) + (hydration?.rating_bad ?? 0)
+  ) || dom.shopRatingCount || null;
+  const shopFollowerCount = hydration?.follower_count ?? dom.shopFollowerCount ?? null;
+  const shopFollowingCount = hydration?.following_count ?? dom.shopFollowingCount ?? null;
+  const shopProductCount = hydration?.item_count ?? dom.shopProductCount ?? null;
+  const shopResponseRate = hydration?.response_rate ?? (
+    dom.shopResponseRateText ? Number(dom.shopResponseRateText.replace('%', '').trim()) : null
+  );
+  const shopLocation = String(
+    hydration?.shop_location ||
+    hydration?.item_location ||
+    hydration?.place ||
+    dom.shopLocation ||
+    ''
+  ).trim();
+  const shopIsPreferred = Boolean(
+    hydration?.is_preferred_plus_seller ||
+    hydration?.is_preferred ||
+    dom.shopIsPreferred
+  );
+  const shopIsMall = Boolean(
+    hydration?.is_official_shop ||
+    hydration?.is_mall ||
+    dom.shopIsMall
+  );
+  const shopIsVerified = Boolean(
+    hydration?.is_shopee_verified ||
+    hydration?.is_verified ||
+    hydration?.account?.is_verified
+  );
+  const shopAvatar = String(
+    hydration?.portrait ||
+    hydration?.avatar ||
+    hydration?.account?.portrait ||
+    dom.shopAvatar ||
+    ''
+  ).trim();
+
+  return {
+    ...(shopId ? { shopId } : {}),
+    ...(shopUsername ? { shopUsername } : {}),
+    ...(shopName ? { shopName } : {}),
+    ...(shopDescription ? { shopDescription } : {}),
+    ...(shopRating !== null ? { shopRating: Number(shopRating) } : {}),
+    ...(shopRatingCount !== null ? { shopRatingCount: Number(shopRatingCount) } : {}),
+    ...(shopFollowerCount !== null ? { shopFollowerCount: Number(shopFollowerCount) } : {}),
+    ...(shopFollowingCount !== null ? { shopFollowingCount: Number(shopFollowingCount) } : {}),
+    ...(shopProductCount !== null ? { shopProductCount: Number(shopProductCount) } : {}),
+    ...(shopResponseRate !== null ? { shopResponseRate: Number(shopResponseRate) } : {}),
+    ...(dom.shopResponseRateText ? { shopResponseRateText: dom.shopResponseRateText } : {}),
+    ...(dom.shopJoinedText ? { shopJoinedText: dom.shopJoinedText } : {}),
+    ...(dom.shopLastActiveText ? { shopLastActiveText: dom.shopLastActiveText } : {}),
+    ...(dom.shopBusinessName ? { shopBusinessName: dom.shopBusinessName } : {}),
+    ...(dom.shopCancellationRate !== undefined ? { shopCancellationRate: dom.shopCancellationRate } : {}),
+    ...(dom.shopCancellationRateText ? { shopCancellationRateText: dom.shopCancellationRateText } : {}),
+    ...(shopAvatar ? { shopAvatar } : {}),
+    ...(shopLocation ? { shopLocation } : {}),
+    shopIsPreferred,
+    shopIsMall,
+    shopIsVerified,
+    url: location.href
+  };
+}
+
+let shopInfoSent = false;
+function sendShopeeShopInfoIfAvailable() {
+  const params = new URLSearchParams(location.search);
+  if (params.get('omnicrawl_source') !== 'shop') return;
+  const shopInfo = extractShopeeShopInfo();
+  if (shopInfo && (shopInfo.shopName || shopInfo.shopProductCount || shopInfo.shopFollowerCount)) {
+    shopInfoSent = true;
+    chrome.runtime.sendMessage({
+      type: 'SHOPEE_SHOP_INFO',
+      shopInfo
+    }).catch(() => undefined);
+  }
+}
+
+function ensureShopeeAllProductsTab() {
+  const params = new URLSearchParams(location.search);
+  if (params.get('omnicrawl_source') !== 'shop') return true;
+  if (location.hash.toLowerCase() === '#product_list') return true;
+  const allTabs = [...document.querySelectorAll('a[href], button, [role="tab"], div[class*="tab"]')];
+  const allProductsTab = allTabs.find((el) => {
+    const t = (el.innerText || el.textContent || '').trim().toLowerCase();
+    return t === 'all products' || t === 'tất cả sản phẩm';
+  });
+  if (!allProductsTab) return false;
+  const target = new URL(location.href);
+  target.hash = 'product_list';
+  // Keep page/sort/source query parameters; clicking Shopee's raw tab link
+  // would discard them and repeatedly reload page zero.
+  location.replace(target.toString());
+  return false;
 }
 
 if (isShopeeProductCollectionPage()) {
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
+      sendShopeeShopInfoIfAvailable();
       void autoScrollShopeeSearchPage();
     }, { once: true });
   } else {
+    sendShopeeShopInfoIfAvailable();
     void autoScrollShopeeSearchPage();
   }
 }
 
 const domCaptureTimer = setInterval(() => {
   domAttempts += 1;
+  sendShopeeShopInfoIfAvailable();
   const items = scrapeRenderedProducts();
   const signature = renderedProductSignature(items);
   if (items.length && signature !== lastDomSignature) {

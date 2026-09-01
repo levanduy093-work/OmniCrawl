@@ -34,6 +34,12 @@ docs/
 
 Thư mục `storage/` là dữ liệu runtime do API tự tạo và đã được git bỏ qua.
 
+`.env` chỉ cần cấu hình PostgreSQL như trong `.env.example`. API tự dùng địa chỉ
+local và các cổng mặc định; khóa JWT cùng khóa mã hóa mật khẩu proxy được tạo
+tự động trong `storage/` với quyền chỉ tài khoản hệ điều hành hiện tại được đọc.
+Các biến nâng cao vẫn có thể được đặt khi triển khai đặc biệt, nhưng không cần
+cho cách chạy local thông thường.
+
 ## Chạy local
 
 Yêu cầu Node.js 20+, pnpm 9+ và PostgreSQL có extension `vector`, `pg_trgm`.

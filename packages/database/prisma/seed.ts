@@ -207,14 +207,14 @@ async function main() {
     where: { name: 'shopee-shop-scraper' },
     update: {
       userId: null,
-      version: '1.0.1',
+      version: '1.1.0',
       inputSchema: shopeeShopInputSchema,
       outputSchema: shopeeShopOutputSchema
     },
     create: {
       name: 'shopee-shop-scraper',
       description: 'Browser Agent crawler for every product exposed by a Shopee shop URL.',
-      version: '1.0.1',
+      version: '1.1.0',
       userId: null,
       inputSchema: shopeeShopInputSchema,
       outputSchema: shopeeShopOutputSchema

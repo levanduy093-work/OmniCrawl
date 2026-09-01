@@ -23,6 +23,12 @@
       value.includes('/api/v4/pdp/get_rw') ||
       value.includes('/api/v4/item/get')
     ) return 'detail';
+    if (
+      value.includes('/api/v4/shop/get_shop_base') ||
+      value.includes('/api/v4/shop/get_shop_detail') ||
+      value.includes('/api/v4/product/get_shop_info') ||
+      value.includes('/api/v4/shop/get_shop_tab_info')
+    ) return 'shop_info';
     return null;
   };
 

@@ -1,5 +1,28 @@
 # OmniCrawl Browser Agent
 
+Version 0.14.3 adds an optional Proxy Manager path. With no enabled proxy, a
+crawler job uses the machine's direct connection. Once a proxy is enabled, the
+job starts only after at least one upstream proxy has a verified egress IP
+different from the machine IP; it never silently falls back to the machine IP
+when that configured proxy fails. The previous Chrome proxy setting is restored
+afterward.
+
+Use a dedicated Chrome profile for OmniCrawl. Chrome proxy settings are
+profile-wide, so other tabs in the same profile also use the crawler proxy while
+a job is active. Shopee `Login Required` pages close the current crawler window
+and retry in a fresh Incognito window, up to three times per listing page or
+product. CAPTCHA/traffic challenges pause the run and bring the affected
+crawler window to the foreground for manual resolution.
+
+Add proxy groups, addresses, protocols, and credentials from the Dashboard's
+Proxy Manager. Proxy credentials are encrypted by an automatically generated
+local runtime key; no proxy secret is required in `.env`.
+
+Shopee shop jobs use the shop's `#product_list` All Products route, preserve the
+zero-based page query across navigation, and stop when the rendered pagination
+reports its final page. Shop profile metadata is synchronized while the run is
+active and displayed separately from product rows in Run data.
+
 1. Open `chrome://extensions` in Chrome or `edge://extensions` in Edge.
 2. Enable **Developer mode**.
 3. Click **Load unpacked**.
