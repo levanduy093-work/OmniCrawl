@@ -26,3 +26,4 @@ dev.db-journal
 *.bak
 *.swp
 storage/
+linked_post.png
