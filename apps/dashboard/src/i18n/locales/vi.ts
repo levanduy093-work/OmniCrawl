@@ -33,6 +33,7 @@ export const vi = {
     runs: 'Lịch sử chạy',
     proxies: 'Quản lý Proxy',
     settings: 'Cài đặt',
+    support: 'Ủng hộ dự án',
     logout: 'Đăng xuất',
     collapse: 'Thu gọn thanh bên',
     expand: 'Mở rộng thanh bên'

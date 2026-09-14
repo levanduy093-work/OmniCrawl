@@ -20,7 +20,8 @@ import {
   CheckCircle,
   XCircle,
   Zap,
-  CircleDot
+  CircleDot,
+  Coffee
 } from 'lucide-react'
 import Login from './Login'
 import OmniCrawlLogo from './Logo'
@@ -651,6 +652,13 @@ function App() {
         </nav>
         
         <div className="mt-auto pb-4 space-y-1">
+          <NavItem 
+            icon={<Coffee className="text-amber-500" />} 
+            label={t('sidebar.support')} 
+            active={false} 
+            onClick={() => window.open('https://ko-fi.com/levanduy093_work', '_blank', 'noopener,noreferrer')} 
+            collapsed={!isSidebarOpen} 
+          />
           <NavItem icon={<Settings />} label={t('sidebar.settings')} active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} collapsed={!isSidebarOpen} />
           <NavItem icon={<LogOut />} label={t('sidebar.logout')} active={false} onClick={handleLogout} collapsed={!isSidebarOpen} />
         </div>

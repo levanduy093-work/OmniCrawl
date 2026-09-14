@@ -1,43 +1,57 @@
 # OmniCrawl
 
-OmniCrawl là nền tảng thu thập dữ liệu thương mại điện tử theo mô hình actor,
-ưu tiên chạy local và để người dùng kiểm soát phiên trình duyệt. Repository hiện
-có hai runtime độc lập:
+<p align="center">
+  <a href="https://ko-fi.com/levanduy093_work">
+    <img src="https://img.shields.io/badge/Ko--fi-Support%20Project-F16061?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Support on Ko-fi" />
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="License: MIT" />
+  </a>
+</p>
 
-- **Web + Browser Agent:** Dashboard tạo và theo dõi run, API lưu dữ liệu trong
-  PostgreSQL, còn Chrome/Edge Extension thu thập trong phiên đã đăng nhập.
-- **Desktop:** ứng dụng Electron thử nghiệm chạy độc lập với API/PostgreSQL,
-  dùng trình duyệt nhúng và SQLite local. Hiện desktop mới hỗ trợ Shopee Search.
+<p align="center">
+  <b>English</b> | <a href="README.vi.md">Tiếng Việt</a>
+</p>
 
-> Build thành công chỉ xác nhận source có thể biên dịch. Crawl thực tế còn phụ
-> thuộc phiên đăng nhập, giao diện/API nền tảng, quyền Incognito, proxy (nếu bật)
-> và CAPTCHA hoặc traffic challenge.
+---
 
-## Tính năng
+OmniCrawl is an actor-based e-commerce web scraping platform designed to run locally, giving users full control over their browser sessions. The repository features two independent runtimes:
 
-- Quản lý tài khoản với vai trò `USER`, `ADMIN` và `SUPER_ADMIN`.
-- Tạo, dừng, xóa, theo dõi tiến độ và xem log từng run.
-- Xem dataset theo trang, lọc và xuất kết quả.
-- Browser Agent giữ cookie trong Chrome/Edge; cookie không được gửi về API.
-- Quản lý proxy tùy chọn, mã hóa credential và kiểm tra trước khi giao job.
-- Dashboard và desktop hỗ trợ tiếng Việt/tiếng Anh.
-- Desktop lưu dữ liệu trong SQLite và xuất CSV/JSONL.
+- **Web + Browser Agent:** A React dashboard to create and monitor runs, a REST API persisting data into PostgreSQL, and a Chrome/Edge Extension executing actors within your logged-in browser session.
+- **Desktop:** An experimental standalone Electron application running independently without the API or PostgreSQL, utilizing an embedded browser and local SQLite storage. (Currently supports Shopee Search).
 
-## Actor hiện có
+> [!NOTE]
+> Successful compilation confirms the code builds. Real-world scraping depends on active sessions, platform interfaces/APIs, Incognito permissions, proxies (if enabled), and CAPTCHA/traffic challenges.
 
-| Actor | Runtime | Đầu vào chính | Kết quả |
+---
+
+## Features
+
+- **Role-Based Access Control:** Manage accounts with `USER`, `ADMIN`, and `SUPER_ADMIN` roles.
+- **Run Management:** Create, pause, stop, delete, track real-time progress, and inspect execution logs.
+- **Dataset Exploration:** Paginated dataset view, filtering, and data export.
+- **Privacy & Security:** The Browser Agent keeps session cookies local in Chrome/Edge; cookies are never sent to the backend API.
+- **Proxy Support:** Optional proxy pool management with credential encryption and pre-flight connectivity checks.
+- **Bilingual Interface:** Both Dashboard and Desktop runtimes support Vietnamese and English.
+- **Offline Desktop Mode:** Desktop app saves collected data into SQLite and exports directly to CSV/JSONL.
+
+---
+
+## Available Actors
+
+| Actor | Runtime | Primary Inputs | Output Data |
 | --- | --- | --- | --- |
-| `shopee-scraper` | Browser Agent và Desktop | Từ khóa, bộ lọc, giới hạn item | Danh sách sản phẩm; Browser Agent có thể lấy chi tiết |
-| `shopee-shop-scraper` | Browser Agent | URL shop Shopee | Sản phẩm hiển thị qua phân trang của shop |
-| `tiktok-scraper` | Browser Agent | Từ khóa, chế độ video hoặc TikTok Shop | Video hoặc sản phẩm TikTok Shop |
+| `shopee-scraper` | Browser Agent & Desktop | Keyword, filters, item limit | Product listings; Browser Agent can scrape deep details |
+| `shopee-shop-scraper` | Browser Agent | Shopee shop URL | Shop products retrieved via shop pagination |
+| `tiktok-scraper` | Browser Agent | Keyword, video mode or TikTok Shop | Videos or TikTok Shop products |
 
-Shopee Search và Shopee Shop là hai actor riêng, có input schema và vòng đời
-riêng. Desktop hiện chỉ đăng ký `shopee-scraper`; không nên xem desktop là bản
-thay thế hoàn chỉnh cho Browser Agent.
+> Shopee Search and Shopee Shop are distinct actors with separate input schemas and lifecycles. Desktop currently registers `shopee-scraper` only; it is not a complete drop-in replacement for the Browser Agent.
 
-## Kiến trúc
+---
 
-Luồng Web + Browser Agent:
+## Architecture
+
+### Web + Browser Agent Flow
 
 ```text
 Dashboard -> REST API -> PostgreSQL
@@ -46,76 +60,80 @@ Dashboard -> REST API -> PostgreSQL
     +------ Chrome/Edge Browser Agent
 ```
 
-1. Dashboard gửi input của actor đến API.
-2. API kiểm tra schema, ghi input bền vững rồi đưa run vào hàng đợi
-   `BROWSER_PENDING`.
-3. Extension nhận job và chạy actor trong tab của profile đã đăng nhập.
-4. Extension gửi item, log và trạng thái về API; Dashboard hiển thị kết quả.
-5. Nếu gặp CAPTCHA hoặc traffic challenge, run dừng để người dùng xử lý.
+1. The Dashboard submits actor inputs to the REST API.
+2. The API validates schema, persists inputs, and enqueues the run with `BROWSER_PENDING` status.
+3. The Chrome/Edge Extension polls for jobs and runs the actor within your active logged-in browser tab.
+4. The extension streams collected items, logs, and status back to the API; Dashboard visualizes live results.
+5. If CAPTCHA or traffic challenges arise, the run pauses for human intervention.
 
-Luồng Desktop:
+### Desktop Flow
 
 ```text
-React renderer -> IPC đã kiểm tra -> Electron main
-                                   ├── Browser manager + profile riêng
-                                   ├── Actor runtime
-                                   └── SQLite + CSV/JSONL export
+React renderer -> Validated IPC -> Electron main process
+                                     ├── Dedicated browser manager & profile
+                                     ├── Actor runtime
+                                     └── SQLite + CSV/JSONL export
 ```
 
-Xem thêm [docs/architecture.md](docs/architecture.md).
+See [docs/architecture.md](docs/architecture.md) for deeper architectural details.
 
-## Cấu trúc repository
+---
+
+## Repository Structure
 
 ```text
 apps/
-├── api/                 REST API, auth, run, dataset và proxy
-├── browser-extension/   Chrome/Edge Browser Agent và actor runtime
-├── dashboard/           React 19 + Vite dashboard
-└── desktop/             Electron app, browser nhúng và SQLite local
+├── api/                 REST API, authentication, run queues, dataset & proxy management
+├── browser-extension/   Chrome/Edge Browser Agent and actor runtimes
+├── dashboard/           React 19 + Vite dashboard UI
+└── desktop/             Electron desktop application with embedded browser & local SQLite
 packages/
-├── database/            Prisma schema, PostgreSQL client và seed
-└── sdk/                 Hợp đồng dữ liệu và storage dùng chung
+├── database/            Prisma schema, PostgreSQL client, migrations and seeds
+└── sdk/                 Shared data contracts, types, and storage utilities
 docs/
-└── architecture.md      Kiến trúc Web + Browser Agent
+└── architecture.md      Web + Browser Agent architecture documentation
 ```
 
-`node_modules/`, `dist/`, `coverage/`, cache TypeScript và `storage/` là dữ liệu
-sinh ra, không thuộc source và đã được Git bỏ qua.
+`node_modules/`, `dist/`, `coverage/`, TypeScript build caches, and `storage/` are generated artifacts and are git-ignored.
 
-## Yêu cầu
+---
 
-- Node.js 20+
-- pnpm 9+
-- Docker (khuyến nghị cho PostgreSQL local)
-- Chrome hoặc Edge nếu dùng Browser Agent
-- PostgreSQL 15 với extension `vector` và `pg_trgm` nếu không dùng container mẫu
+## Prerequisites
 
-## Cài đặt Web + Browser Agent
+- **Node.js 20+**
+- **pnpm 9+**
+- **Docker** (Recommended for local PostgreSQL)
+- **Google Chrome** or **Microsoft Edge** (Required for Browser Agent)
+- **PostgreSQL 15** with `vector` and `pg_trgm` extensions (if not using provided Docker Compose)
 
-### 1. Tạo cấu hình local
+---
+
+## Getting Started (Web + Browser Agent)
+
+### 1. Configure Environment
 
 ```bash
 cp .env.example .env
 ```
 
-Đổi `POSTGRES_PASSWORD` và mật khẩu trong `DATABASE_URL` về cùng một giá trị.
+Ensure `POSTGRES_PASSWORD` and the password inside `DATABASE_URL` match.
 
-| Biến | Bắt buộc | Mô tả |
+| Variable | Required | Description |
 | --- | --- | --- |
-| `DATABASE_URL` | Có | Chuỗi kết nối PostgreSQL cho Prisma/API |
-| `POSTGRES_USER` | Khi dùng Compose | Tài khoản PostgreSQL |
-| `POSTGRES_PASSWORD` | Khi dùng Compose | Mật khẩu PostgreSQL |
-| `POSTGRES_DB` | Khi dùng Compose | Tên database |
-| `HOST` | Không | Host API, mặc định `127.0.0.1` |
-| `PORT` | Không | Cổng API, mặc định `3001` |
-| `JWT_SECRET` | Không | Nếu trống, API tạo secret local trong `storage/` |
-| `ADMIN_EMAIL` | Không | Email admin được tạo khi seed |
-| `ADMIN_PASSWORD` | Khi chạy seed | Mật khẩu admin tối thiểu 12 ký tự; seed sẽ dừng nếu thiếu hoặc quá ngắn |
+| `DATABASE_URL` | Yes | PostgreSQL connection string for Prisma/API |
+| `POSTGRES_USER` | With Docker | PostgreSQL username |
+| `POSTGRES_PASSWORD` | With Docker | PostgreSQL password |
+| `POSTGRES_DB` | With Docker | Database name |
+| `HOST` | No | API binding host, defaults to `127.0.0.1` |
+| `PORT` | No | API port, defaults to `3001` |
+| `JWT_SECRET` | No | Auto-generated in local `storage/` if left blank |
+| `ADMIN_EMAIL` | No | Initial admin email created during seed |
+| `ADMIN_PASSWORD` | For seeding | Admin password (min. 12 characters) |
 
-Không commit `.env`. Khóa runtime và log trong `storage/` cũng chỉ dành cho máy
-local.
+> [!WARNING]
+> Never commit `.env` or local keys/logs located in `storage/`.
 
-### 2. Khởi động database và cài dependency
+### 2. Start Database & Install Dependencies
 
 ```bash
 docker compose -f docker-compose.example.yml up -d db
@@ -124,38 +142,32 @@ pnpm db:push
 ADMIN_EMAIL=admin@example.com ADMIN_PASSWORD='replace-with-a-strong-password' pnpm db:seed
 ```
 
-`db:push` đồng bộ Prisma schema. `db:seed` tạo/cập nhật actor mặc định và tài
-khoản quản trị ban đầu.
+`db:push` synchronizes Prisma schema. `db:seed` registers default actors and creates the initial admin user.
 
-### 3. Chạy API và Dashboard
+### 3. Run API and Dashboard
 
 ```bash
 pnpm dev
 ```
 
-- Dashboard: <http://localhost:5173>
-- API: <http://localhost:3001>
+- **Dashboard:** <http://localhost:5173>
+- **API:** <http://localhost:3001>
 
-Dashboard hiện gọi API local ở cổng `3001`. Nếu đổi `PORT`, cần cập nhật URL API
-trong dashboard và Browser Agent.
+### 4. Install Browser Agent (Extension)
 
-### 4. Cài Browser Agent
+1. Open `chrome://extensions` or `edge://extensions`.
+2. Enable **Developer mode** in the top right corner.
+3. Click **Load unpacked** and select the `apps/browser-extension` folder.
+4. In extension details, enable **Allow in Incognito** (required for detailed Shopee scraping).
+5. Open your target platforms (Shopee / TikTok) to log in, then open Dashboard.
 
-1. Mở `chrome://extensions` hoặc `edge://extensions`.
-2. Bật **Developer mode**.
-3. Chọn **Load unpacked** và trỏ đến `apps/browser-extension`.
-4. Trong chi tiết extension, bật **Allow in Incognito** nếu dùng luồng chi tiết
-   sản phẩm Shopee.
-5. Dùng browser profile riêng cho OmniCrawl, đăng nhập Shopee/TikTok rồi mở
-   Dashboard.
+> See [Browser Agent Guide](apps/browser-extension/README.md) for proxy rules and details.
 
-Proxy Chrome áp dụng cho toàn bộ profile khi run hoạt động. Nếu đã cấu hình
-proxy, Browser Agent chỉ chạy khi proxy đạt kiểm tra sẵn sàng và không âm thầm
-fallback về IP máy. Xem [hướng dẫn Browser Agent](apps/browser-extension/README.md).
+---
 
-## Chạy Desktop
+## Desktop Application
 
-Desktop không cần PostgreSQL, API hay Browser Agent:
+The standalone Desktop application requires no PostgreSQL or backend API:
 
 ```bash
 pnpm install
@@ -164,31 +176,31 @@ pnpm desktop:build
 pnpm desktop:start
 ```
 
-Chế độ phát triển:
+For development mode:
 
 ```bash
 pnpm desktop:dev
 ```
 
-Dữ liệu nằm trong `userData/runtime` của **OmniCrawl Desktop** trên hệ điều hành.
-Profile trình duyệt desktop tách biệt với Chrome thông thường. Xem
-[hướng dẫn Desktop](apps/desktop/README.md).
+Data is stored locally in the OS `userData/runtime` path. See [Desktop Guide](apps/desktop/README.md).
 
-## Lệnh phát triển
+---
 
-| Lệnh | Công dụng |
+## Development Scripts
+
+| Command | Description |
 | --- | --- |
-| `pnpm dev` | Build package dùng chung rồi chạy API và Dashboard |
-| `pnpm build` | Build database, SDK, API và Dashboard |
-| `pnpm lint` | Chạy Oxlint cho Dashboard |
-| `pnpm db:push` | Đồng bộ Prisma schema với PostgreSQL |
-| `pnpm db:seed` | Seed tài khoản quản trị và actor mặc định |
-| `pnpm desktop:dev` | Chạy Electron + Vite ở chế độ phát triển |
-| `pnpm desktop:build` | Build Electron main process và renderer |
-| `pnpm desktop:start` | Chạy desktop từ output đã build |
-| `pnpm check` | Chạy lint, build, desktop typecheck và test bảo mật proxy |
+| `pnpm dev` | Build shared packages and launch API + Dashboard |
+| `pnpm build` | Compile database, SDK, API, and Dashboard |
+| `pnpm lint` | Run Oxlint on Dashboard codebase |
+| `pnpm db:push` | Sync Prisma schema directly with PostgreSQL |
+| `pnpm db:seed` | Seed default actors and initial admin account |
+| `pnpm desktop:dev` | Launch Electron + Vite in live dev mode |
+| `pnpm desktop:build` | Build Electron main process and renderer |
+| `pnpm desktop:start` | Run Desktop app from compiled output |
+| `pnpm check` | Run linter, build verification, desktop typecheck, and proxy security tests |
 
-Kiểm tra trước khi commit:
+Run verification before committing:
 
 ```bash
 pnpm lint
@@ -198,38 +210,33 @@ pnpm desktop:build
 pnpm --filter @omnicrawl/api test:proxy-security
 ```
 
-Sau khi sửa Browser Agent, bấm **Reload** ở trang extension rồi reload Dashboard;
-extension không có bước compile.
+---
 
-## Dữ liệu, bảo mật và giới hạn
+## Troubleshooting
 
-- Không commit `.env`, database local, log, cookie, browser profile hoặc proxy
-  credential.
-- Proxy credential lưu trong database ở dạng mã hóa bằng khóa runtime local.
-- Remote page trong desktop chạy với `nodeIntegration: false`, context isolation
-  và sandbox; renderer chỉ gọi main process qua IPC đã giới hạn.
-- Dùng tốc độ thu thập hợp lý, tuân thủ điều khoản nền tảng và dừng để xử lý khi
-  gặp CAPTCHA/traffic control.
-- Selector và endpoint Shopee/TikTok có thể thay đổi. Luôn xác nhận bằng một run
-  được phép trước khi coi actor là hoạt động đầy đủ.
+- **Dashboard cannot connect to API:** Ensure API is running at `127.0.0.1:3001` and port is not blocked.
+- **No actors listed in Dashboard:** Run `pnpm db:seed` and re-login to Dashboard.
+- **Browser Agent shows Offline:** Reload extension in `chrome://extensions`, refresh Dashboard, and verify permission to access `localhost:3001`.
+- **Cannot scrape Shopee item details:** Ensure **Allow in Incognito** is enabled for the extension.
+- **Desktop `better-sqlite3` ABI mismatch:** Run `pnpm --filter @omnicrawl/desktop rebuild:native`.
+- **Proxy enabled but run blocked:** Check proxy connectivity in Proxy Manager; OmniCrawl intentionally does not fallback to direct IP to preserve privacy.
 
-## Khắc phục nhanh
+---
 
-- **Dashboard không gọi được API:** kiểm tra API ở `127.0.0.1:3001` và cổng không
-  bị ứng dụng khác chiếm.
-- **Không thấy actor:** chạy `pnpm db:seed`, sau đó đăng nhập lại Dashboard.
-- **Browser Agent offline:** reload extension, reload Dashboard và kiểm tra quyền
-  truy cập `localhost:3001`.
-- **Không chạy được chi tiết Shopee:** bật quyền Incognito cho extension.
-- **Desktop lỗi `better-sqlite3` ABI:** chạy
-  `pnpm --filter @omnicrawl/desktop rebuild:native`.
-- **Proxy đã bật nhưng run bị chặn:** kiểm tra lại proxy trong Proxy Manager; hệ
-  thống cố ý không fallback về kết nối trực tiếp.
+## ☕ Support the Project
 
-## Giấy phép
+OmniCrawl is an open-source project developed and maintained in free time. If you find OmniCrawl useful for your work or research, consider buying me a coffee to support continued development:
 
-Phát hành theo giấy phép MIT. Xem [LICENSE](LICENSE).
+<p align="center">
+  <a href="https://ko-fi.com/levanduy093_work" target="_blank">
+    <img src="https://storage.ko-fi.com/cdn/kofi3.png?v=3" height="48" alt="Buy Me a Coffee at ko-fi.com" />
+  </a>
+</p>
 
-Để đóng góp, xem [CONTRIBUTING.md](CONTRIBUTING.md). Vấn đề bảo mật cần được báo
-theo [SECURITY.md](SECURITY.md), không đăng credential hoặc dữ liệu nhạy cảm vào
-issue công khai.
+---
+
+## License
+
+Released under the [MIT License](LICENSE).
+
+For contributions, please refer to [CONTRIBUTING.md](CONTRIBUTING.md). For security vulnerabilities, report according to [SECURITY.md](SECURITY.md).

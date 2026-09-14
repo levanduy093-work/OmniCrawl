@@ -33,6 +33,7 @@ export const en = {
     runs: 'Job Runs',
     proxies: 'Proxies',
     settings: 'Settings',
+    support: 'Support on Ko-fi',
     logout: 'Logout',
     collapse: 'Collapse sidebar',
     expand: 'Expand sidebar'
