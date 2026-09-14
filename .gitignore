@@ -1,5 +1,11 @@
 node_modules/
 dist/
+build/
+coverage/
+.cache/
+.vite/
+/data/
+/scratch/
 *.tsbuildinfo
 .DS_Store
 .env
@@ -8,5 +14,15 @@ dist/
 docker-compose.yml
 dev.db
 dev.db-journal
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.har
 *.log
+*.tmp
+*.temp
+*.bak
+*.swp
 storage/

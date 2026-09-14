@@ -1,6 +1,8 @@
 {
   "name": "@omnicrawl/api",
   "version": "0.0.1",
+  "private": true,
+  "license": "MIT",
   "scripts": {
     "build": "tsc",
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",

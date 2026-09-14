@@ -1,12 +1,14 @@
 {
   "name": "@omnicrawl/database",
   "version": "0.0.1",
+  "private": true,
+  "license": "MIT",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "db:push": "prisma db push",
-    "db:generate": "prisma generate",
+    "db:push": "node scripts/run-prisma.cjs db push",
+    "db:generate": "node scripts/run-prisma.cjs generate",
     "db:seed": "ts-node prisma/seed.ts"
   },
   "dependencies": {

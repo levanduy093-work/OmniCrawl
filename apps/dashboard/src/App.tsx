@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, Fragment } from 'react'
+import { useState, useEffect, useCallback, useMemo, Fragment } from 'react'
 import {
   Play,
   Activity,
@@ -24,6 +24,8 @@ import {
 } from 'lucide-react'
 import Login from './Login'
 import OmniCrawlLogo from './Logo'
+import LanguageSwitcher from './components/LanguageSwitcher'
+import { useI18n } from './i18n'
 import './App.css'
 
 const REQUIRED_BROWSER_AGENT_VERSION = '0.14.3'
@@ -49,11 +51,12 @@ function isVersionAtLeast(current: string | null, required: string) {
   return true
 }
 
-function displaySoldValue(value: unknown) {
+function displaySoldValue(value: unknown, locale: string) {
   if (value === null || value === undefined || value === '') return '—'
+  const intlLocale = locale === 'vi' ? 'vi-VN' : 'en-US'
   if (typeof value === 'number') {
     if (value === 0) return '0'
-    return value.toLocaleString('vi-VN')
+    return value.toLocaleString(intlLocale)
   }
   const candidate = typeof value === 'object' && !Array.isArray(value)
     ? (
@@ -66,7 +69,7 @@ function displaySoldValue(value: unknown) {
   const text = String(candidate ?? '').trim()
   if (!text) return '—'
   if (/^\d+$/.test(text)) {
-    return Number(text).toLocaleString('vi-VN')
+    return Number(text).toLocaleString(intlLocale)
   }
   const match = text.match(
     /(\d+(?:[.,]\d+)?\s*(?:k|nghìn|tr|triệu)?\+?)(?:\s*(?:đã bán|sold))?/i
@@ -124,21 +127,12 @@ function isAdminRole(role?: string) {
   return role === 'ADMIN' || role === 'SUPER_ADMIN'
 }
 
-function humanizeFieldName(field: string) {
-  const knownLabels: Record<string, string> = {
-    id: 'Mã',
-    itemId: 'Mã sản phẩm',
-    shopId: 'Mã cửa hàng',
-    title: 'Tên sản phẩm',
-    name: 'Tên',
-    price: 'Giá bán',
-    sold: 'Đã bán',
-    url: 'Liên kết',
-    image: 'Hình ảnh',
-    createdAt: 'Ngày tạo',
-    updatedAt: 'Ngày cập nhật'
+function humanizeFieldName(field: string, t?: (key: string) => string) {
+  if (t) {
+    const key = `runDetail.fields.${field}`
+    const translation = t(key)
+    if (translation !== key) return translation
   }
-  if (knownLabels[field]) return knownLabels[field]
   const words = field
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
     .replace(/[_-]+/g, ' ')
@@ -147,6 +141,7 @@ function humanizeFieldName(field: string) {
 }
 
 function App() {
+  const { t, formatDate } = useI18n()
   const [token, setToken] = useState<string | null>(localStorage.getItem('token'))
   const [user, setUser] = useState<any>(null)
   
@@ -275,7 +270,7 @@ function App() {
   }, [activeTab, fetchProxyData])
 
   const deleteProxyGroup = useCallback(async (groupId: string) => {
-    if (!confirm('Xóa nhóm proxy này và tất cả proxy bên trong?')) return
+    if (!confirm(t('proxies.groups.confirmDelete'))) return
     try {
       await fetch(`http://localhost:3001/api/proxies/groups/${groupId}`, {
         method: 'DELETE',
@@ -283,7 +278,7 @@ function App() {
       })
       fetchProxyData()
     } catch {}
-  }, [token, fetchProxyData])
+  }, [token, fetchProxyData, t])
 
   const toggleProxyGroup = useCallback(async (groupId: string, enabled: boolean) => {
     try {
@@ -355,15 +350,15 @@ function App() {
         await fetchProxyData()
       } else {
         const body = await res.json().catch(() => ({}))
-        setProxyImportResult({ error: body.error || 'Không thể thêm proxy.' })
+        setProxyImportResult({ error: body.error || t('proxies.results.addError') })
       }
     } catch {
-      setProxyImportResult({ error: 'Không kết nối được API proxy.' })
+      setProxyImportResult({ error: t('proxies.results.apiError') })
     } finally {
       setProxyLoading(false)
       setProxyChecking(false)
     }
-  }, [proxyImportText, proxyImportCountry, proxyImportIsRotating, token, fetchProxyData])
+  }, [proxyImportText, proxyImportCountry, proxyImportIsRotating, token, fetchProxyData, t])
 
   const runProxyHealthCheck = useCallback(async () => {
     setProxyChecking(true)
@@ -445,15 +440,15 @@ function App() {
       const data = await res.json()
       if (!res.ok && data.code === 'PROXY_UNAVAILABLE') {
         setNetworkReadiness(data.proxyReadiness || null)
-        setRunError(data.error || 'Proxy đã cấu hình nhưng hiện không hoạt động.')
+        setRunError(data.error || t('actors.proxyUnavailable'))
         return
       }
       if (!res.ok) throw new Error(data.error)
-      alert(data.message)
+      alert(data.message || t('actors.triggerSuccess'))
       fetchData()
       fetchUser()
     } catch(err: any) {
-      alert(`Failed to trigger run: ${err.message}`)
+      alert(t('actors.triggerFailed', { error: err.message }))
     }
   }
 
@@ -474,12 +469,12 @@ function App() {
       }, window.location.origin);
       fetchData();
     } catch (err: any) {
-      alert(`Error: ${err.message}`);
+      alert(t('runs.stopError', { error: err.message }));
     }
   }
 
   const handleDeleteRun = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this run?')) return;
+    if (!confirm(t('runs.confirmDelete'))) return;
     try {
       await fetch(`http://localhost:3001/api/runs/${id}`, {
         method: 'DELETE',
@@ -487,7 +482,7 @@ function App() {
       });
       fetchData();
     } catch (err: any) {
-      alert(`Error: ${err.message}`);
+      alert(t('runs.deleteError', { error: err.message }));
     }
   }
 
@@ -497,11 +492,11 @@ function App() {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       const data = await res.json();
-      setLogs(data.logs || 'No logs available.');
+      setLogs(data.logs || t('logModal.noLogs'));
     } catch {
-      setLogs('Error fetching logs.');
+      setLogs(t('logModal.errorLogs'));
     }
-  }, [token])
+  }, [token, t])
 
   const openLogViewer = (id: string) => {
     setActiveLogRunId(id);
@@ -517,15 +512,15 @@ function App() {
         headers: { 'Authorization': `Bearer ${token}` }
       })
       const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Run data is not available')
+      if (!res.ok) throw new Error(data.error || t('runDetail.unableToLoad'))
       setRunDetail(data)
       setRunDetailPage(page)
     } catch (err: any) {
-      alert(`Không thể đọc dữ liệu: ${err.message}`)
+      alert(t('runDetail.loadError', { error: err.message }))
     } finally {
       setRunDetailLoading(false)
     }
-  }, [token])
+  }, [token, t])
 
   const openRunDetail = (id: string) => {
     setRunDetailOpen(true)
@@ -554,7 +549,7 @@ function App() {
       link.click()
       URL.revokeObjectURL(url)
     } catch (err: any) {
-      alert(`Không thể tải output: ${err.message}`)
+      alert(`Output download error: ${err.message}`)
     }
   }
 
@@ -585,6 +580,14 @@ function App() {
     setUser(newUser)
   }
 
+  const tabTitle = useMemo(() => {
+    if (activeTab === 'actors') return t('sidebar.crawlers')
+    if (activeTab === 'runs') return t('sidebar.runs')
+    if (activeTab === 'proxies') return t('sidebar.proxies')
+    if (activeTab === 'settings') return t('sidebar.settings')
+    return activeTab
+  }, [activeTab, t])
+
   if (!token) {
     return <Login onLogin={handleLogin} />
   }
@@ -601,8 +604,8 @@ function App() {
               <OmniCrawlLogo size="sm" />
               <button 
                 onClick={() => setIsSidebarOpen(false)}
-                className="p-1.5 hover:bg-gray-200/80 rounded-lg text-gray-500 hover:text-gray-800 transition-colors shrink-0"
-                title="Thu gọn thanh bên"
+                className="p-1.5 hover:bg-gray-200/80 rounded-lg text-gray-500 hover:text-gray-800 transition-colors shrink-0 cursor-pointer"
+                title={t('sidebar.collapse')}
               >
                 <ChevronLeft size={18} strokeWidth={2} />
               </button>
@@ -612,8 +615,8 @@ function App() {
               <OmniCrawlLogo size="sm" showText={false} />
               <button 
                 onClick={() => setIsSidebarOpen(true)}
-                className="p-1.5 hover:bg-gray-200/80 rounded-lg text-gray-500 hover:text-gray-800 transition-colors"
-                title="Mở rộng thanh bên"
+                className="p-1.5 hover:bg-gray-200/80 rounded-lg text-gray-500 hover:text-gray-800 transition-colors cursor-pointer"
+                title={t('sidebar.expand')}
               >
                 <ChevronRight size={18} strokeWidth={2} />
               </button>
@@ -624,14 +627,14 @@ function App() {
         <nav className="flex-1 space-y-1">
           <NavItem 
             icon={<Bot />} 
-            label="Crawlers" 
+            label={t('sidebar.crawlers')}
             active={activeTab === 'actors'} 
             onClick={() => setActiveTab('actors')} 
             collapsed={!isSidebarOpen}
           />
           <NavItem 
             icon={<Activity />} 
-            label="Job Runs" 
+            label={t('sidebar.runs')}
             active={activeTab === 'runs'} 
             onClick={() => setActiveTab('runs')} 
             collapsed={!isSidebarOpen}
@@ -639,7 +642,7 @@ function App() {
           {isAdminRole(user?.role) && (
             <NavItem 
               icon={<Shield />} 
-              label="Proxies" 
+              label={t('sidebar.proxies')}
               active={activeTab === 'proxies'} 
               onClick={() => setActiveTab('proxies')} 
               collapsed={!isSidebarOpen}
@@ -648,33 +651,34 @@ function App() {
         </nav>
         
         <div className="mt-auto pb-4 space-y-1">
-          <NavItem icon={<Settings />} label="Settings" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} collapsed={!isSidebarOpen} />
-          <NavItem icon={<LogOut />} label="Logout" active={false} onClick={handleLogout} collapsed={!isSidebarOpen} />
+          <NavItem icon={<Settings />} label={t('sidebar.settings')} active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} collapsed={!isSidebarOpen} />
+          <NavItem icon={<LogOut />} label={t('sidebar.logout')} active={false} onClick={handleLogout} collapsed={!isSidebarOpen} />
         </div>
       </aside>
 
       {/* Main Content Area */}
       <main className="flex-1 p-6 overflow-y-auto min-w-0">
         <header className="flex justify-between items-center mb-8">
-          <h1 className="text-2xl font-semibold text-gray-900 capitalize">{activeTab}</h1>
-          <div className="flex items-center space-x-4">
+          <h1 className="text-2xl font-semibold text-gray-900">{tabTitle}</h1>
+          <div className="flex items-center space-x-3">
+            <LanguageSwitcher variant="toggle" />
             {isAdminRole(user?.role) && (
               <button
                 type="button"
                 onClick={() => setActiveTab('proxies')}
-                title="Quản lý proxy"
-                className="relative z-10 cursor-pointer flex items-center space-x-2 px-3 py-1.5 rounded-md border text-sm font-medium transition-colors bg-white border-gray-200 text-gray-600 hover:bg-gray-50"
+                title={t('header.proxyManager')}
+                className="relative z-10 cursor-pointer flex items-center space-x-2 px-3 py-1.5 rounded-xl border text-xs font-semibold transition-colors bg-white border-gray-200 text-gray-700 hover:bg-gray-50 shadow-2xs"
               >
-                <Globe size={16} />
-                <span>Proxy Manager</span>
+                <Globe size={15} />
+                <span>{t('header.proxyManager')}</span>
               </button>
             )}
             <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={17} />
               <input
                 type="text"
-                placeholder="Search anything..."
-                className="pl-10 pr-4 py-2 text-sm bg-white rounded-full w-72 shadow-sm border border-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-100 transition-shadow"
+                placeholder={t('header.searchPlaceholder')}
+                className="pl-9 pr-4 py-1.5 text-xs bg-white rounded-xl w-64 shadow-2xs border border-gray-200/90 focus:outline-none focus:ring-2 focus:ring-blue-100 transition-shadow"
               />
             </div>
           </div>
@@ -685,9 +689,9 @@ function App() {
             <div className="flex items-start gap-3">
               <AlertTriangle size={18} className="mt-0.5 shrink-0 text-red-600" />
               <div>
-                <p className="text-sm font-semibold">Proxy không hoạt động</p>
+                <p className="text-sm font-semibold">{t('alerts.proxyInactiveTitle')}</p>
                 <p className="mt-0.5 text-xs leading-5 text-red-700">
-                  {runError || networkReadiness?.message || 'Không có proxy khả dụng để chạy crawler.'}
+                  {runError || networkReadiness?.message || t('alerts.proxyInactiveDefault')}
                 </p>
               </div>
             </div>
@@ -695,9 +699,9 @@ function App() {
               <button
                 type="button"
                 onClick={() => setActiveTab('proxies')}
-                className="shrink-0 self-start rounded-lg bg-red-700 px-3 py-2 text-xs font-semibold text-white transition hover:bg-red-800 active:translate-y-px sm:self-auto"
+                className="shrink-0 self-start rounded-lg bg-red-700 px-3 py-2 text-xs font-semibold text-white transition hover:bg-red-800 active:translate-y-px sm:self-auto cursor-pointer"
               >
-                Quản lý proxy
+                {t('alerts.proxyManageBtn')}
               </button>
             )}
           </section>
@@ -718,7 +722,7 @@ function App() {
                         {actor.name === 'tiktok-scraper' && (
                           <span className="px-2 py-0.5 text-[10px] font-semibold bg-amber-100/90 text-amber-800 border border-amber-300/80 rounded-full flex items-center gap-1.5 shadow-2xs">
                             <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>
-                            Chưa hoạt động tốt
+                            {t('alerts.tiktokBetaBadge')}
                           </span>
                         )}
                       </div>
@@ -727,7 +731,7 @@ function App() {
                   </div>
                   
                   <p className="text-xs text-gray-500 mb-3 min-h-[32px] line-clamp-2 leading-relaxed">
-                    {actor.description || 'No description provided.'}
+                    {actor.description || t('actors.noDescription')}
                   </p>
                   
                   {BROWSER_ACTOR_NAMES.includes(actor.name) && (
@@ -744,10 +748,10 @@ function App() {
                           </span>
                           <span className="text-[11px] leading-none flex items-center">
                             {browserAgentConnected
-                              ? `Agent v${browserAgentVersion}`
+                              ? t('alerts.agentConnected', { version: browserAgentVersion || '' })
                               : browserAgentDetected
-                                ? 'Cần Reload Extension'
-                                : 'Chưa kết nối Extension'}
+                                ? t('alerts.agentReloadNeeded')
+                                : t('alerts.agentNotConnected')}
                           </span>
                         </div>
                       </div>
@@ -764,11 +768,11 @@ function App() {
                               }`} />
                             </span>
                             <span className="text-[11px] leading-none flex items-center">
-                              {authStatus.shopeeLoggedIn ? 'Shopee: Đã đăng nhập' : 'Shopee: Chưa đăng nhập'}
+                              {authStatus.shopeeLoggedIn ? t('alerts.shopeeLoggedIn') : t('alerts.shopeeNotLoggedIn')}
                             </span>
                           </div>
                           {!authStatus.shopeeLoggedIn && (
-                            <a href="https://shopee.vn" target="_blank" rel="noreferrer" className="text-[10px] text-blue-600 font-semibold hover:underline bg-blue-50 px-2 py-1 rounded">Mở Đăng Nhập</a>
+                            <a href="https://shopee.vn" target="_blank" rel="noreferrer" className="text-[10px] text-blue-600 font-semibold hover:underline bg-blue-50 px-2 py-1 rounded cursor-pointer">{t('alerts.openLogin')}</a>
                           )}
                         </div>
                       )}
@@ -785,11 +789,11 @@ function App() {
                               }`} />
                             </span>
                             <span className="text-[11px] leading-none flex items-center">
-                              {authStatus.tiktokLoggedIn ? 'TikTok: Đã đăng nhập' : 'TikTok: Chưa đăng nhập'}
+                              {authStatus.tiktokLoggedIn ? t('alerts.tiktokLoggedIn') : t('alerts.tiktokNotLoggedIn')}
                             </span>
                           </div>
                           {!authStatus.tiktokLoggedIn && (
-                            <a href="https://www.tiktok.com/login" target="_blank" rel="noreferrer" className="text-[10px] text-blue-600 font-semibold hover:underline bg-blue-50 px-2 py-1 rounded">Mở Đăng Nhập</a>
+                            <a href="https://www.tiktok.com/login" target="_blank" rel="noreferrer" className="text-[10px] text-blue-600 font-semibold hover:underline bg-blue-50 px-2 py-1 rounded cursor-pointer">{t('alerts.openLogin')}</a>
                           )}
                         </div>
                       )}
@@ -799,10 +803,10 @@ function App() {
                           <AlertTriangle size={15} className="shrink-0 mt-0.5 text-amber-600" />
                           <div className="text-xs">
                             <div className="font-semibold text-amber-800">
-                              Trạng thái: Chưa hoạt động ổn định (Beta)
+                              {t('alerts.tiktokBetaTitle')}
                             </div>
                             <p className="text-[11px] text-amber-700 mt-0.5 leading-relaxed">
-                              TikTok Scraper hiện có thể gặp gián đoạn hoặc thiếu dữ liệu do cơ chế chống crawl của TikTok. Đang được nâng cấp.
+                              {t('alerts.tiktokBetaDesc')}
                             </p>
                           </div>
                         </div>
@@ -814,6 +818,7 @@ function App() {
                     schema={actor.inputSchema}
                     input={runInputs[actor.id] || {}}
                     actorName={actor.name}
+                    t={t}
                     onChange={(input) => setRunInputs((previous) => ({
                       ...previous,
                       [actor.id]: input
@@ -824,7 +829,7 @@ function App() {
                     <div className="mt-3 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2 text-amber-800 text-xs shadow-sm">
                       <AlertTriangle size={16} className="shrink-0 mt-0.5" />
                       <div>
-                        <strong>Cảnh báo an toàn:</strong> Kéo trên 200 sản phẩm bằng mạng WiFi cá nhân có nguy cơ bị sàn thương mại điện tử chặn IP hoặc yêu cầu xác minh CAPTCHA liên tục. Hãy đảm bảo bạn chia nhỏ số lượng hoặc sử dụng mạng Proxy nếu muốn tiếp tục.
+                        <strong>{t('alerts.safetyWarningTitle')}</strong> {t('alerts.safetyWarningDesc')}
                       </div>
                     </div>
                   )}
@@ -834,9 +839,9 @@ function App() {
                   <button 
                     onClick={() => triggerRun(actor.id)}
                     disabled={BROWSER_ACTOR_NAMES.includes(actor.name) && !browserAgentConnected}
-                    className="w-full flex items-center justify-center gap-2 bg-[#E8F0FE] text-blue-700 font-semibold py-2.5 text-xs rounded-xl hover:bg-blue-100 transition-colors disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed"
+                    className="w-full flex items-center justify-center gap-2 bg-[#E8F0FE] text-blue-700 font-semibold py-2.5 text-xs rounded-xl hover:bg-blue-100 transition-colors disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed cursor-pointer"
                   >
-                    <Play size={14} fill="currentColor" /> Run
+                    <Play size={14} fill="currentColor" /> {t('actors.run')}
                   </button>
                 </div>
               </div>
@@ -850,75 +855,78 @@ function App() {
               <table className="w-full text-left min-w-[950px]">
                 <thead className="bg-[#F1F3F5] text-gray-800 font-semibold text-sm border-b border-gray-200">
                   <tr>
-                    <th className="px-6 py-4 whitespace-nowrap">ID</th>
-                    <th className="px-6 py-4 whitespace-nowrap">Crawler</th>
-                    <th className="px-6 py-4 whitespace-nowrap">Status</th>
-                    <th className="px-6 py-4 whitespace-nowrap">Items</th>
-                    <th className="px-6 py-4 whitespace-nowrap">Created At</th>
-                    <th className="px-6 py-4 whitespace-nowrap">Finished At</th>
-                    <th className="px-6 py-4 whitespace-nowrap">Duration</th>
-                    <th className="px-6 py-4 text-right whitespace-nowrap">Actions</th>
+                    <th className="px-6 py-4 whitespace-nowrap">{t('runs.table.id')}</th>
+                    <th className="px-6 py-4 whitespace-nowrap">{t('runs.table.crawler')}</th>
+                    <th className="px-6 py-4 whitespace-nowrap">{t('runs.table.status')}</th>
+                    <th className="px-6 py-4 whitespace-nowrap">{t('runs.table.items')}</th>
+                    <th className="px-6 py-4 whitespace-nowrap">{t('runs.table.createdAt')}</th>
+                    <th className="px-6 py-4 whitespace-nowrap">{t('runs.table.finishedAt')}</th>
+                    <th className="px-6 py-4 whitespace-nowrap">{t('runs.table.duration')}</th>
+                    <th className="px-6 py-4 text-right whitespace-nowrap">{t('runs.table.actions')}</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
-                  {runs.map((run: any) => (
-                    <tr
-                      key={run.id}
-                      onClick={() => openRunDetail(run.id)}
-                      className="hover:bg-blue-50/25 transition-colors group cursor-pointer"
-                    >
-                      <td className="px-6 py-5 font-mono text-xs text-gray-400 whitespace-nowrap">{run.id}</td>
-                      <td className="px-6 py-5 text-gray-900 font-medium whitespace-nowrap">{run.actor?.name || run.actorId}</td>
-                      <td className="px-6 py-5 whitespace-nowrap">
-                        <span className={`px-3 py-1 text-xs font-semibold rounded-full ${
-                          run.status === 'SUCCESS' ? 'bg-green-100 text-green-700' :
-                          run.status === 'PARTIAL' ? 'bg-amber-100 text-amber-700' :
-                          run.status === 'FAILED' ? 'bg-red-100 text-red-700' :
-                          (run.status === 'RUNNING' || run.status === 'BROWSER_RUNNING' || run.status === 'STOPPING') ? 'bg-blue-100 text-blue-700' :
-                          (run.status === 'PENDING' || run.status === 'BROWSER_PENDING') ? 'bg-amber-100 text-amber-700' :
-                          'bg-gray-100 text-gray-700'
-                        }`}>
-                          {run.status}
-                        </span>
-                      </td>
-                      <td className="px-6 py-5 text-gray-700 whitespace-nowrap">{run.itemCount ?? 0}</td>
-                      <td className="px-6 py-5 text-gray-500 whitespace-nowrap">{new Date(run.createdAt).toLocaleString()}</td>
-                      <td className="px-6 py-5 text-gray-500 whitespace-nowrap">{run.finishedAt ? new Date(run.finishedAt).toLocaleString() : '-'}</td>
-                      <td className="px-6 py-5 text-gray-500 whitespace-nowrap">
-                        {run.finishedAt ? (() => {
-                          const ms = new Date(run.finishedAt).getTime() - new Date(run.createdAt).getTime();
-                          if (ms < 0) return '-';
-                          const totalSeconds = Math.floor(ms / 1000);
-                          const mins = Math.floor(totalSeconds / 60);
-                          const secs = totalSeconds % 60;
-                          return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
-                        })() : '-'}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="flex items-center justify-end gap-2" onClick={(e) => e.stopPropagation()}>
-                          <button onClick={() => openRunDetail(run.id)} className="inline-flex items-center justify-center gap-1.5 h-8 px-3 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 text-xs font-medium transition-colors">
-                            <Eye size={14} /> View
-                          </button>
-                          <button onClick={() => openLogViewer(run.id)} className="inline-flex items-center justify-center gap-1.5 h-8 px-3 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 text-xs font-medium transition-colors">
-                            Logs
-                          </button>
-                          {(
-                            run.status === 'RUNNING' ||
-                            run.status === 'PENDING' ||
-                            run.status === 'BROWSER_RUNNING' ||
-                            run.status === 'BROWSER_PENDING'
-                          ) && (
-                            <button onClick={() => handleStopRun(run.id)} className="inline-flex items-center justify-center gap-1.5 h-8 px-3 bg-amber-50 text-amber-700 rounded-lg hover:bg-amber-100 text-xs font-medium transition-colors">
-                              Stop
+                  {runs.map((run: any) => {
+                    const statusLabelText = t(`runs.status.${run.status}`)
+                    return (
+                      <tr
+                        key={run.id}
+                        onClick={() => openRunDetail(run.id)}
+                        className="hover:bg-blue-50/25 transition-colors group cursor-pointer"
+                      >
+                        <td className="px-6 py-5 font-mono text-xs text-gray-400 whitespace-nowrap">{run.id}</td>
+                        <td className="px-6 py-5 text-gray-900 font-medium whitespace-nowrap">{run.actor?.name || run.actorId}</td>
+                        <td className="px-6 py-5 whitespace-nowrap">
+                          <span className={`px-3 py-1 text-xs font-semibold rounded-full ${
+                            run.status === 'SUCCESS' ? 'bg-green-100 text-green-700' :
+                            run.status === 'PARTIAL' ? 'bg-amber-100 text-amber-700' :
+                            run.status === 'FAILED' ? 'bg-red-100 text-red-700' :
+                            (run.status === 'RUNNING' || run.status === 'BROWSER_RUNNING' || run.status === 'STOPPING') ? 'bg-blue-100 text-blue-700' :
+                            (run.status === 'PENDING' || run.status === 'BROWSER_PENDING') ? 'bg-amber-100 text-amber-700' :
+                            'bg-gray-100 text-gray-700'
+                          }`}>
+                            {statusLabelText !== `runs.status.${run.status}` ? statusLabelText : run.status}
+                          </span>
+                        </td>
+                        <td className="px-6 py-5 text-gray-700 whitespace-nowrap">{run.itemCount ?? 0}</td>
+                        <td className="px-6 py-5 text-gray-500 whitespace-nowrap">{formatDate(run.createdAt)}</td>
+                        <td className="px-6 py-5 text-gray-500 whitespace-nowrap">{run.finishedAt ? formatDate(run.finishedAt) : '-'}</td>
+                        <td className="px-6 py-5 text-gray-500 whitespace-nowrap">
+                          {run.finishedAt ? (() => {
+                            const ms = new Date(run.finishedAt).getTime() - new Date(run.createdAt).getTime();
+                            if (ms < 0) return '-';
+                            const totalSeconds = Math.floor(ms / 1000);
+                            const mins = Math.floor(totalSeconds / 60);
+                            const secs = totalSeconds % 60;
+                            return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+                          })() : '-'}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <div className="flex items-center justify-end gap-2" onClick={(e) => e.stopPropagation()}>
+                            <button onClick={() => openRunDetail(run.id)} className="inline-flex items-center justify-center gap-1.5 h-8 px-3 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 text-xs font-medium transition-colors cursor-pointer">
+                              <Eye size={14} /> {t('runs.actions.view')}
                             </button>
-                          )}
-                          <button onClick={() => handleDeleteRun(run.id)} className="inline-flex items-center justify-center gap-1.5 h-8 px-3 bg-red-50 text-red-700 rounded-lg hover:bg-red-100 text-xs font-medium transition-colors">
-                            Delete
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
+                            <button onClick={() => openLogViewer(run.id)} className="inline-flex items-center justify-center gap-1.5 h-8 px-3 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 text-xs font-medium transition-colors cursor-pointer">
+                              {t('runs.actions.logs')}
+                            </button>
+                            {(
+                              run.status === 'RUNNING' ||
+                              run.status === 'PENDING' ||
+                              run.status === 'BROWSER_RUNNING' ||
+                              run.status === 'BROWSER_PENDING'
+                            ) && (
+                              <button onClick={() => handleStopRun(run.id)} className="inline-flex items-center justify-center gap-1.5 h-8 px-3 bg-amber-50 text-amber-700 rounded-lg hover:bg-amber-100 text-xs font-medium transition-colors cursor-pointer">
+                                {t('runs.actions.stop')}
+                              </button>
+                            )}
+                            <button onClick={() => handleDeleteRun(run.id)} className="inline-flex items-center justify-center gap-1.5 h-8 px-3 bg-red-50 text-red-700 rounded-lg hover:bg-red-100 text-xs font-medium transition-colors cursor-pointer">
+                              {t('runs.actions.delete')}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
             </div>
@@ -945,27 +953,27 @@ function App() {
                         : 'bg-amber-500'
                     }`} />
                     <div>
-                      <p className="text-xs font-medium opacity-60">Proxy pool</p>
+                      <p className="text-xs font-medium opacity-60">{t('proxies.pool.title')}</p>
                       <h3 className="mt-0.5 font-semibold">
                         {proxyStats.total === 0
-                          ? 'Không sử dụng'
+                          ? t('proxies.pool.notInUse')
                           : proxyStats.readiness?.ready
-                            ? 'Sẵn sàng'
-                            : 'Không sẵn sàng'}
+                            ? t('proxies.pool.ready')
+                            : t('proxies.pool.notReady')}
                       </h3>
                     </div>
                   </div>
                   <dl className="grid grid-cols-3 gap-6 md:min-w-[320px]">
                     <div>
-                      <dt className="text-xs opacity-60">Tổng</dt>
+                      <dt className="text-xs opacity-60">{t('proxies.pool.total')}</dt>
                       <dd className="mt-1 text-xl font-semibold tabular-nums">{proxyStats.total}</dd>
                     </div>
                     <div>
-                      <dt className="text-xs opacity-60">Dùng được</dt>
+                      <dt className="text-xs opacity-60">{t('proxies.pool.alive')}</dt>
                       <dd className="mt-1 text-xl font-semibold tabular-nums">{proxyStats.alive}</dd>
                     </div>
                     <div>
-                      <dt className="text-xs opacity-60">Độ trễ</dt>
+                      <dt className="text-xs opacity-60">{t('proxies.pool.latency')}</dt>
                       <dd className="mt-1 text-xl font-semibold tabular-nums">{proxyStats.avgLatencyMs || 0}ms</dd>
                     </div>
                   </dl>
@@ -975,87 +983,91 @@ function App() {
 
             <section className="rounded-2xl bg-white px-6 py-6 shadow-[0_12px_35px_rgba(30,58,95,0.08)]">
               <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-                <h3 className="text-base font-semibold text-gray-950">Thêm proxy</h3>
-                <span className="font-mono text-xs text-gray-400">host:port:user:pass</span>
+                <h3 className="text-base font-semibold text-gray-950">{t('proxies.add.title')}</h3>
+                <span className="font-mono text-xs text-gray-400">{t('proxies.add.formatHint')}</span>
               </div>
-              <label htmlFor="proxy-import" className="sr-only">Danh sách proxy</label>
-                  <textarea
-                    id="proxy-import"
-                    value={proxyImportText}
-                    onChange={(event) => setProxyImportText(event.target.value)}
-                    placeholder={"proxy.example.com:8080:user:password\nhttp://user:password@proxy.example.com:8080"}
-                    rows={5}
-                    className="mt-4 w-full resize-y rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 font-mono text-sm leading-6 text-gray-800 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
-                  />
+              <label htmlFor="proxy-import" className="sr-only">{t('proxies.add.textareaLabel')}</label>
+              <textarea
+                id="proxy-import"
+                value={proxyImportText}
+                onChange={(event) => setProxyImportText(event.target.value)}
+                placeholder={"proxy.example.com:8080:user:password\nhttp://user:password@proxy.example.com:8080"}
+                rows={5}
+                className="mt-4 w-full resize-y rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 font-mono text-sm leading-6 text-gray-800 outline-none transition focus:border-blue-400 focus:bg-white focus:ring-4 focus:ring-blue-100"
+              />
 
-                  <details className="group mt-3 text-sm text-gray-600">
-                    <summary className="w-fit cursor-pointer select-none rounded-md px-1 py-1 font-medium text-gray-500 outline-none transition hover:text-gray-950 focus-visible:ring-2 focus-visible:ring-blue-300">
-                      Tùy chọn nâng cao
-                    </summary>
-                    <div className="mt-3 grid gap-3 rounded-xl bg-slate-50 p-4 sm:grid-cols-2">
-                      <label className="text-xs font-medium text-gray-600">
-                        Quốc gia
-                        <input
-                          type="text"
-                          value={proxyImportCountry}
-                          onChange={(event) => setProxyImportCountry(event.target.value)}
-                          className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
-                        />
-                      </label>
-                      <label className="flex items-center gap-2 self-end rounded-lg px-1 py-2 text-sm">
-                        <input
-                          type="checkbox"
-                          checked={proxyImportIsRotating}
-                          onChange={(event) => setProxyImportIsRotating(event.target.checked)}
-                          className="rounded border-gray-300"
-                        />
-                        Nhà cung cấp tự xoay IP
-                      </label>
-                    </div>
-                  </details>
+              <details className="group mt-3 text-sm text-gray-600">
+                <summary className="w-fit cursor-pointer select-none rounded-md px-1 py-1 font-medium text-gray-500 outline-none transition hover:text-gray-950 focus-visible:ring-2 focus-visible:ring-blue-300">
+                  {t('proxies.add.advancedOptions')}
+                </summary>
+                <div className="mt-3 grid gap-3 rounded-xl bg-slate-50 p-4 sm:grid-cols-2">
+                  <label className="text-xs font-medium text-gray-600">
+                    {t('proxies.add.country')}
+                    <input
+                      type="text"
+                      value={proxyImportCountry}
+                      onChange={(event) => setProxyImportCountry(event.target.value)}
+                      className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100"
+                    />
+                  </label>
+                  <label className="flex items-center gap-2 self-end rounded-lg px-1 py-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={proxyImportIsRotating}
+                      onChange={(event) => setProxyImportIsRotating(event.target.checked)}
+                      className="rounded border-gray-300"
+                    />
+                    {t('proxies.add.autoRotate')}
+                  </label>
+                </div>
+              </details>
 
-                  <div className="mt-5 flex flex-wrap items-center gap-3">
-                    <button
-                      onClick={importProxies}
-                      disabled={proxyLoading || proxyChecking || !proxyImportText.trim()}
-                      className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-700 active:translate-y-px disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      <Upload size={16} />
-                      {proxyLoading || proxyChecking ? 'Đang thêm và kiểm tra…' : 'Thêm proxy và kiểm tra'}
-                    </button>
-                    <button
-                      onClick={runProxyHealthCheck}
-                      disabled={proxyChecking || proxyStats?.total === 0}
-                      className="inline-flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-slate-100 active:translate-y-px disabled:opacity-40"
-                    >
-                      <RefreshCw size={16} className={proxyChecking ? 'animate-spin' : ''} />
-                      Kiểm tra lại
-                    </button>
-                    <button
-                      onClick={fetchProxyData}
-                      className="px-2 py-2.5 text-sm text-gray-500 transition hover:text-gray-900"
-                    >
-                      Làm mới
-                    </button>
-                  </div>
+              <div className="mt-5 flex flex-wrap items-center gap-3">
+                <button
+                  onClick={importProxies}
+                  disabled={proxyLoading || proxyChecking || !proxyImportText.trim()}
+                  className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-700 active:translate-y-px disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
+                >
+                  <Upload size={16} />
+                  {proxyLoading || proxyChecking ? t('proxies.add.submitting') : t('proxies.add.submit')}
+                </button>
+                <button
+                  onClick={runProxyHealthCheck}
+                  disabled={proxyChecking || proxyStats?.total === 0}
+                  className="inline-flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-slate-100 active:translate-y-px disabled:opacity-40 cursor-pointer"
+                >
+                  <RefreshCw size={16} className={proxyChecking ? 'animate-spin' : ''} />
+                  {t('proxies.add.recheck')}
+                </button>
+                <button
+                  onClick={fetchProxyData}
+                  className="px-2 py-2.5 text-sm text-gray-500 transition hover:text-gray-900 cursor-pointer"
+                >
+                  {t('proxies.add.refresh')}
+                </button>
+              </div>
 
-                  {proxyImportResult?.error && (
-                    <p role="alert" className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
-                      {proxyImportResult.error}
-                    </p>
-                  )}
-                  {proxyImportResult && !proxyImportResult.error && (
-                    <p role="status" className="mt-4 rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
-                      Đã thêm {proxyImportResult.imported}, bỏ qua {proxyImportResult.skipped} proxy trùng
-                      {proxyImportResult.failed ? `, ${proxyImportResult.failed} dòng không hợp lệ` : '.'}
-                    </p>
-                  )}
-                  {proxyCheckResult && !proxyImportResult && (
-                    <p role="status" className="mt-4 text-sm text-gray-600">
-                      Kiểm tra xong: {proxyCheckResult.alive} dùng được, {proxyCheckResult.dead} không hoạt động.
-                    </p>
-                  )}
+              {proxyImportResult?.error && (
+                <p role="alert" className="mt-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {proxyImportResult.error}
+                </p>
+              )}
+              {proxyImportResult && !proxyImportResult.error && (
+                <p role="status" className="mt-4 rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+                  {t('proxies.results.imported', {
+                    imported: proxyImportResult.imported,
+                    skipped: proxyImportResult.skipped,
+                    failedInfo: proxyImportResult.failed ? t('proxies.results.failedPart', { failed: proxyImportResult.failed }) : ''
+                  })}
+                </p>
+              )}
+              {proxyCheckResult && !proxyImportResult && (
+                <p role="status" className="mt-4 text-sm text-gray-600">
+                  {t('proxies.results.checkDone', { alive: proxyCheckResult.alive, dead: proxyCheckResult.dead })}
+                </p>
+              )}
             </section>
+
             {/* Proxy Groups */}
             {proxyGroups.map((group: any) => (
               <div key={group.id} className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
@@ -1064,27 +1076,29 @@ function App() {
                     <CircleDot size={18} className={group.enabled ? 'text-emerald-500' : 'text-gray-300'} />
                     <h3 className="font-semibold text-gray-900">{group.name}</h3>
                     <span className="text-xs text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full">
-                      {group._count?.proxies || group.proxies?.length || 0} proxies
+                      {t('proxies.groups.proxiesCount', { count: group._count?.proxies || group.proxies?.length || 0 })}
                     </span>
                     {group.isDefault && (
-                      <span className="text-xs text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full font-medium">Default</span>
+                      <span className="text-xs text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full font-medium">
+                        {t('proxies.groups.default')}
+                      </span>
                     )}
                   </div>
                   <div className="flex items-center gap-2">
                     <button
                       onClick={() => toggleProxyGroup(group.id, !group.enabled)}
-                      className={`px-3 py-1 text-xs rounded-lg font-medium transition-colors ${
+                      className={`px-3 py-1 text-xs rounded-lg font-medium transition-colors cursor-pointer ${
                         group.enabled
                           ? 'text-emerald-700 bg-emerald-50 hover:bg-emerald-100'
                           : 'text-gray-500 bg-gray-100 hover:bg-gray-200'
                       }`}
                     >
-                      {group.enabled ? 'Enabled' : 'Disabled'}
+                      {group.enabled ? t('proxies.groups.enabled') : t('proxies.groups.disabled')}
                     </button>
                     <button
                       onClick={() => deleteProxyGroup(group.id)}
-                      className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                      title="Xóa nhóm"
+                      className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+                      title={t('proxies.groups.deleteTitle')}
                     >
                       <Trash2 size={16} />
                     </button>
@@ -1096,26 +1110,26 @@ function App() {
                     <table className="w-full text-sm min-w-[850px]">
                       <thead>
                         <tr className="text-xs text-gray-500 font-medium uppercase tracking-wider">
-                          <th className="px-4 py-2.5 text-left whitespace-nowrap">Status</th>
-                          <th className="px-4 py-2.5 text-left whitespace-nowrap">Host</th>
-                          <th className="px-4 py-2.5 text-left whitespace-nowrap">Port</th>
-                          <th className="px-4 py-2.5 text-left whitespace-nowrap">Protocol</th>
-                          <th className="px-4 py-2.5 text-left whitespace-nowrap">User</th>
-                          <th className="px-4 py-2.5 text-left whitespace-nowrap">Country</th>
-                          <th className="px-4 py-2.5 text-right whitespace-nowrap">Latency</th>
-                          <th className="px-4 py-2.5 text-right whitespace-nowrap">Success</th>
-                          <th className="px-4 py-2.5 text-right whitespace-nowrap">Fails</th>
-                          <th className="px-4 py-2.5 text-center whitespace-nowrap">Actions</th>
+                          <th className="px-4 py-2.5 text-left whitespace-nowrap">{t('proxies.table.status')}</th>
+                          <th className="px-4 py-2.5 text-left whitespace-nowrap">{t('proxies.table.host')}</th>
+                          <th className="px-4 py-2.5 text-left whitespace-nowrap">{t('proxies.table.port')}</th>
+                          <th className="px-4 py-2.5 text-left whitespace-nowrap">{t('proxies.table.protocol')}</th>
+                          <th className="px-4 py-2.5 text-left whitespace-nowrap">{t('proxies.table.user')}</th>
+                          <th className="px-4 py-2.5 text-left whitespace-nowrap">{t('proxies.table.country')}</th>
+                          <th className="px-4 py-2.5 text-right whitespace-nowrap">{t('proxies.table.latency')}</th>
+                          <th className="px-4 py-2.5 text-right whitespace-nowrap">{t('proxies.table.success')}</th>
+                          <th className="px-4 py-2.5 text-right whitespace-nowrap">{t('proxies.table.fails')}</th>
+                          <th className="px-4 py-2.5 text-center whitespace-nowrap">{t('proxies.table.actions')}</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-50">
                         {group.proxies.map((proxy: any) => (
                           <tr key={proxy.id} className={`hover:bg-gray-50/50 ${!proxy.enabled ? 'opacity-50' : ''}`}>
                             <td className="px-4 py-2 whitespace-nowrap">
-                              {proxy.status === 'ALIVE' && <span className="inline-flex items-center gap-1 text-emerald-600"><CheckCircle size={14} /> Alive</span>}
-                              {proxy.status === 'DEAD' && <span className="inline-flex items-center gap-1 text-red-500"><XCircle size={14} /> Dead</span>}
-                              {proxy.status === 'SLOW' && <span className="inline-flex items-center gap-1 text-amber-500"><Zap size={14} /> Slow</span>}
-                              {proxy.status === 'UNKNOWN' && <span className="inline-flex items-center gap-1 text-gray-400"><CircleDot size={14} /> Unknown</span>}
+                              {proxy.status === 'ALIVE' && <span className="inline-flex items-center gap-1 text-emerald-600"><CheckCircle size={14} /> {t('proxies.statusLabel.ALIVE')}</span>}
+                              {proxy.status === 'DEAD' && <span className="inline-flex items-center gap-1 text-red-500"><XCircle size={14} /> {t('proxies.statusLabel.DEAD')}</span>}
+                              {proxy.status === 'SLOW' && <span className="inline-flex items-center gap-1 text-amber-500"><Zap size={14} /> {t('proxies.statusLabel.SLOW')}</span>}
+                              {proxy.status === 'UNKNOWN' && <span className="inline-flex items-center gap-1 text-gray-400"><CircleDot size={14} /> {t('proxies.statusLabel.UNKNOWN')}</span>}
                             </td>
                             <td className="px-4 py-2 font-mono text-xs whitespace-nowrap">{proxy.host}</td>
                             <td className="px-4 py-2 font-mono text-xs whitespace-nowrap">{proxy.port}</td>
@@ -1133,28 +1147,28 @@ function App() {
                               <div className="flex items-center justify-center gap-1">
                                 <button
                                   onClick={() => toggleProxy(proxy.id, !proxy.enabled)}
-                                  className={`p-1 rounded transition-colors ${
+                                  className={`p-1 rounded transition-colors cursor-pointer ${
                                     proxy.enabled
                                       ? 'text-emerald-500 hover:bg-emerald-50'
                                       : 'text-gray-400 hover:bg-gray-100'
                                   }`}
-                                  title={proxy.enabled ? 'Disable' : 'Enable'}
+                                  title={proxy.enabled ? t('proxies.actions.disable') : t('proxies.actions.enable')}
                                 >
                                   {proxy.enabled ? <CheckCircle size={15} /> : <XCircle size={15} />}
                                 </button>
                                 {(proxy.status === 'DEAD' || proxy.status === 'SLOW') && (
                                   <button
                                     onClick={() => resetProxy(proxy.id)}
-                                    className="p-1 text-blue-400 hover:bg-blue-50 rounded transition-colors"
-                                    title="Reset status"
+                                    className="p-1 text-blue-400 hover:bg-blue-50 rounded transition-colors cursor-pointer"
+                                    title={t('proxies.actions.reset')}
                                   >
                                     <RefreshCw size={15} />
                                   </button>
                                 )}
                                 <button
                                   onClick={() => deleteProxy(proxy.id)}
-                                  className="p-1 text-red-400 hover:bg-red-50 rounded transition-colors"
-                                  title="Xóa proxy"
+                                  className="p-1 text-red-400 hover:bg-red-50 rounded transition-colors cursor-pointer"
+                                  title={t('proxies.actions.delete')}
                                 >
                                   <Trash2 size={15} />
                                 </button>
@@ -1167,7 +1181,7 @@ function App() {
                   </div>
                 ) : (
                   <div className="px-6 py-8 text-center text-sm text-gray-400">
-                    Chưa có proxy nào trong nhóm này. Dùng nút Import để thêm.
+                    {t('proxies.groups.empty')}
                   </div>
                 )}
               </div>
@@ -1177,16 +1191,22 @@ function App() {
 
         {activeTab === 'settings' && (
           <div className="bg-white rounded-3xl shadow-sm border border-gray-50 p-8 max-w-2xl">
-            <h2 className="text-xl font-medium text-gray-900 mb-6">Account Settings</h2>
+            <h2 className="text-xl font-medium text-gray-900 mb-6">{t('settings.title')}</h2>
 
             <div className="space-y-6">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Email Address</label>
-                <input type="email" disabled value={user?.email || ''} className="w-full px-4 py-3 bg-gray-100 text-gray-500 rounded-xl border border-gray-200 cursor-not-allowed" />
-                <p className="text-xs text-gray-400 mt-2">Email cannot be changed.</p>
+                <label className="block text-sm font-medium text-gray-700 mb-2">{t('settings.emailLabel')}</label>
+                <input type="email" disabled value={user?.email || ''} className="w-full px-4 py-3 bg-gray-100 text-gray-500 rounded-xl border border-gray-200 cursor-not-allowed text-sm" />
+                <p className="text-xs text-gray-400 mt-2">{t('settings.emailHint')}</p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">{t('settings.languageLabel')}</label>
+                <p className="text-xs text-gray-400 mb-3">{t('settings.languageDesc')}</p>
+                <LanguageSwitcher variant="select" />
               </div>
               
-              <div className="flex gap-3">
+              <div className="flex gap-3 pt-2">
                 <span className="px-3 py-1 rounded-full bg-violet-100 text-violet-700 text-xs font-semibold">{user?.role}</span>
                 <span className="px-3 py-1 rounded-full bg-emerald-100 text-emerald-700 text-xs font-semibold">{user?.status}</span>
               </div>
@@ -1221,9 +1241,9 @@ function App() {
             <div className="flex justify-between items-center p-4 bg-[#2D2D2D] border-b border-gray-700">
               <h3 className="text-white font-medium flex items-center gap-2">
                 <Activity size={18} className="text-blue-400" /> 
-                Live Logs: <span className="font-mono text-xs text-gray-400 ml-1">{activeLogRunId}</span>
+                {t('logModal.title')} <span className="font-mono text-xs text-gray-400 ml-1">{activeLogRunId}</span>
               </h3>
-              <button onClick={() => setLogModalOpen(false)} className="text-gray-400 hover:text-white">
+              <button onClick={() => setLogModalOpen(false)} className="text-gray-400 hover:text-white cursor-pointer">
                 ✕
               </button>
             </div>
@@ -1256,6 +1276,7 @@ function RunDetailModal({
   onDownload: (format: 'json' | 'jsonl', status?: 'COMPLETED' | 'FAILED') => void
   onClose: () => void
 }) {
+  const { t, locale, formatDate, formatCurrency } = useI18n()
   const [galleryState, setGalleryState] = useState<{ images: string[]; index: number } | null>(null)
 
   useEffect(() => {
@@ -1272,6 +1293,7 @@ function RunDetailModal({
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [galleryState])
+
   const [expandedItemIds, setExpandedItemIds] = useState<Record<string, boolean>>({})
   const [reviewPages, setReviewPages] = useState<Record<string, number>>({})
   const records = (detail?.items || []).map((item: any) => item.data || {})
@@ -1279,11 +1301,14 @@ function RunDetailModal({
   const shopInfo = detail?.run?.actor?.name === 'shopee-shop-scraper'
     ? detail?.run?.outputMetadata?.shopInfo
     : null
+
   const formatShopMetric = (value: unknown) => {
     const number = Number(value)
     if (!Number.isFinite(number)) return '—'
-    return new Intl.NumberFormat('vi-VN', { notation: number >= 10000 ? 'compact' : 'standard' }).format(number)
+    const intlLocale = locale === 'vi' ? 'vi-VN' : 'en-US'
+    return new Intl.NumberFormat(intlLocale, { notation: number >= 10000 ? 'compact' : 'standard' }).format(number)
   }
+
   let schemaColumns: string[] = []
   let schemaLabels: Record<string, string> = {}
   try {
@@ -1291,16 +1316,21 @@ function RunDetailModal({
     schemaColumns = Object.keys(schema?.properties || {})
 
     const shortLabels: Record<string, string> = {
-      'Điểm đánh giá trung bình của sản phẩm': 'Điểm đánh giá',
-      'Tổng số lượt đánh giá sản phẩm': 'Lượt đánh giá',
-      'Liên kết sản phẩm': 'Liên kết',
-      'Tên cửa hàng': 'Cửa hàng',
-      'Bộ ảnh sản phẩm': 'Bộ ảnh'
+      'Điểm đánh giá trung bình của sản phẩm': t('runDetail.fields.rating'),
+      'Tổng số lượt đánh giá sản phẩm': t('runDetail.fields.ratingCount'),
+      'Liên kết sản phẩm': t('runDetail.fields.url'),
+      'Tên cửa hàng': t('runDetail.fields.shopName'),
+      'Bộ ảnh sản phẩm': t('runDetail.fields.images'),
+      'Average product rating': t('runDetail.fields.rating'),
+      'Total product ratings': t('runDetail.fields.ratingCount'),
+      'Product URL': t('runDetail.fields.url'),
+      'Shop name': t('runDetail.fields.shopName'),
+      'Product images': t('runDetail.fields.images')
     }
 
     schemaLabels = Object.fromEntries(
       Object.entries(schema?.properties || {}).map(([key, property]: [string, any]) => {
-        const title = typeof property?.title === 'string' ? property.title : humanizeFieldName(key)
+        const title = typeof property?.title === 'string' ? property.title : humanizeFieldName(key, t)
         return [key, shortLabels[title] || title]
       })
     )
@@ -1338,10 +1368,10 @@ function RunDetailModal({
       return <span>{value.toFixed(1)}</span>
     }
     if (column === 'sold') {
-      return <span>{displaySoldValue(value)}</span>
+      return <span>{displaySoldValue(value, locale)}</span>
     }
     if (column === 'reviews' && Array.isArray(value)) {
-      if (!value.length) return <span className="text-gray-400">Chưa có đánh giá</span>
+      if (!value.length) return <span className="text-gray-400">{t('runDetail.table.noReviews')}</span>
       const reviewPageSize = 20
       const reviewPageKey = recordKey || 'reviews'
       const reviewPageCount = Math.max(1, Math.ceil(value.length / reviewPageSize))
@@ -1353,18 +1383,18 @@ function RunDetailModal({
       return (
         <details className="w-80">
           <summary className="cursor-pointer text-blue-600 font-medium">
-            Xem {value.length} đánh giá
+            {t('runDetail.table.viewReviews', { count: value.length })}
           </summary>
           <div className="mt-2 space-y-2 max-h-72 overflow-auto pr-2">
             {visibleReviews.map((review: any, index: number) => (
-              <div key={review.reviewId || index} className="rounded-xl border border-gray-100 bg-gray-50 p-3">
+              <div key={review.reviewId || index} className="rounded-xl border border-gray-100 bg-gray-50 p-3 text-left">
                 <div className="flex items-center justify-between gap-2 text-xs">
-                  <span className="font-medium text-gray-700">{review.author || 'Người dùng'}</span>
-                  <span className="text-amber-600">{review.rating ? `${review.rating} ★` : 'Chưa chấm sao'}</span>
+                  <span className="font-medium text-gray-700">{review.author || t('runDetail.table.anonymousUser')}</span>
+                  <span className="text-amber-600">{review.rating ? `${review.rating} ★` : t('runDetail.table.noRating')}</span>
                 </div>
                 {review.variation && <div className="mt-1 text-xs text-gray-400">{review.variation}</div>}
                 <div className="mt-1 text-sm text-gray-700 whitespace-pre-wrap">
-                  {review.comment || 'Người mua không để lại nội dung.'}
+                  {review.comment || t('runDetail.table.noComment')}
                 </div>
                 {Array.isArray(review.images) && review.images.length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-1.5">
@@ -1377,12 +1407,12 @@ function RunDetailModal({
                           const stringImages = review.images.map((img: any) => String(img)).filter(Boolean)
                           setGalleryState({ images: stringImages, index: imageIndex })
                         }}
-                        title="Bấm để xem bộ ảnh đánh giá"
+                        title={t('runDetail.table.reviewPhotoTitle')}
                         className="cursor-pointer"
                       >
                         <img
                           src={String(imageUrl)}
-                          alt={`Ảnh đánh giá ${imageIndex + 1}`}
+                          alt={t('runDetail.table.reviewPhotoAlt', { index: imageIndex + 1 })}
                           referrerPolicy="no-referrer"
                           loading="lazy"
                           className="h-14 w-14 rounded-lg border border-gray-200 bg-white object-cover hover:opacity-80"
@@ -1415,7 +1445,7 @@ function RunDetailModal({
                         onClick={(event) => event.stopPropagation()}
                         className="inline-flex items-center gap-1 rounded-lg border border-gray-200 bg-white px-2 py-1 text-blue-600 hover:bg-blue-50"
                       >
-                        Video {videoIndex + 1}
+                        {t('runDetail.table.video', { index: videoIndex + 1 })}
                         <ExternalLink size={11} />
                       </a>
                     ))}
@@ -1423,7 +1453,7 @@ function RunDetailModal({
                 )}
                 {review.createdAt && (
                   <div className="mt-1 text-[11px] text-gray-400">
-                    {new Date(review.createdAt).toLocaleString('vi-VN')}
+                    {formatDate(review.createdAt)}
                   </div>
                 )}
               </div>
@@ -1438,9 +1468,9 @@ function RunDetailModal({
                   ...current,
                   [reviewPageKey]: Math.max(1, reviewPage - 1)
                 }))}
-                className="rounded-lg border border-gray-200 px-2 py-1 disabled:opacity-40"
+                className="rounded-lg border border-gray-200 px-2 py-1 disabled:opacity-40 cursor-pointer"
               >
-                Trang trước
+                {t('runDetail.prevPage')}
               </button>
               <span>{reviewPage}/{reviewPageCount}</span>
               <button
@@ -1450,9 +1480,9 @@ function RunDetailModal({
                   ...current,
                   [reviewPageKey]: Math.min(reviewPageCount, reviewPage + 1)
                 }))}
-                className="rounded-lg border border-gray-200 px-2 py-1 disabled:opacity-40"
+                className="rounded-lg border border-gray-200 px-2 py-1 disabled:opacity-40 cursor-pointer"
               >
-                Trang sau
+                {t('runDetail.nextPage')}
               </button>
             </div>
           )}
@@ -1460,7 +1490,7 @@ function RunDetailModal({
       )
     }
     if (column === 'images' && Array.isArray(value)) {
-      if (!value.length) return <span className="text-gray-400">Chưa có ảnh</span>
+      if (!value.length) return <span className="text-gray-400">—</span>
       const stringImages = value.map((img) => String(img)).filter(Boolean)
       return (
         <div className="flex items-center gap-1.5 min-w-[16rem]">
@@ -1472,7 +1502,7 @@ function RunDetailModal({
                 event.stopPropagation()
                 setGalleryState({ images: stringImages, index })
               }}
-              title="Bấm để xem tất cả ảnh sản phẩm"
+              title={t('runDetail.table.productPhotosTitle')}
               className="cursor-pointer group"
             >
               <img
@@ -1491,7 +1521,7 @@ function RunDetailModal({
                 event.stopPropagation()
                 setGalleryState({ images: stringImages, index: 4 })
               }}
-              title="Xem tất cả bộ ảnh"
+              title={t('runDetail.table.viewAllPhotos')}
               className="flex h-14 min-w-14 items-center justify-center rounded-lg border border-blue-200 bg-blue-50 hover:bg-blue-100 px-2 text-xs font-bold text-blue-700 transition-colors cursor-pointer"
             >
               +{stringImages.length - 4}
@@ -1501,19 +1531,19 @@ function RunDetailModal({
       )
     }
     if (Array.isArray(value)) {
-      if (!value.length) return <span className="text-gray-400">Không có dữ liệu</span>
+      if (!value.length) return <span className="text-gray-400">{t('runDetail.table.noData')}</span>
       return (
         <details className="max-w-md">
           <summary className="cursor-pointer text-blue-600 font-medium">
-            Xem {value.length} mục
+            {t('runDetail.table.viewItems', { count: value.length })}
           </summary>
-          <div className="mt-2 space-y-2 max-h-72 overflow-auto">
+          <div className="mt-2 space-y-2 max-h-72 overflow-auto text-left">
             {value.map((entry: any, index: number) => (
               <div key={index} className="rounded-lg border border-gray-200 bg-white p-2.5">
                 {entry && typeof entry === 'object' ? (
                   Object.entries(entry).map(([key, entryValue]) => (
                     <div key={key} className="grid grid-cols-[7rem_1fr] gap-2 text-xs py-0.5">
-                      <span className="text-gray-400">{humanizeFieldName(key)}</span>
+                      <span className="text-gray-400">{humanizeFieldName(key, t)}</span>
                       <span className="text-gray-700 break-words">
                         {typeof entryValue === 'object' ? JSON.stringify(entryValue) : String(entryValue ?? '—')}
                       </span>
@@ -1528,14 +1558,14 @@ function RunDetailModal({
     }
     if (typeof value === 'boolean') {
       return value
-        ? <span className="text-emerald-700 font-medium">Có</span>
-        : <span className="text-gray-400">Không</span>
+        ? <span className="text-emerald-700 font-medium">{t('common.yes')}</span>
+        : <span className="text-gray-400">{t('common.no')}</span>
     }
     if (
       typeof value === 'number' &&
       /price|gia|minimumspend|fee/i.test(column)
     ) {
-      return <span>{value.toLocaleString('vi-VN')}₫</span>
+      return <span>{formatCurrency(value)}</span>
     }
     if (typeof value === 'number' && /discountpercent|percentage/i.test(column)) {
       return <span>{value}%</span>
@@ -1548,7 +1578,7 @@ function RunDetailModal({
           <button 
             type="button"
             onClick={(e) => { e.stopPropagation(); setGalleryState({ images: [text], index: 0 }); }}
-            title="Bấm để xem ảnh phóng to trực tiếp" 
+            title={t('runDetail.gallery.viewEnlarged')}
             className="inline-block relative group text-left cursor-pointer"
           >
             <img 
@@ -1577,7 +1607,7 @@ function RunDetailModal({
           <div className="flex justify-between items-start gap-4 p-6 pb-4">
             <div>
               <div className="flex items-center gap-3">
-                <h2 className="text-xl font-semibold text-gray-900">Run data</h2>
+                <h2 className="text-xl font-semibold text-gray-900">{t('runDetail.title')}</h2>
                 {detail?.run?.status && (
                   <span className={`px-3 py-1 rounded-full text-xs font-semibold ${
                     detail.run.status === 'SUCCESS'
@@ -1588,37 +1618,37 @@ function RunDetailModal({
                           ? 'bg-red-100 text-red-700'
                           : 'bg-gray-100 text-gray-700'
                   }`}>
-                    {detail.run.status}
+                    {t(`runs.status.${detail.run.status}`) !== `runs.status.${detail.run.status}` ? t(`runs.status.${detail.run.status}`) : detail.run.status}
                   </span>
                 )}
               </div>
               <p className="mt-1 text-xs font-mono text-gray-400">{detail?.run?.id}</p>
             </div>
             <div className="flex items-center gap-2">
-              <button onClick={() => onDownload('jsonl')} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-purple-50 text-purple-700 text-sm font-medium" title="Tải JSON Lines">
+              <button onClick={() => onDownload('jsonl')} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-purple-50 text-purple-700 text-sm font-medium cursor-pointer hover:bg-purple-100 transition-colors" title={t('runDetail.downloadJsonl')}>
                 <FileJson size={16} /> JSONL
               </button>
-              <button onClick={onClose} className="ml-2 text-gray-400 hover:text-gray-800 text-2xl">×</button>
+              <button onClick={onClose} className="ml-2 text-gray-400 hover:text-gray-800 text-2xl cursor-pointer">×</button>
             </div>
           </div>
           <div className="flex items-center gap-6 px-6">
             <button 
               onClick={() => onStatusChange(undefined)} 
-              className={`pb-3 text-sm font-medium border-b-2 transition-colors ${!status ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+              className={`pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer ${!status ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
             >
-              Tất cả sản phẩm
+              {t('runDetail.allProducts')}
             </button>
             <button 
               onClick={() => onStatusChange('FAILED')} 
-              className={`pb-3 text-sm font-medium border-b-2 transition-colors ${status === 'FAILED' ? 'border-red-600 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+              className={`pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer ${status === 'FAILED' ? 'border-red-600 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
             >
-              Sản phẩm lỗi
+              {t('runDetail.failedProducts')}
             </button>
           </div>
         </div>
 
         {loading && !detail ? (
-          <div className="flex-1 flex items-center justify-center text-gray-500">Loading data…</div>
+          <div className="flex-1 flex items-center justify-center text-gray-500">{t('runDetail.loading')}</div>
         ) : detail ? (
           <>
             {shopInfo && (
@@ -1628,7 +1658,7 @@ function RunDetailModal({
                     {shopInfo.shopAvatar ? (
                       <img
                         src={shopInfo.shopAvatar}
-                        alt={`Ảnh đại diện ${shopInfo.shopName || 'shop Shopee'}`}
+                        alt={t('runDetail.shopInfo.avatarAlt', { name: shopInfo.shopName || 'Shopee shop' })}
                         referrerPolicy="no-referrer"
                         className="h-16 w-16 shrink-0 rounded-2xl border border-white/15 bg-white object-cover"
                       />
@@ -1642,16 +1672,16 @@ function RunDetailModal({
                         <h3 className="truncate text-xl font-semibold tracking-tight">
                           {shopInfo.shopName || shopInfo.shopUsername || 'Shopee shop'}
                         </h3>
-                        {shopInfo.shopIsPreferred && <span className="rounded-md bg-orange-500/20 px-2 py-1 text-[11px] font-semibold text-orange-200">Preferred</span>}
-                        {shopInfo.shopIsMall && <span className="rounded-md bg-red-500/20 px-2 py-1 text-[11px] font-semibold text-red-200">Mall</span>}
-                        {shopInfo.shopIsVerified && <span className="rounded-md bg-blue-500/20 px-2 py-1 text-[11px] font-semibold text-blue-200">Đã xác minh</span>}
+                        {shopInfo.shopIsPreferred && <span className="rounded-md bg-orange-500/20 px-2 py-1 text-[11px] font-semibold text-orange-200">{t('runDetail.shopInfo.preferred')}</span>}
+                        {shopInfo.shopIsMall && <span className="rounded-md bg-red-500/20 px-2 py-1 text-[11px] font-semibold text-red-200">{t('runDetail.shopInfo.mall')}</span>}
+                        {shopInfo.shopIsVerified && <span className="rounded-md bg-blue-500/20 px-2 py-1 text-[11px] font-semibold text-blue-200">{t('runDetail.shopInfo.verified')}</span>}
                       </div>
                       <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-300">
                         {shopInfo.shopUsername && <span>@{shopInfo.shopUsername}</span>}
-                        {shopInfo.shopLastActiveText && <span>Hoạt động {shopInfo.shopLastActiveText}</span>}
+                        {shopInfo.shopLastActiveText && <span>{t('runDetail.shopInfo.activeText', { time: shopInfo.shopLastActiveText })}</span>}
                         {shopInfo.url && (
                           <a href={shopInfo.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-blue-300 hover:text-blue-200">
-                            Mở shop <ExternalLink size={11} />
+                            {t('runDetail.shopInfo.openShop')} <ExternalLink size={11} />
                           </a>
                         )}
                       </div>
@@ -1660,53 +1690,53 @@ function RunDetailModal({
 
                   <dl className="grid grid-cols-2 gap-x-7 gap-y-3 sm:grid-cols-4 xl:min-w-[34rem]">
                     <div>
-                      <dt className="text-[11px] text-slate-400">Sản phẩm đã lấy</dt>
+                      <dt className="text-[11px] text-slate-400">{t('runDetail.shopInfo.itemsCrawled')}</dt>
                       <dd className="mt-0.5 text-lg font-semibold tabular-nums">
                         {formatShopMetric(shopInfo.crawledProductCount ?? detail.run.itemCount)}
                         {shopInfo.shopProductCount ? <span className="text-sm font-normal text-slate-400">/{formatShopMetric(shopInfo.shopProductCount)}</span> : null}
                       </dd>
                     </div>
                     <div>
-                      <dt className="text-[11px] text-slate-400">Người theo dõi</dt>
+                      <dt className="text-[11px] text-slate-400">{t('runDetail.shopInfo.followers')}</dt>
                       <dd className="mt-0.5 text-lg font-semibold tabular-nums">{formatShopMetric(shopInfo.shopFollowerCount)}</dd>
                     </div>
                     <div>
-                      <dt className="text-[11px] text-slate-400">Đánh giá</dt>
+                      <dt className="text-[11px] text-slate-400">{t('runDetail.shopInfo.rating')}</dt>
                       <dd className="mt-0.5 text-lg font-semibold tabular-nums">
                         {shopInfo.shopRating ?? '—'}{shopInfo.shopRating ? ' ★' : ''}
                         {shopInfo.shopRatingCount ? <span className="ml-1 text-xs font-normal text-slate-400">({formatShopMetric(shopInfo.shopRatingCount)})</span> : null}
                       </dd>
                     </div>
                     <div>
-                      <dt className="text-[11px] text-slate-400">Phản hồi chat</dt>
+                      <dt className="text-[11px] text-slate-400">{t('runDetail.shopInfo.chatResponse')}</dt>
                       <dd className="mt-0.5 text-lg font-semibold tabular-nums">{shopInfo.shopResponseRateText || (shopInfo.shopResponseRate !== undefined ? `${shopInfo.shopResponseRate}%` : '—')}</dd>
                     </div>
                   </dl>
                 </div>
 
                 <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 border-t border-white/10 pt-3 text-xs text-slate-300">
-                  {shopInfo.shopLocation && <span><span className="text-slate-500">Địa chỉ:</span> {shopInfo.shopLocation}</span>}
-                  {shopInfo.shopJoinedText && <span><span className="text-slate-500">Tham gia:</span> {shopInfo.shopJoinedText}</span>}
-                  {shopInfo.shopFollowingCount !== undefined && <span><span className="text-slate-500">Đang theo:</span> {formatShopMetric(shopInfo.shopFollowingCount)}</span>}
-                  {shopInfo.shopCancellationRateText && <span><span className="text-slate-500">Hủy đơn:</span> {shopInfo.shopCancellationRateText}</span>}
-                  {shopInfo.shopBusinessName && <span><span className="text-slate-500">Doanh nghiệp:</span> {shopInfo.shopBusinessName}</span>}
-                  {shopInfo.pagesCrawled && <span><span className="text-slate-500">Trang đã crawl:</span> {shopInfo.pagesCrawled}</span>}
+                  {shopInfo.shopLocation && <span><span className="text-slate-500">{t('runDetail.shopInfo.location')}</span> {shopInfo.shopLocation}</span>}
+                  {shopInfo.shopJoinedText && <span><span className="text-slate-500">{t('runDetail.shopInfo.joined')}</span> {shopInfo.shopJoinedText}</span>}
+                  {shopInfo.shopFollowingCount !== undefined && <span><span className="text-slate-500">{t('runDetail.shopInfo.following')}</span> {formatShopMetric(shopInfo.shopFollowingCount)}</span>}
+                  {shopInfo.shopCancellationRateText && <span><span className="text-slate-500">{t('runDetail.shopInfo.cancellationRate')}</span> {shopInfo.shopCancellationRateText}</span>}
+                  {shopInfo.shopBusinessName && <span><span className="text-slate-500">{t('runDetail.shopInfo.business')}</span> {shopInfo.shopBusinessName}</span>}
+                  {shopInfo.pagesCrawled && <span><span className="text-slate-500">{t('runDetail.shopInfo.pagesCrawled')}</span> {shopInfo.pagesCrawled}</span>}
                 </div>
               </section>
             )}
 
             <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 p-5 bg-gray-50 border-b border-gray-100">
               <div className="bg-white rounded-2xl p-4">
-                <div className="text-xs uppercase tracking-wide text-gray-400">Crawler</div>
+                <div className="text-xs uppercase tracking-wide text-gray-400">{t('runDetail.summary.crawler')}</div>
                 <div className="mt-1 font-medium">{detail.run.actor?.name}</div>
                 <div className="text-sm text-gray-500">v{detail.run.actor?.version}</div>
               </div>
               <div className="bg-white rounded-2xl p-4">
-                <div className="text-xs uppercase tracking-wide text-gray-400">Input</div>
+                <div className="text-xs uppercase tracking-wide text-gray-400">{t('runDetail.summary.input')}</div>
                 <pre className="mt-2 text-xs text-gray-700 whitespace-pre-wrap max-h-24 overflow-auto">{JSON.stringify(detail.run.input, null, 2)}</pre>
               </div>
               <div className="bg-white rounded-2xl p-4">
-                <div className="text-xs uppercase tracking-wide text-gray-400">Chi tiết sản phẩm</div>
+                <div className="text-xs uppercase tracking-wide text-gray-400">{t('runDetail.summary.productDetails')}</div>
                 {detailProgress?.enabled ? (
                   <>
                     <div className="mt-1 text-2xl font-semibold">
@@ -1714,18 +1744,20 @@ function RunDetailModal({
                       <span className="text-base font-normal text-gray-400">/{detailProgress.total || 0}</span>
                     </div>
                     <div className="text-sm text-gray-500">
-                      {detailProgress.completed || 0} thành công
-                      {detailProgress.failed ? ` · ${detailProgress.failed} lỗi` : ''}
+                      {t('runDetail.summary.detailedCount', {
+                        completed: detailProgress.completed || 0,
+                        failedText: detailProgress.failed ? t('runDetail.summary.failedText', { failed: detailProgress.failed }) : ''
+                      })}
                     </div>
                   </>
                 ) : (
-                  <div className="mt-2 text-sm text-gray-500">Không thu thập dữ liệu chi tiết</div>
+                  <div className="mt-2 text-sm text-gray-500">{t('runDetail.summary.noDetailCrawl')}</div>
                 )}
               </div>
               <div className="bg-white rounded-2xl p-4">
-                <div className="text-xs uppercase tracking-wide text-gray-400">Result</div>
+                <div className="text-xs uppercase tracking-wide text-gray-400">{t('runDetail.summary.result')}</div>
                 <div className="mt-1 text-2xl font-semibold">{detail.run.itemCount}</div>
-                <div className="text-sm text-gray-500">items stored in database</div>
+                <div className="text-sm text-gray-500">{t('runDetail.summary.itemsStored')}</div>
                 {detail.run.outputError && <div className="mt-2 text-xs text-red-600">{detail.run.outputError}</div>}
               </div>
             </div>
@@ -1736,10 +1768,10 @@ function RunDetailModal({
                   <thead className="sticky top-0 bg-white border-b border-gray-200 text-gray-700 font-semibold">
                     <tr>
                       <th className="w-10 px-2 py-2.5"></th>
-                      <th className="px-3 py-2.5">STT</th>
+                      <th className="px-3 py-2.5">{t('runDetail.table.index')}</th>
                       {summaryColumns.map((column) => (
                         <th key={column} className={`px-3 py-2.5 whitespace-nowrap ${column === 'title' ? 'text-left' : ''}`}>
-                          {schemaLabels[column] || humanizeFieldName(column)}
+                          {schemaLabels[column] || humanizeFieldName(column, t)}
                         </th>
                       ))}
                     </tr>
@@ -1756,7 +1788,7 @@ function RunDetailModal({
                             }`}
                           >
                             <td className="w-10 px-2 py-2 text-gray-400">
-                              <button type="button" className="p-1 rounded hover:bg-gray-100 transition-transform">
+                              <button type="button" className="p-1 rounded hover:bg-gray-100 transition-transform cursor-pointer">
                                 <ChevronRight size={16} className={`transition-transform duration-200 ${isExpanded ? 'rotate-90 text-blue-600' : ''}`} />
                               </button>
                             </td>
@@ -1775,9 +1807,11 @@ function RunDetailModal({
                                   <div className="flex items-center justify-between border-b border-gray-100 pb-3">
                                     <h4 className="text-sm font-semibold text-gray-800 flex items-center gap-2">
                                       <span className="w-2.5 h-2.5 rounded-full bg-blue-500"></span>
-                                      Thông tin chi tiết thu thập bên trong sản phẩm
+                                      {t('runDetail.table.detailedDataTitle')}
                                     </h4>
-                                    <span className="text-xs text-gray-400 font-mono">Item #{item.position + 1}</span>
+                                    <span className="text-xs text-gray-400 font-mono">
+                                      {t('runDetail.table.itemNo', { position: item.position + 1 })}
+                                    </span>
                                   </div>
 
                                   {detailColumns.length > 0 ? (
@@ -1785,9 +1819,9 @@ function RunDetailModal({
                                       {detailColumns.map((col) => {
                                         const val = item.data?.[col];
                                         return (
-                                          <div key={col} className="bg-gray-50/80 p-3.5 rounded-xl border border-gray-100 flex flex-col gap-1">
+                                          <div key={col} className="bg-gray-50/80 p-3.5 rounded-xl border border-gray-100 flex flex-col gap-1 text-left">
                                             <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
-                                              {schemaLabels[col] || humanizeFieldName(col)}
+                                              {schemaLabels[col] || humanizeFieldName(col, t)}
                                             </span>
                                             <div className="text-xs text-gray-800 font-normal whitespace-pre-wrap break-words">
                                               {renderValue(val, col, String(item.data?.itemId || item.id))}
@@ -1797,7 +1831,7 @@ function RunDetailModal({
                                       })}
                                     </div>
                                   ) : (
-                                    <div className="text-xs text-gray-400 py-2">Không có dữ liệu chi tiết nâng cao cho sản phẩm này.</div>
+                                    <div className="text-xs text-gray-400 py-2">{t('runDetail.table.noDetailedData')}</div>
                                   )}
                                 </div>
                               </td>
@@ -1809,26 +1843,30 @@ function RunDetailModal({
                   </tbody>
                 </table>
               ) : (
-                <div className="h-full flex items-center justify-center text-gray-400">This run has no data items.</div>
+                <div className="h-full flex items-center justify-center text-gray-400">{t('runDetail.empty')}</div>
               )}
             </div>
 
             <div className="flex items-center justify-between px-5 py-4 border-t border-gray-100 bg-white">
               <span className="text-sm text-gray-500">
-                Page {detail.pagination.page} of {detail.pagination.totalPages} · {detail.pagination.total} items
+                {t('runDetail.pagination', {
+                  page: detail.pagination.page,
+                  totalPages: detail.pagination.totalPages,
+                  total: detail.pagination.total
+                })}
               </span>
               <div className="flex gap-2">
                 <button
                   disabled={page <= 1 || loading}
                   onClick={() => onPageChange(page - 1)}
-                  className="p-2 rounded-lg bg-gray-100 disabled:opacity-40"
+                  className="p-2 rounded-lg bg-gray-100 disabled:opacity-40 cursor-pointer"
                 >
                   <ChevronLeft size={18} />
                 </button>
                 <button
                   disabled={page >= detail.pagination.totalPages || loading}
                   onClick={() => onPageChange(page + 1)}
-                  className="p-2 rounded-lg bg-gray-100 disabled:opacity-40"
+                  className="p-2 rounded-lg bg-gray-100 disabled:opacity-40 cursor-pointer"
                 >
                   <ChevronRight size={18} />
                 </button>
@@ -1836,7 +1874,7 @@ function RunDetailModal({
             </div>
           </>
         ) : (
-          <div className="flex-1 flex items-center justify-center text-red-500">Unable to load run data.</div>
+          <div className="flex-1 flex items-center justify-center text-red-500">{t('runDetail.unableToLoad')}</div>
         )}
       </div>
 
@@ -1852,12 +1890,12 @@ function RunDetailModal({
             {/* Header with counter & close button */}
             <div className="mb-3 flex items-center justify-between w-full text-white/90 text-xs px-2">
               <span className="font-semibold bg-white/10 px-3.5 py-1.5 rounded-full border border-white/15 text-white shadow-xs">
-                Bộ ảnh ({galleryState.index + 1} / {galleryState.images.length})
+                {t('runDetail.gallery.title', { index: galleryState.index + 1, total: galleryState.images.length })}
               </span>
               <button 
                 onClick={() => setGalleryState(null)}
                 className="hover:bg-white/15 p-2 rounded-full text-white/80 hover:text-white transition-colors cursor-pointer"
-                title="Đóng (Esc)"
+                title={t('runDetail.gallery.closeEsc')}
               >
                 ✕
               </button>
@@ -1873,7 +1911,7 @@ function RunDetailModal({
                     index: (prev.index - 1 + prev.images.length) % prev.images.length
                   }) : null)}
                   className="absolute left-1 md:left-3 z-10 p-3 rounded-full bg-black/60 hover:bg-black/90 text-white border border-white/20 transition-all cursor-pointer shadow-lg active:scale-95"
-                  title="Ảnh trước (Mũi tên trái)"
+                  title={t('runDetail.gallery.prevPhoto')}
                 >
                   <ChevronLeft size={22} />
                 </button>
@@ -1881,7 +1919,7 @@ function RunDetailModal({
 
               <img 
                 src={galleryState.images[galleryState.index]} 
-                alt={`Ảnh ${galleryState.index + 1}`} 
+                alt={t('runDetail.gallery.title', { index: galleryState.index + 1, total: galleryState.images.length })}
                 referrerPolicy="no-referrer"
                 className="max-w-full max-h-[62vh] object-contain rounded-2xl shadow-2xl border border-white/10 transition-all duration-150" 
               />
@@ -1894,7 +1932,7 @@ function RunDetailModal({
                     index: (prev.index + 1) % prev.images.length
                   }) : null)}
                   className="absolute right-1 md:right-3 z-10 p-3 rounded-full bg-black/60 hover:bg-black/90 text-white border border-white/20 transition-all cursor-pointer shadow-lg active:scale-95"
-                  title="Ảnh tiếp theo (Mũi tên phải)"
+                  title={t('runDetail.gallery.nextPhoto')}
                 >
                   <ChevronRight size={22} />
                 </button>
@@ -1932,14 +1970,14 @@ function RunDetailModal({
                 rel="noreferrer"
                 className="hover:underline flex items-center gap-1.5 text-white"
               >
-                Mở tab mới <ExternalLink size={13} />
+                {t('common.openInNewTab')} <ExternalLink size={13} />
               </a>
               <span className="text-white/40">•</span>
               <button 
                 onClick={() => setGalleryState(null)}
                 className="hover:underline text-white/80 hover:text-white cursor-pointer"
               >
-                Đóng
+                {t('common.close')}
               </button>
             </div>
           </div>
@@ -1954,18 +1992,21 @@ function ActorInputFields({
   schema,
   input,
   onChange,
+  t,
   actorName: _actorName
 }: {
   schema?: string | null
   input: Record<string, unknown>
   onChange: (input: Record<string, unknown>) => void
+  t: (key: string, params?: Record<string, string | number>) => string
   actorName?: string
 }) {
   const parsed = parseInputSchema(schema)
   
   if (parsed?.properties?.maxItems && parsed.properties.maxItems.maximum) {
-    if (!parsed.properties.maxItems.description?.includes('Tối đa')) {
-      parsed.properties.maxItems.description = (parsed.properties.maxItems.description ? `${parsed.properties.maxItems.description} ` : '') + `(Tối đa ${parsed.properties.maxItems.maximum})`
+    const limitNote = t('actors.maxItemsLimit', { max: parsed.properties.maxItems.maximum })
+    if (!parsed.properties.maxItems.description?.includes(limitNote)) {
+      parsed.properties.maxItems.description = (parsed.properties.maxItems.description ? `${parsed.properties.maxItems.description} ` : '') + limitNote
     }
   }
 
@@ -2057,7 +2098,7 @@ function NavItem({ icon, label, active, onClick, collapsed }: { icon: any, label
     <button 
       onClick={onClick}
       title={collapsed ? label : undefined}
-      className={`w-full flex items-center ${collapsed ? 'justify-center px-0' : 'gap-3 px-4'} py-2.5 rounded-full font-medium text-sm transition-colors ${
+      className={`w-full flex items-center ${collapsed ? 'justify-center px-0' : 'gap-3 px-4'} py-2.5 rounded-full font-medium text-sm transition-colors cursor-pointer ${
         active ? 'bg-[#C2E7FF] text-[#001D35]' : 'text-gray-600 hover:bg-gray-200/50'
       }`}
     >

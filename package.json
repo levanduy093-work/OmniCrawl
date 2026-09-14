@@ -1,17 +1,36 @@
 {
   "name": "omnicrawl",
   "version": "0.0.1",
-  "description": "Local-first web dashboard and Chrome Browser Agent for Shopee and TikTok crawling.",
+  "description": "Local-first actor platform with a web dashboard, Chrome Browser Agent and Electron desktop runtime.",
+  "license": "MIT",
   "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/levanduy093-work/OmniCrawl.git"
+  },
+  "bugs": {
+    "url": "https://github.com/levanduy093-work/OmniCrawl/issues"
+  },
+  "homepage": "https://github.com/levanduy093-work/OmniCrawl#readme",
+  "packageManager": "pnpm@9.15.9",
   "scripts": {
     "build": "pnpm --filter @omnicrawl/database build && pnpm --filter @omnicrawl/sdk build && pnpm --filter @omnicrawl/api build && pnpm --filter @omnicrawl/dashboard build",
     "dev": "pnpm --filter @omnicrawl/database build && pnpm --filter @omnicrawl/sdk build && pnpm --parallel --filter @omnicrawl/api --filter @omnicrawl/dashboard dev",
     "lint": "pnpm --filter @omnicrawl/dashboard lint",
+    "desktop:build": "pnpm --filter @omnicrawl/desktop build",
+    "desktop:dev": "pnpm --filter @omnicrawl/desktop dev",
+    "desktop:start": "pnpm --filter @omnicrawl/desktop start",
     "db:push": "pnpm --filter @omnicrawl/database db:push",
-    "db:seed": "pnpm --filter @omnicrawl/database db:seed"
+    "db:seed": "pnpm --filter @omnicrawl/database db:seed",
+    "check": "pnpm lint && pnpm build && pnpm --filter @omnicrawl/desktop typecheck && pnpm --filter @omnicrawl/api test:proxy-security"
   },
   "devDependencies": {
     "typescript": "^5.4.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "qs": ">=6.16.0"
+    }
   },
   "engines": {
     "node": ">=20.0.0",

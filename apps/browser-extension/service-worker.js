@@ -69,7 +69,7 @@ async function closeTabInternally(tabId) {
 
 async function closeWindowInternally(windowId, fallbackTabIds = []) {
   const normalizedWindowId = Number(windowId);
-  if (!Number.isInteger(normalizedWindowId) || normalizedWindowId <= 0) return;
+  if (!Number.isInteger(normalizedWindowId) || normalizedWindowId <= 0) return false;
 
   const markedTabIds = new Set();
   const mark = (tabId) => {
@@ -88,8 +88,10 @@ async function closeWindowInternally(windowId, fallbackTabIds = []) {
 
   try {
     await chrome.windows.remove(normalizedWindowId);
+    return true;
   } catch {
     for (const tabId of markedTabIds) internallyClosingTabIds.delete(tabId);
+    return false;
   }
 }
 
@@ -873,9 +875,12 @@ function platformTabPatterns(job) {
 }
 
 async function createCrawlerWindow(job) {
+  if (job.platform === 'shopee') {
+    await waitFor(randomShopeeActionDelay());
+  }
   const crawlerWindow = await chrome.windows.create({
     incognito: false,
-    url: 'about:blank',
+    url: searchUrlForJob(job, 0),
     type: 'normal',
     focused: false,
     width: 1100,
@@ -891,13 +896,6 @@ async function createCrawlerWindow(job) {
   job.tabId = tab.id;
   job.windowId = crawlerWindow.id;
   await persistActiveJob();
-  if (job.platform === 'shopee') {
-    await waitFor(randomShopeeActionDelay());
-  }
-  await chrome.tabs.update(tab.id, {
-    active: true,
-    url: searchUrlForJob(job, 0)
-  });
   return {
     tab,
     windowId: crawlerWindow.id,
@@ -3331,10 +3329,14 @@ async function beginDetailPhase() {
   const oldWindowId = activeJob.windowId;
   const oldTabId = activeJob.tabId;
   if (oldWindowId) {
+    const closed = await closeWindowInternally(oldWindowId, [oldTabId]);
+    if (!closed) {
+      await finishJob(false, 'Không thể đóng cửa sổ tìm kiếm trước khi lấy chi tiết.');
+      return;
+    }
     activeJob.tabId = null;
     activeJob.windowId = null;
     await persistActiveJob();
-    await closeWindowInternally(oldWindowId, [oldTabId]);
   }
 
   if (activeJob.platform === 'shopee') {
@@ -3351,9 +3353,10 @@ async function beginDetailPhase() {
   }
 
   await waitFor(SHOPEE_INCOGNITO_REOPEN_DELAY_MS);
+  const firstProductUrl = String(activeJob.products[0]?.url || 'about:blank');
   const crawlerWindow = await chrome.windows.create({
     incognito: true,
-    url: 'about:blank',
+    url: firstProductUrl,
     type: 'normal',
     focused: false,
     width: 1100,
@@ -3413,14 +3416,22 @@ async function recreateShopeeDetailWindow(reason = 'bắt đầu batch chi tiế
   const oldWindowId = activeJob.windowId;
   const oldTabId = activeJob.tabId;
   if (oldWindowId) {
+    const closed = await closeWindowInternally(oldWindowId, [oldTabId]);
+    if (!closed) {
+      await logJob('[Incognito] Không thể đóng cửa sổ cũ; không mở thêm cửa sổ để tránh tab dư.');
+      return false;
+    }
     activeJob.tabId = null;
     activeJob.windowId = null;
-    await closeWindowInternally(oldWindowId, [oldTabId]);
+    await persistActiveJob();
   }
   await waitFor(SHOPEE_INCOGNITO_REOPEN_DELAY_MS);
+  const nextProductUrl = String(
+    activeJob.currentProduct?.url || activeJob.products[activeJob.detailIndex]?.url || 'about:blank'
+  );
   const crawlerWindow = await chrome.windows.create({
     incognito: true,
-    url: 'about:blank',
+    url: nextProductUrl,
     type: 'normal',
     focused: false,
     width: 1100,
@@ -3491,17 +3502,23 @@ async function recoverShopeeBlockedSearch(reason = 'Shopee yêu cầu đăng nh�
   activeJob.searchBlockedRetryCounts[retryKey] = attempts + 1;
   const oldWindowId = Number(activeJob.windowId);
   const oldTabId = Number(activeJob.tabId);
-  activeJob.tabId = null;
-  activeJob.windowId = null;
-  await persistActiveJob();
   await logJob(
     `[Incognito] Phát hiện Login Required ở trang danh sách ${page + 1}. ` +
     `Đóng cửa sổ crawler hiện tại và mở cửa sổ ẩn danh mới ` +
     `(${attempts + 1}/${MAX_SHOPEE_BLOCKED_WINDOW_RETRIES}).`
   );
   if (Number.isInteger(oldWindowId) && oldWindowId > 0) {
-    await closeWindowInternally(oldWindowId, [oldTabId]);
+    const closed = await closeWindowInternally(oldWindowId, [oldTabId]);
+    if (!closed) {
+      activeJob.loginRecoveryInProgress = false;
+      await persistActiveJob();
+      await finishJob(false, 'Không thể đóng cửa sổ crawler cũ trước khi mở lại phiên ẩn danh.');
+      return;
+    }
   }
+  activeJob.tabId = null;
+  activeJob.windowId = null;
+  await persistActiveJob();
 
   await waitFor(SHOPEE_INCOGNITO_REOPEN_DELAY_MS);
   if (!activeJob || activeJob.phase !== 'SEARCH') return;

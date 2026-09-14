@@ -486,7 +486,7 @@ const requireAuth = async (req: any, res: any, next: any) => {
     const decoded = jwt.verify(token, JWT_SECRET) as jwt.JwtPayload;
     const user = await prisma.user.findUnique({
       where: { id: String(decoded.id || '') },
-      select: { id: true, email: true, role: true, tier: true, status: true, credits: true }
+      select: { id: true, email: true, role: true, status: true }
     });
     if (!user) return res.status(401).json({ error: 'User no longer exists' });
     if (user.status !== 'ACTIVE') {
@@ -520,7 +520,7 @@ app.post('/api/auth/register', async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = await prisma.user.create({
-      data: { email: normalizedEmail, password: hashedPassword, credits: 1000 }
+      data: { email: normalizedEmail, password: hashedPassword }
     });
 
     const token = jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
@@ -530,9 +530,7 @@ app.post('/api/auth/register', async (req, res) => {
         id: user.id,
         email: user.email,
         role: user.role,
-        tier: user.tier,
-        status: user.status,
-        credits: user.credits
+        status: user.status
       }
     });
   } catch (err: any) {
@@ -562,9 +560,7 @@ app.post('/api/auth/login', async (req, res) => {
         id: user.id,
         email: user.email,
         role: user.role,
-        tier: user.tier,
-        status: user.status,
-        credits: user.credits
+        status: user.status
       }
     });
   } catch (err: any) {
@@ -579,9 +575,7 @@ app.get('/api/auth/me', requireAuth, async (req: any, res: any) => {
     id: user.id,
     email: user.email,
     role: user.role,
-    tier: user.tier,
-    status: user.status,
-    credits: user.credits
+    status: user.status
   });
 });
 
@@ -595,8 +589,6 @@ app.get('/api/admin/users', requireAuth, requireAdmin, async (_req: any, res: an
       email: true,
       role: true,
       status: true,
-      tier: true,
-      credits: true,
       createdAt: true,
       updatedAt: true,
       _count: { select: { runs: true, actors: true } }
@@ -616,28 +608,18 @@ app.post('/api/admin/users', requireAuth, requireAdmin, async (req: any, res: an
     return res.status(403).json({ error: 'Only a super administrator can grant SUPER_ADMIN' });
   }
   const role = requestedRole;
-  const credits = Number.isInteger(Number(req.body?.credits))
-    ? Math.max(0, Math.min(1_000_000, Number(req.body.credits)))
-    : 1000;
   if (!email || password.length < 8) {
     return res.status(400).json({ error: 'Valid email and password of at least 8 characters are required' });
   }
-  const requestedTier = String(req.body?.tier || 'FREE');
-  if (!['FREE', 'BASIC', 'PRO', 'ENTERPRISE'].includes(requestedTier)) {
-    return res.status(400).json({ error: 'Tier must be FREE, BASIC, PRO or ENTERPRISE' });
-  }
-  const tier = requestedTier;
   try {
     const created = await prisma.user.create({
       data: {
         email,
         password: await bcrypt.hash(password, 10),
         role,
-        tier,
-        status: 'ACTIVE',
-        credits
+        status: 'ACTIVE'
       },
-      select: { id: true, email: true, role: true, tier: true, status: true, credits: true, createdAt: true }
+      select: { id: true, email: true, role: true, status: true, createdAt: true }
     });
     res.status(201).json(created);
   } catch (error: any) {
@@ -652,19 +634,11 @@ app.patch('/api/admin/users/:id', requireAuth, requireAdmin, async (req: any, re
 
   const role = req.body?.role;
   const status = req.body?.status;
-  const tier = req.body?.tier;
-  const credits = req.body?.credits;
   if (role !== undefined && !['SUPER_ADMIN', 'ADMIN', 'USER'].includes(role)) {
     return res.status(400).json({ error: 'Role must be SUPER_ADMIN, ADMIN or USER' });
   }
   if (status !== undefined && !['ACTIVE', 'SUSPENDED'].includes(status)) {
     return res.status(400).json({ error: 'Status must be ACTIVE or SUSPENDED' });
-  }
-  if (tier !== undefined && !['FREE', 'BASIC', 'PRO', 'ENTERPRISE'].includes(tier)) {
-    return res.status(400).json({ error: 'Tier must be FREE, BASIC, PRO or ENTERPRISE' });
-  }
-  if (credits !== undefined && (!Number.isInteger(Number(credits)) || Number(credits) < 0 || Number(credits) > 1_000_000)) {
-    return res.status(400).json({ error: 'Credits must be an integer from 0 to 1000000' });
   }
   if (target.role === 'SUPER_ADMIN' && req.user.role !== 'SUPER_ADMIN') {
     return res.status(403).json({ error: 'Only a super administrator can modify a SUPER_ADMIN account' });
@@ -705,17 +679,13 @@ app.patch('/api/admin/users/:id', requireAuth, requireAdmin, async (req: any, re
     where: { id: target.id },
     data: {
       ...(role !== undefined ? { role } : {}),
-      ...(status !== undefined ? { status } : {}),
-      ...(tier !== undefined ? { tier } : {}),
-      ...(credits !== undefined ? { credits: Number(credits) } : {})
+      ...(status !== undefined ? { status } : {})
     },
     select: {
       id: true,
       email: true,
       role: true,
       status: true,
-      tier: true,
-      credits: true,
       createdAt: true,
       updatedAt: true,
       _count: { select: { runs: true, actors: true } }
@@ -725,11 +695,6 @@ app.patch('/api/admin/users/:id', requireAuth, requireAdmin, async (req: any, re
 });
 
 // --- CORE ROUTES ---
-
-function applyTierLimits(schemaString: string | null, _tier?: string, _role?: string): string | null {
-  // Open-source edition: no tier-based limits
-  return schemaString;
-}
 
 // List all actors
 app.get('/api/actors', requireAuth, async (req: any, res) => {
@@ -741,10 +706,7 @@ app.get('/api/actors', requireAuth, async (req: any, res) => {
   });
   const adjustedActors = actors.map(actor => ({
     ...actor,
-    inputSchema: compactActorInputSchema(
-      actor.name,
-      applyTierLimits(actor.inputSchema, req.user.tier || 'FREE', req.user.role)
-    ),
+    inputSchema: compactActorInputSchema(actor.name, actor.inputSchema),
     outputSchema: compactActorOutputSchema(actor.name, actor.outputSchema)
   }));
   res.json(adjustedActors);
@@ -776,10 +738,7 @@ app.post('/api/actors/:id/run', requireAuth, async (req: any, res: any) => {
       }
     }
     const input = normalizeActorInput(
-      compactActorInputSchema(
-        actor.name,
-        applyTierLimits(actor.inputSchema, req.user.tier || 'FREE', req.user.role)
-      ),
+      compactActorInputSchema(actor.name, actor.inputSchema),
       rawInput
     );
     if (SHOPEE_ACTOR_NAMES.includes(actor.name)) delete input.maxReviewsPerProduct;

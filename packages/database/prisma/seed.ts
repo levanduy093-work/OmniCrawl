@@ -10,11 +10,11 @@ const prisma = new PrismaClient();
 async function main() {
   console.log('Start seeding...');
   
-  const adminEmail = process.env.ADMIN_EMAIL || 'admin@omnicrawl.local';
-  const rawAdminPassword = process.env.ADMIN_PASSWORD || 'password123';
+  const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase() || 'admin@omnicrawl.local';
+  const rawAdminPassword = process.env.ADMIN_PASSWORD || '';
 
-  if (!process.env.ADMIN_PASSWORD) {
-    console.warn('[SECURITY] ADMIN_PASSWORD not specified in environment. Using default password "password123". Change this in production!');
+  if (rawAdminPassword.length < 12) {
+    throw new Error('ADMIN_PASSWORD must be set and contain at least 12 characters before running db:seed.');
   }
 
   // Create a default user if none exists
@@ -38,7 +38,6 @@ async function main() {
       password: hashedPassword,
       role: 'ADMIN',
       status: 'ACTIVE',
-      credits: 1000,
     },
   });
 
